@@ -1,0 +1,50 @@
+{
+  "version": 1,
+  "cameras": [
+    {
+      "vid": "0BDA",
+      "pid": "300A",
+      "model": "JMC1",
+      "width": 1920,
+      "height": 1200,
+      "fps": 10,
+      "fourcc": "MJPG",
+      "exposure": {
+        "min": -12,
+        "max": -7,
+        "step": 1,
+        "default": -6
+      },
+      "backlight": {
+        "min": 5,
+        "max": 25,
+        "step": 1,
+        "default": 10
+      }
+    },
+    {
+      "vid": "0BDA",
+      "pid": "300B",
+      "model": "JMC1",
+      "width": 1920,
+      "height": 1200,
+      "fps": 10,
+      "fourcc": "MJPG",
+      "exposure": {
+        "min": -12,
+        "max": -7,
+        "step": 1,
+        "default": -6
+      },
+      "backlight": {
+        "min": 5,
+        "max": 25,
+        "step": 1,
+        "default": 10
+      }
+    }
+  ],
+  "scan": {
+    "lastCalibrationPath": "C:/Program Files (x86)/JMStudio2/2.6.15.0225/calib.txt"
+  }
+}

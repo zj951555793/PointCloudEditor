@@ -1,0 +1,66 @@
+# CMake / build directories
+build/
+build-*/
+cmake-build-*/
+out/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+CTestTestfile.cmake
+Makefile
+compile_commands.json
+
+# Visual Studio
+.vs/
+*.sln
+*.vcxproj
+*.vcxproj.filters
+*.vcxproj.user
+*.user
+*.pdb
+*.ilk
+*.exp
+*.lib
+*.obj
+*.idb
+*.tlog
+x64/
+x86/
+Debug/
+Release/
+RelWithDebInfo/
+MinSizeRel/
+
+# Qt Creator / Qt generated files
+*.pro.user
+*.pro.user.*
+CMakeLists.txt.user
+CMakeLists.txt.user.*
+.qtc_clangd/
+*.qmlc
+moc_*.cpp
+moc_*.h
+qrc_*.cpp
+ui_*.h
+
+# Runtime deployment / binaries
+*.exe
+*.dll
+*.so
+*.so.*
+*.dylib
+platforms/
+imageformats/
+styles/
+tls/
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+
+# Test/editor generated output
+*_edited.ply
