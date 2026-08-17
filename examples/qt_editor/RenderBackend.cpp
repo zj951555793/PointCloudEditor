@@ -406,7 +406,7 @@ public:
 
 std::unique_ptr<IRenderBackend> createRenderBackend()
 {
-#ifdef PCEDITOR_RENDER_GLES31
+#ifdef JMENGINE_RENDER_GLES31
     return std::make_unique<Gles31Backend>();
 #else
     return std::make_unique<DesktopGl21Backend>();

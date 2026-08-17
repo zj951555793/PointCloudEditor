@@ -67,6 +67,6 @@ public:
 };
 
 // 根据 CMake 选定的目标平台创建后端。
-// PCEDITOR_RENDER_GLES31：RK3588 / ARM64 Linux
-// PCEDITOR_RENDER_DESKTOP_GL21：Windows / x86 Desktop
+// JMENGINE_RENDER_GLES31：RK3588 / ARM64 Linux
+// JMENGINE_RENDER_DESKTOP_GL21：Windows / x86 Desktop
 std::unique_ptr<IRenderBackend> createRenderBackend();

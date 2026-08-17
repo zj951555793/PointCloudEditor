@@ -34,7 +34,7 @@ MainWindow::MainWindow(const QString& initialFile, QWidget* parent)
     createMenus();
     createToolbar();
 
-    setWindowTitle(QString::fromUtf8("PointCloudEditor - 多模型网格/点云编辑器"));
+    setWindowTitle(QString::fromUtf8("JMEngine - 多模型网格/点云编辑器"));
     resize(1380, 860);
     statusBar()->showMessage(QString::fromUtf8(
         "左键绕模型中心旋转 | Ctrl+左键执行当前选择工具 | Shift追加 / Alt减选 | Delete 删除高亮"));
@@ -154,11 +154,11 @@ void MainWindow::createMenus() {
     modelMenu->addAction(removeModelAction_);
 
     QMenu* helpMenu = menuBar()->addMenu(QString::fromUtf8("帮助(&H)"));
-    QAction* about = helpMenu->addAction(QString::fromUtf8("关于 PointCloudEditor"));
+    QAction* about = helpMenu->addAction(QString::fromUtf8("关于 JMEngine"));
     connect(about, &QAction::triggered, this, [this] {
         QMessageBox::information(this, QString::fromUtf8("关于"),
             QString::fromUtf8(
-                "PointCloudEditor 1.8.0\n"
+                "JMEngine 1.8.0\n"
                 "Core 无 Qt 依赖；OBJ/PLY + OpenMP；多模型；表面/穿透选择。"));
     });
 }

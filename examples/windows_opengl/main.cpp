@@ -14,9 +14,9 @@
 
 #include "../common/ExampleUtils.h"
 
-#include <pceditor/ColorPicking24.h>
-#include <pceditor/PointCloudEditor.h>
-#include <pceditor/PointCloudIO.h>
+#include <JMEngine/ColorPicking24.h>
+#include <JMEngine/JMEngine.h>
+#include <JMEngine/PointCloudIO.h>
 
 #include <algorithm>
 #include <cstdint>
@@ -31,9 +31,9 @@ HWND g_hwnd = nullptr;
 HDC g_dc = nullptr;
 HGLRC g_glrc = nullptr;
 
-std::shared_ptr<pceditor::PointCloud> g_cloud;
-std::unique_ptr<pceditor::PointCloudEditor> g_editor;
-pceditor::Mat4f g_mvp = pceditor::Mat4f::identity();
+std::shared_ptr<JMEngine::PointCloud> g_cloud;
+std::unique_ptr<JMEngine::Engine> g_editor;
+JMEngine::Mat4f g_mvp = JMEngine::Mat4f::identity();
 
 int g_width = 1000;
 int g_height = 700;
@@ -44,7 +44,7 @@ POINT g_dragEnd{0, 0};
 // Windows OpenGL 2.1 示例的高亮选择。
 // 每个点 1 byte；1000 万点约 10 MB，可接受，且高亮判断 O(1)。
 std::vector<std::uint8_t> g_selectedMask;
-std::vector<pceditor::PointId> g_selectedIds;
+std::vector<JMEngine::PointId> g_selectedIds;
 
 // 从打包的 RGBA 中解出一个颜色通道。
 float colorByte(std::uint32_t rgba, unsigned shift) {
@@ -140,7 +140,7 @@ void render() {
     if (g_cloud) {
         glBegin(GL_POINTS);
         for (const auto& p : g_cloud->points()) {
-            if ((p.flags & pceditor::PointDeleted) != 0)
+            if ((p.flags & JMEngine::PointDeleted) != 0)
                 continue;
             const std::size_t id = static_cast<std::size_t>(&p - g_cloud->points().data());
             if (id < g_selectedMask.size() && g_selectedMask[id]) {
@@ -162,8 +162,8 @@ void render() {
 // 注意：这里故意不依赖 FBO。OpenGL 2.1 本身不保证核心 FBO API，而 Windows 系统 gl.h
 // 只直接声明到 OpenGL 1.1。为了让示例在老驱动/兼容上下文中也能开箱验证 GPU Picking，
 // 我们把 ID 颜色画到“当前后缓冲”，读取完成后下一次正常 render() 会立刻覆盖它，用户看不到 ID 图。
-std::vector<pceditor::PointId> gpuPickRectangleOpenGL21() {
-    std::vector<pceditor::PointId> out;
+std::vector<JMEngine::PointId> gpuPickRectangleOpenGL21() {
+    std::vector<JMEngine::PointId> out;
     if (!g_cloud || !g_dc || g_width <= 0 || g_height <= 0)
         return out;
 
@@ -172,7 +172,7 @@ std::vector<pceditor::PointId> gpuPickRectangleOpenGL21() {
         return out;
 
     // RGB24 中 0 保留为背景，所以有效对象 id 最大为 0xFFFFFE。
-    if (pointCount - 1u > static_cast<std::size_t>(pceditor::kColorPicking24MaxObjectId)) {
+    if (pointCount - 1u > static_cast<std::size_t>(JMEngine::kColorPicking24MaxObjectId)) {
         std::cerr << "OpenGL 2.1 RGB24 Picking: 当前点数超过单 Pass 24-bit ID 上限，"
                      "请使用 Block Picking。pointCount="
                   << pointCount << '\n';
@@ -219,9 +219,9 @@ std::vector<pceditor::PointId> gpuPickRectangleOpenGL21() {
     const auto& points = g_cloud->points();
     for (std::uint32_t id = 0; id < static_cast<std::uint32_t>(points.size()); ++id) {
         const auto& p = points[id];
-        if ((p.flags & pceditor::PointDeleted) != 0)
+        if ((p.flags & JMEngine::PointDeleted) != 0)
             continue;
-        const auto c = pceditor::encodeColorId24(id);
+        const auto c = JMEngine::encodeColorId24(id);
         glColor3ub(c.r, c.g, c.b);
         glVertex3f(p.position.x, p.position.y, p.position.z);
     }
@@ -260,7 +260,7 @@ std::vector<pceditor::PointId> gpuPickRectangleOpenGL21() {
     std::vector<std::uint8_t> hit(pointCount, 0);
     for (std::size_t i = 0; i + 2 < pixels.size(); i += 3) {
         std::uint32_t id = 0;
-        if (!pceditor::decodeColorId24(pixels[i], pixels[i + 1], pixels[i + 2], id))
+        if (!JMEngine::decodeColorId24(pixels[i], pixels[i + 1], pixels[i + 2], id))
             continue;
         if (id < pointCount)
             hit[id] = 1;
@@ -336,7 +336,7 @@ LRESULT CALLBACK windowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             g_editor->redo();
         } else if (wParam == 'S') {
             std::string error;
-            if (!pceditor::PointCloudIO::savePly(*g_cloud, "edited_output.ply", &error))
+            if (!JMEngine::PointCloudIO::savePly(*g_cloud, "edited_output.ply", &error))
                 std::cerr << "保存失败: " << error << '\n';
             else
                 std::cout << "已保存 edited_output.ply\n";
@@ -366,41 +366,41 @@ int main(int argc, char* argv[]) {
     // 1. VS/CMake 链接时入口就是标准 main，不再受 WinMain/wWinMain 配置影响；
     // 2. 原生 OpenGL 示例可以直接看到测试日志；
     // 3. enableUtf8Console + consolePrintUtf8 负责 Windows 中文输出。
-    pceditor::example::enableUtf8Console();
+    JMEngine::example::enableUtf8Console();
     const std::string fileName = argc > 1 ? std::string(argv[1]) : std::string{};
 
-    g_cloud = pceditor::example::loadCloudOrEmpty(fileName);
+    g_cloud = JMEngine::example::loadCloudOrEmpty(fileName);
     if (!g_cloud)
         return 2;
-    g_editor = std::make_unique<pceditor::PointCloudEditor>(g_cloud);
+    g_editor = std::make_unique<JMEngine::Engine>(g_cloud);
     g_selectedMask.assign(g_cloud->size(), 0);
-    g_mvp = pceditor::example::makeFitMvp(*g_cloud);
+    g_mvp = JMEngine::example::makeFitMvp(*g_cloud);
 
     HINSTANCE instance = GetModuleHandleW(nullptr);
     WNDCLASSW wc{};
     wc.style = CS_OWNDC;
     wc.lpfnWndProc = windowProc;
     wc.hInstance = instance;
-    wc.lpszClassName = L"PointCloudEditorWglTest";
+    wc.lpszClassName = L"JMEngineWglTest";
     wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
     if (!RegisterClassW(&wc) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS)
         return 3;
 
-    g_hwnd = CreateWindowExW(0, wc.lpszClassName, L"PointCloudEditor - Windows OpenGL Test",
+    g_hwnd = CreateWindowExW(0, wc.lpszClassName, L"JMEngine - Windows OpenGL Test",
                              WS_OVERLAPPEDWINDOW | WS_VISIBLE, CW_USEDEFAULT, CW_USEDEFAULT, g_width, g_height, nullptr,
                              nullptr, instance, nullptr);
     if (!g_hwnd)
         return 4;
 
     if (!createWglContext(g_hwnd)) {
-        MessageBoxW(g_hwnd, L"Create WGL Context failed", L"PointCloudEditor", MB_ICONERROR);
+        MessageBoxW(g_hwnd, L"Create WGL Context failed", L"JMEngine", MB_ICONERROR);
         return 5;
     }
 
     ShowWindow(g_hwnd, SW_SHOWDEFAULT);
     UpdateWindow(g_hwnd);
 
-    pceditor::example::consolePrintUtf8("Windows WGL 示例已启动：OpenGL 2.1 兼容 RGB24 GPU "
+    JMEngine::example::consolePrintUtf8("Windows WGL 示例已启动：OpenGL 2.1 兼容 RGB24 GPU "
                                         "Picking。左键框选只高亮，Delete 删除，Z/Y 撤销重做，S 保存。\n");
 
     MSG msg{};

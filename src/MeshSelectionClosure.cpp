@@ -1,4 +1,4 @@
-#include <pceditor/MeshSelectionClosure.h>
+#include <JMEngine/MeshSelectionClosure.h>
 
 #include <algorithm>
 #include <cmath>
@@ -7,7 +7,7 @@
 #include <unordered_map>
 #include <vector>
 
-namespace pceditor {
+namespace JMEngine {
 namespace {
 
 struct EdgeKey {
@@ -161,4 +161,4 @@ std::vector<TriangleId> MeshSelectionClosure::expandSurfaceSelection(const Trian
     return out;
 }
 
-} // namespace pceditor
+} // namespace JMEngine

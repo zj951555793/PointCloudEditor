@@ -1,7 +1,7 @@
 #include "GlesPointCloudWidget.h"
 
-#include <pceditor/CpuSelector.h>
-#include <pceditor/PointCloudIO.h>
+#include <JMEngine/CpuSelector.h>
+#include <JMEngine/PointCloudIO.h>
 
 #include <QDebug>
 #include <QEvent>
@@ -155,8 +155,8 @@ layout(location=0) out highp uint outId;
 void main() { outId = vTriangleId; }
 )GLSL";
 
-bool bakeTexture(const pceditor::ObjAppearanceData& appearance,
-                 pceditor::PointCloud& cloud)
+bool bakeTexture(const JMEngine::ObjAppearanceData& appearance,
+                 JMEngine::PointCloud& cloud)
 {
     if (appearance.diffuseTexturePath.empty() || !appearance.hasTextureCoordinates()) return false;
     QImage image(QString::fromUtf8(appearance.diffuseTexturePath.c_str()));
@@ -169,7 +169,7 @@ bool bakeTexture(const pceditor::ObjAppearanceData& appearance,
     if (width <= 0 || height <= 0 || !bits) return false;
 
     const std::size_t count = std::min(cloud.size(), appearance.vertexUv.size());
-#ifdef PCEDITOR_USE_OPENMP
+#ifdef JMENGINE_USE_OPENMP
 #pragma omp parallel for schedule(static)
 #endif
     for (std::int64_t ii = 0; ii < static_cast<std::int64_t>(count); ++ii) {
@@ -187,7 +187,7 @@ bool bakeTexture(const pceditor::ObjAppearanceData& appearance,
     return true;
 }
 
-std::vector<pceditor::PointId> sortedUnique(std::vector<pceditor::PointId> ids)
+std::vector<JMEngine::PointId> sortedUnique(std::vector<JMEngine::PointId> ids)
 {
     std::sort(ids.begin(), ids.end());
     ids.erase(std::unique(ids.begin(), ids.end()), ids.end());
@@ -211,8 +211,8 @@ bool pointInPolygon(const QPoint& p, const std::vector<QPoint>& polygon)
 } // namespace
 
 GlesPointCloudWidget::Model::Model(QString p,
-                                   std::shared_ptr<pceditor::PointCloud> c,
-                                   pceditor::ObjMeshData m,
+                                   std::shared_ptr<JMEngine::PointCloud> c,
+                                   JMEngine::ObjMeshData m,
                                    bool mesh)
     : path(std::move(p)), meshMode(mesh), cloud(std::move(c)), editor(cloud), mesh(std::move(m))
 {
@@ -279,15 +279,15 @@ void GlesPointCloudWidget::loadModelAsync(const QString& path)
         if (!self) return;
         const std::string file = abs.toStdString();
         const std::string ext = std::filesystem::path(file).extension().string();
-        std::shared_ptr<pceditor::PointCloud> cloud;
-        pceditor::ObjMeshData mesh;
+        std::shared_ptr<JMEngine::PointCloud> cloud;
+        JMEngine::ObjMeshData mesh;
         bool meshMode = false;
         QString message;
 
         if (ext == ".obj" || ext == ".OBJ") {
-            pceditor::ObjModelData obj;
+            JMEngine::ObjModelData obj;
             std::string msg;
-            if (pceditor::ObjModelLoader::load(file, obj, &msg)) {
+            if (JMEngine::ObjModelLoader::load(file, obj, &msg)) {
                 cloud = obj.cloud;
                 mesh = std::move(obj.mesh);
                 meshMode = !mesh.empty();
@@ -296,7 +296,7 @@ void GlesPointCloudWidget::loadModelAsync(const QString& path)
             }
         } else {
             std::string msg;
-            cloud = pceditor::PointCloudIO::load(file, &msg);
+            cloud = JMEngine::PointCloudIO::load(file, &msg);
             message = QString::fromUtf8(msg.c_str());
         }
 
@@ -307,7 +307,7 @@ void GlesPointCloudWidget::loadModelAsync(const QString& path)
             initialVisible = mesh.triangleIndices;
             const std::size_t triCount = mesh.triangleCount();
             initialPick.resize(triCount * 3u);
-#ifdef PCEDITOR_USE_OPENMP
+#ifdef JMENGINE_USE_OPENMP
 #pragma omp parallel for schedule(static)
 #endif
             for (std::int64_t tt = 0; tt < static_cast<std::int64_t>(triCount); ++tt) {
@@ -391,7 +391,7 @@ void GlesPointCloudWidget::initializeGL()
     const char* vendor = reinterpret_cast<const char*>(glGetString(GL_VENDOR));
     const char* renderer = reinterpret_cast<const char*>(glGetString(GL_RENDERER));
     const char* version = reinterpret_cast<const char*>(glGetString(GL_VERSION));
-    qInfo() << "[PointCloudEditor/RK3588] GLES=" << (ctx && ctx->isOpenGLES())
+    qInfo() << "[JMEngine/RK3588] GLES=" << (ctx && ctx->isOpenGLES())
             << "format=" << fmt.majorVersion() << fmt.minorVersion()
             << "vendor=" << (vendor ? vendor : "?")
             << "renderer=" << (renderer ? renderer : "?")
@@ -488,12 +488,12 @@ void GlesPointCloudWidget::createModelGl(Model& m)
     glBindVertexArray(m.vao);
 
     const GLsizeiptr n = static_cast<GLsizeiptr>(m.cloud->size());
-    glGenBuffers(1,&m.positionVbo); glBindBuffer(GL_ARRAY_BUFFER,m.positionVbo); glBufferData(GL_ARRAY_BUFFER,n*sizeof(pceditor::Vec3f),nullptr,GL_DYNAMIC_DRAW);
-    glEnableVertexAttribArray(0); glVertexAttribPointer(0,3,GL_FLOAT,GL_FALSE,sizeof(pceditor::Vec3f),nullptr);
+    glGenBuffers(1,&m.positionVbo); glBindBuffer(GL_ARRAY_BUFFER,m.positionVbo); glBufferData(GL_ARRAY_BUFFER,n*sizeof(JMEngine::Vec3f),nullptr,GL_DYNAMIC_DRAW);
+    glEnableVertexAttribArray(0); glVertexAttribPointer(0,3,GL_FLOAT,GL_FALSE,sizeof(JMEngine::Vec3f),nullptr);
     glGenBuffers(1,&m.colorVbo); glBindBuffer(GL_ARRAY_BUFFER,m.colorVbo); glBufferData(GL_ARRAY_BUFFER,n*sizeof(std::uint32_t),nullptr,GL_DYNAMIC_DRAW);
     glEnableVertexAttribArray(1); glVertexAttribIPointer(1,1,GL_UNSIGNED_INT,sizeof(std::uint32_t),nullptr);
-    glGenBuffers(1,&m.normalVbo); glBindBuffer(GL_ARRAY_BUFFER,m.normalVbo); glBufferData(GL_ARRAY_BUFFER,n*sizeof(pceditor::Vec3f),nullptr,GL_DYNAMIC_DRAW);
-    glEnableVertexAttribArray(2); glVertexAttribPointer(2,3,GL_FLOAT,GL_FALSE,sizeof(pceditor::Vec3f),nullptr);
+    glGenBuffers(1,&m.normalVbo); glBindBuffer(GL_ARRAY_BUFFER,m.normalVbo); glBufferData(GL_ARRAY_BUFFER,n*sizeof(JMEngine::Vec3f),nullptr,GL_DYNAMIC_DRAW);
+    glEnableVertexAttribArray(2); glVertexAttribPointer(2,3,GL_FLOAT,GL_FALSE,sizeof(JMEngine::Vec3f),nullptr);
 
     // PointId 直接等于原始数组下标，编辑期间软删除保证 ID 稳定。
     glGenBuffers(1,&m.pointIdVbo); glBindBuffer(GL_ARRAY_BUFFER,m.pointIdVbo);
@@ -512,8 +512,8 @@ void GlesPointCloudWidget::createModelGl(Model& m)
 
         glGenVertexArrays(1,&m.pickVao); glBindVertexArray(m.pickVao);
         glGenBuffers(1,&m.pickPositionVbo); glBindBuffer(GL_ARRAY_BUFFER,m.pickPositionVbo);
-        glBufferData(GL_ARRAY_BUFFER,static_cast<GLsizeiptr>(m.expandedPickVertices.size()*sizeof(pceditor::Vec3f)),nullptr,GL_DYNAMIC_DRAW);
-        glEnableVertexAttribArray(0); glVertexAttribPointer(0,3,GL_FLOAT,GL_FALSE,sizeof(pceditor::Vec3f),nullptr);
+        glBufferData(GL_ARRAY_BUFFER,static_cast<GLsizeiptr>(m.expandedPickVertices.size()*sizeof(JMEngine::Vec3f)),nullptr,GL_DYNAMIC_DRAW);
+        glEnableVertexAttribArray(0); glVertexAttribPointer(0,3,GL_FLOAT,GL_FALSE,sizeof(JMEngine::Vec3f),nullptr);
         glGenBuffers(1,&m.pickIdVbo); glBindBuffer(GL_ARRAY_BUFFER,m.pickIdVbo);
         glBufferData(GL_ARRAY_BUFFER,static_cast<GLsizeiptr>(m.expandedPickVertices.size()*sizeof(std::uint32_t)),nullptr,GL_DYNAMIC_DRAW);
         glEnableVertexAttribArray(1); glVertexAttribIPointer(1,1,GL_UNSIGNED_INT,sizeof(std::uint32_t),nullptr);
@@ -544,14 +544,14 @@ void GlesPointCloudWidget::uploadModelIncremental(Model& m, std::size_t& budget)
     const auto& pts = m.cloud->points();
     if (m.uploadPointCursor < pts.size() && budget > 0) {
         const std::size_t count = std::min(chunkPoints, pts.size()-m.uploadPointCursor);
-        std::vector<pceditor::Vec3f> pos(count), normal(count);
+        std::vector<JMEngine::Vec3f> pos(count), normal(count);
         std::vector<std::uint32_t> color(count), flags(count), sel(count);
         for (std::size_t i=0;i<count;++i) {
             const auto& p=pts[m.uploadPointCursor+i]; pos[i]=p.position; normal[i]=p.normal; color[i]=p.rgba; flags[i]=p.flags; sel[i]=m.selectionMask[m.uploadPointCursor+i];
         }
         const GLintptr off = static_cast<GLintptr>(m.uploadPointCursor);
-        glBindBuffer(GL_ARRAY_BUFFER,m.positionVbo); glBufferSubData(GL_ARRAY_BUFFER,off*sizeof(pceditor::Vec3f),count*sizeof(pceditor::Vec3f),pos.data());
-        glBindBuffer(GL_ARRAY_BUFFER,m.normalVbo); glBufferSubData(GL_ARRAY_BUFFER,off*sizeof(pceditor::Vec3f),count*sizeof(pceditor::Vec3f),normal.data());
+        glBindBuffer(GL_ARRAY_BUFFER,m.positionVbo); glBufferSubData(GL_ARRAY_BUFFER,off*sizeof(JMEngine::Vec3f),count*sizeof(JMEngine::Vec3f),pos.data());
+        glBindBuffer(GL_ARRAY_BUFFER,m.normalVbo); glBufferSubData(GL_ARRAY_BUFFER,off*sizeof(JMEngine::Vec3f),count*sizeof(JMEngine::Vec3f),normal.data());
         glBindBuffer(GL_ARRAY_BUFFER,m.colorVbo); glBufferSubData(GL_ARRAY_BUFFER,off*sizeof(std::uint32_t),count*sizeof(std::uint32_t),color.data());
         glBindBuffer(GL_ARRAY_BUFFER,m.flagsVbo); glBufferSubData(GL_ARRAY_BUFFER,off*sizeof(std::uint32_t),count*sizeof(std::uint32_t),flags.data());
         glBindBuffer(GL_ARRAY_BUFFER,m.selectionVbo); glBufferSubData(GL_ARRAY_BUFFER,off*sizeof(std::uint32_t),count*sizeof(std::uint32_t),sel.data());
@@ -570,9 +570,9 @@ void GlesPointCloudWidget::uploadModelIncremental(Model& m, std::size_t& budget)
 
     if (m.meshMode && m.uploadPickCursor < m.expandedPickVertices.size() && budget>0) {
         const std::size_t count=std::min<std::size_t>(300000,m.expandedPickVertices.size()-m.uploadPickCursor);
-        std::vector<pceditor::Vec3f> pos(count); std::vector<std::uint32_t> ids(count);
+        std::vector<JMEngine::Vec3f> pos(count); std::vector<std::uint32_t> ids(count);
         for(std::size_t i=0;i<count;++i){ const auto& v=m.expandedPickVertices[m.uploadPickCursor+i]; pos[i]=v.position; ids[i]=v.id; }
-        glBindBuffer(GL_ARRAY_BUFFER,m.pickPositionVbo); glBufferSubData(GL_ARRAY_BUFFER,static_cast<GLintptr>(m.uploadPickCursor*sizeof(pceditor::Vec3f)),count*sizeof(pceditor::Vec3f),pos.data());
+        glBindBuffer(GL_ARRAY_BUFFER,m.pickPositionVbo); glBufferSubData(GL_ARRAY_BUFFER,static_cast<GLintptr>(m.uploadPickCursor*sizeof(JMEngine::Vec3f)),count*sizeof(JMEngine::Vec3f),pos.data());
         glBindBuffer(GL_ARRAY_BUFFER,m.pickIdVbo); glBufferSubData(GL_ARRAY_BUFFER,static_cast<GLintptr>(m.uploadPickCursor*sizeof(std::uint32_t)),count*sizeof(std::uint32_t),ids.data());
         m.uploadPickCursor+=count; m.pickVertexCount=static_cast<GLsizei>(m.uploadPickCursor);
         budget = budget > count*16u ? budget-count*16u : 0;
@@ -640,7 +640,7 @@ void GlesPointCloudWidget::drawGestureOverlay()
     }
 }
 
-pceditor::Mat4f GlesPointCloudWidget::currentMvp() const
+JMEngine::Mat4f GlesPointCloudWidget::currentMvp() const
 {
     return camera_.mvp(std::max(1,int(width()*devicePixelRatioF())),std::max(1,int(height()*devicePixelRatioF())));
 }
@@ -658,7 +658,7 @@ void GlesPointCloudWidget::uploadSelectionMask(Model& m)
     glBufferSubData(GL_ARRAY_BUFFER,0,static_cast<GLsizeiptr>(m.selectionMask.size()*sizeof(std::uint32_t)),m.selectionMask.data());
 }
 
-void GlesPointCloudWidget::uploadChangedFlags(Model& m, const std::vector<pceditor::PointId>& ids)
+void GlesPointCloudWidget::uploadChangedFlags(Model& m, const std::vector<JMEngine::PointId>& ids)
 {
     if(!m.glCreated || !m.cloud) return;
     // 合并连续 ID，减少 glBufferSubData 调用次数。
@@ -681,25 +681,25 @@ void GlesPointCloudWidget::clearSelection()
     makeCurrent(); uploadSelectionMask(*m); doneCurrent(); update();
 }
 
-void GlesPointCloudWidget::applySelection(Model& m, std::vector<pceditor::PointId> ids, Qt::KeyboardModifiers modifiers)
+void GlesPointCloudWidget::applySelection(Model& m, std::vector<JMEngine::PointId> ids, Qt::KeyboardModifiers modifiers)
 {
     ids=sortedUnique(std::move(ids));
-    ids.erase(std::remove_if(ids.begin(),ids.end(),[&](auto id){return id>=m.cloud->size() || (m.cloud->points()[id].flags&pceditor::PointDeleted)!=0;}),ids.end());
+    ids.erase(std::remove_if(ids.begin(),ids.end(),[&](auto id){return id>=m.cloud->size() || (m.cloud->points()[id].flags&JMEngine::PointDeleted)!=0;}),ids.end());
     if(modifiers.testFlag(Qt::ShiftModifier)) {
         auto all=m.selectedIds; all.insert(all.end(),ids.begin(),ids.end()); m.selectedIds=sortedUnique(std::move(all));
     } else if(modifiers.testFlag(Qt::AltModifier)) {
-        std::vector<pceditor::PointId> out; std::set_difference(m.selectedIds.begin(),m.selectedIds.end(),ids.begin(),ids.end(),std::back_inserter(out)); m.selectedIds=std::move(out);
+        std::vector<JMEngine::PointId> out; std::set_difference(m.selectedIds.begin(),m.selectedIds.end(),ids.begin(),ids.end(),std::back_inserter(out)); m.selectedIds=std::move(out);
     } else m.selectedIds=std::move(ids);
     std::fill(m.selectionMask.begin(),m.selectionMask.end(),0u); for(auto id:m.selectedIds) if(id<m.selectionMask.size()) m.selectionMask[id]=1u;
     m.editor.select(m.selectedIds);
     makeCurrent(); uploadSelectionMask(m); doneCurrent(); update();
 }
 
-std::vector<pceditor::PointId> GlesPointCloudWidget::filterPickedIds(const Model& m,const std::vector<std::uint32_t>& raw,bool triangleIds) const
+std::vector<JMEngine::PointId> GlesPointCloudWidget::filterPickedIds(const Model& m,const std::vector<std::uint32_t>& raw,bool triangleIds) const
 {
-    std::vector<pceditor::PointId> out;
-    if(!triangleIds){ for(auto id:raw) if(id!=pceditor::kInvalidPointId && id<m.cloud->size()) out.push_back(id); return sortedUnique(std::move(out)); }
-    for(auto tid:raw){ if(tid==pceditor::kInvalidPointId || tid>=m.mesh.triangleCount()) continue; const std::size_t b=std::size_t(tid)*3u; out.push_back(m.mesh.triangleIndices[b]); out.push_back(m.mesh.triangleIndices[b+1]); out.push_back(m.mesh.triangleIndices[b+2]); }
+    std::vector<JMEngine::PointId> out;
+    if(!triangleIds){ for(auto id:raw) if(id!=JMEngine::kInvalidPointId && id<m.cloud->size()) out.push_back(id); return sortedUnique(std::move(out)); }
+    for(auto tid:raw){ if(tid==JMEngine::kInvalidPointId || tid>=m.mesh.triangleCount()) continue; const std::size_t b=std::size_t(tid)*3u; out.push_back(m.mesh.triangleIndices[b]); out.push_back(m.mesh.triangleIndices[b+1]); out.push_back(m.mesh.triangleIndices[b+2]); }
     return sortedUnique(std::move(out));
 }
 
@@ -714,7 +714,7 @@ void GlesPointCloudWidget::performSurfaceSelection(Qt::KeyboardModifiers modifie
     makeCurrent();
     createPickingFramebuffer(std::max(1,int(width()*devicePixelRatioF())),std::max(1,int(height()*devicePixelRatioF())));
     glBindFramebuffer(GL_FRAMEBUFFER,pickFbo_); glViewport(0,0,pickWidth_,pickHeight_);
-    const GLuint clearId=pceditor::kInvalidPointId; glClearBufferuiv(GL_COLOR,0,&clearId); glClear(GL_DEPTH_BUFFER_BIT);
+    const GLuint clearId=JMEngine::kInvalidPointId; glClearBufferuiv(GL_COLOR,0,&clearId); glClear(GL_DEPTH_BUFFER_BIT);
     glEnable(GL_DEPTH_TEST); glDisable(GL_BLEND); glDisable(GL_DITHER);
     const auto mvp=currentMvp();
     bool tri=false;
@@ -747,10 +747,10 @@ void GlesPointCloudWidget::performSurfaceSelection(Qt::KeyboardModifiers modifie
 void GlesPointCloudWidget::performThroughSelection(Qt::KeyboardModifiers modifiers)
 {
     auto* m=activeModel(); if(!m || !m->cloud) return;
-    const auto mvp=currentMvp(); const pceditor::Viewport vp{width(),height()}; std::vector<pceditor::PointId> ids;
-    if(interactionMode_==InteractionMode::Rectangle){ ids=pceditor::CpuSelector::rectangle(*m->cloud,mvp,vp,{pressPos_.x(),pressPos_.y(),currentPos_.x(),currentPos_.y()}); }
-    else if(interactionMode_==InteractionMode::Circle){ const int r=int(std::hypot(currentPos_.x()-pressPos_.x(),currentPos_.y()-pressPos_.y())); ids=pceditor::CpuSelector::circle(*m->cloud,mvp,vp,{pressPos_.x(),pressPos_.y()},r); }
-    else { std::vector<pceditor::Point2i> path; path.reserve(stroke_.size()); for(const auto& p:stroke_)path.push_back({p.x(),p.y()}); ids=(interactionMode_==InteractionMode::Lasso)?pceditor::CpuSelector::lasso(*m->cloud,mvp,vp,path):pceditor::CpuSelector::brushStroke(*m->cloud,mvp,vp,path,brushRadiusPixels_); }
+    const auto mvp=currentMvp(); const JMEngine::Viewport vp{width(),height()}; std::vector<JMEngine::PointId> ids;
+    if(interactionMode_==InteractionMode::Rectangle){ ids=JMEngine::CpuSelector::rectangle(*m->cloud,mvp,vp,{pressPos_.x(),pressPos_.y(),currentPos_.x(),currentPos_.y()}); }
+    else if(interactionMode_==InteractionMode::Circle){ const int r=int(std::hypot(currentPos_.x()-pressPos_.x(),currentPos_.y()-pressPos_.y())); ids=JMEngine::CpuSelector::circle(*m->cloud,mvp,vp,{pressPos_.x(),pressPos_.y()},r); }
+    else { std::vector<JMEngine::Point2i> path; path.reserve(stroke_.size()); for(const auto& p:stroke_)path.push_back({p.x(),p.y()}); ids=(interactionMode_==InteractionMode::Lasso)?JMEngine::CpuSelector::lasso(*m->cloud,mvp,vp,path):JMEngine::CpuSelector::brushStroke(*m->cloud,mvp,vp,path,brushRadiusPixels_); }
     applySelection(*m,std::move(ids),modifiers);
 }
 
@@ -828,14 +828,14 @@ void GlesPointCloudWidget::rebuildVisibleMeshAsync(Model& model)
     workerPool_.start([self,path,mesh,cloud]{
         std::vector<std::uint32_t> visible; visible.reserve(mesh.triangleIndices.size()); std::vector<PickVertex> pick; pick.reserve(mesh.triangleIndices.size());
         const std::size_t triCount=mesh.triangleCount();
-        for(std::size_t t=0;t<triCount;++t){const auto a=mesh.triangleIndices[t*3],b=mesh.triangleIndices[t*3+1],c=mesh.triangleIndices[t*3+2]; if(a>=cloud->size()||b>=cloud->size()||c>=cloud->size())continue; if((cloud->points()[a].flags&pceditor::PointDeleted)||(cloud->points()[b].flags&pceditor::PointDeleted)||(cloud->points()[c].flags&pceditor::PointDeleted))continue; visible.insert(visible.end(),{a,b,c}); const auto tid=std::uint32_t(t); pick.push_back({cloud->points()[a].position,tid});pick.push_back({cloud->points()[b].position,tid});pick.push_back({cloud->points()[c].position,tid});}
-        QMetaObject::invokeMethod(self,[self,path,visible=std::move(visible),pick=std::move(pick)]()mutable{if(!self)return;int i=self->findModel(path);if(i<0)return;auto& m=*self->models_[std::size_t(i)];m.visibleMeshIndices=std::move(visible);m.expandedPickVertices=std::move(pick);m.uploadIndexCursor=0;m.drawIndexCount=0;m.uploadPickCursor=0;m.pickVertexCount=0;self->makeCurrent();self->glBindBuffer(GL_ELEMENT_ARRAY_BUFFER,m.meshEbo);self->glBufferData(GL_ELEMENT_ARRAY_BUFFER,static_cast<GLsizeiptr>(m.visibleMeshIndices.size()*sizeof(std::uint32_t)),nullptr,GL_DYNAMIC_DRAW);self->glBindBuffer(GL_ARRAY_BUFFER,m.pickPositionVbo);self->glBufferData(GL_ARRAY_BUFFER,static_cast<GLsizeiptr>(m.expandedPickVertices.size()*sizeof(pceditor::Vec3f)),nullptr,GL_DYNAMIC_DRAW);self->glBindBuffer(GL_ARRAY_BUFFER,m.pickIdVbo);self->glBufferData(GL_ARRAY_BUFFER,static_cast<GLsizeiptr>(m.expandedPickVertices.size()*sizeof(std::uint32_t)),nullptr,GL_DYNAMIC_DRAW);self->doneCurrent();self->update();},Qt::QueuedConnection);
+        for(std::size_t t=0;t<triCount;++t){const auto a=mesh.triangleIndices[t*3],b=mesh.triangleIndices[t*3+1],c=mesh.triangleIndices[t*3+2]; if(a>=cloud->size()||b>=cloud->size()||c>=cloud->size())continue; if((cloud->points()[a].flags&JMEngine::PointDeleted)||(cloud->points()[b].flags&JMEngine::PointDeleted)||(cloud->points()[c].flags&JMEngine::PointDeleted))continue; visible.insert(visible.end(),{a,b,c}); const auto tid=std::uint32_t(t); pick.push_back({cloud->points()[a].position,tid});pick.push_back({cloud->points()[b].position,tid});pick.push_back({cloud->points()[c].position,tid});}
+        QMetaObject::invokeMethod(self,[self,path,visible=std::move(visible),pick=std::move(pick)]()mutable{if(!self)return;int i=self->findModel(path);if(i<0)return;auto& m=*self->models_[std::size_t(i)];m.visibleMeshIndices=std::move(visible);m.expandedPickVertices=std::move(pick);m.uploadIndexCursor=0;m.drawIndexCount=0;m.uploadPickCursor=0;m.pickVertexCount=0;self->makeCurrent();self->glBindBuffer(GL_ELEMENT_ARRAY_BUFFER,m.meshEbo);self->glBufferData(GL_ELEMENT_ARRAY_BUFFER,static_cast<GLsizeiptr>(m.visibleMeshIndices.size()*sizeof(std::uint32_t)),nullptr,GL_DYNAMIC_DRAW);self->glBindBuffer(GL_ARRAY_BUFFER,m.pickPositionVbo);self->glBufferData(GL_ARRAY_BUFFER,static_cast<GLsizeiptr>(m.expandedPickVertices.size()*sizeof(JMEngine::Vec3f)),nullptr,GL_DYNAMIC_DRAW);self->glBindBuffer(GL_ARRAY_BUFFER,m.pickIdVbo);self->glBufferData(GL_ARRAY_BUFFER,static_cast<GLsizeiptr>(m.expandedPickVertices.size()*sizeof(std::uint32_t)),nullptr,GL_DYNAMIC_DRAW);self->doneCurrent();self->update();},Qt::QueuedConnection);
     });
 }
 
 void GlesPointCloudWidget::saveActiveModel()
 {
-    auto* m=activeModel(); if(!m||!m->cloud)return; std::filesystem::path p(m->path.toStdString()); p.replace_filename(p.stem().string()+"_edited.ply"); std::string msg; if(pceditor::PointCloudIO::savePly(p.string(),*m->cloud,&msg))statusText_=QString::fromUtf8("已保存：")+QString::fromStdString(p.string());else statusText_=QString::fromUtf8("保存失败：")+QString::fromUtf8(msg.c_str()); update();
+    auto* m=activeModel(); if(!m||!m->cloud)return; std::filesystem::path p(m->path.toStdString()); p.replace_filename(p.stem().string()+"_edited.ply"); std::string msg; if(JMEngine::PointCloudIO::savePly(p.string(),*m->cloud,&msg))statusText_=QString::fromUtf8("已保存：")+QString::fromStdString(p.string());else statusText_=QString::fromUtf8("保存失败：")+QString::fromUtf8(msg.c_str()); update();
 }
 
 void GlesPointCloudWidget::keyPressEvent(QKeyEvent* e)

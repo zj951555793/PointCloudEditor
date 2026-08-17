@@ -1,8 +1,8 @@
-#include <pceditor/MeshUtils.h>
+#include <JMEngine/MeshUtils.h>
 
 #include <cmath>
 
-namespace pceditor {
+namespace JMEngine {
 namespace {
 Vec3f cross(const Vec3f& a, const Vec3f& b) noexcept {
     return {a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x};
@@ -60,4 +60,4 @@ bool recomputeVertexNormals(TriangleMesh& mesh) noexcept {
     return validFaces > 0 && validNormals > 0;
 }
 
-} // namespace pceditor
+} // namespace JMEngine

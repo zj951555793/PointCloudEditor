@@ -1,9 +1,9 @@
-#include <pceditor/PointCloud.h>
+#include <JMEngine/PointCloud.h>
 
 #include <stdexcept>
 #include <utility>
 
-namespace pceditor {
+namespace JMEngine {
 
 // 直接接管调用方传入的点数组，避免一次无意义的大点云复制。
 PointCloud::PointCloud(Container points) : points_(std::move(points)) {}
@@ -70,4 +70,4 @@ std::vector<PointId> PointCloud::compact() {
     return mapping;
 }
 
-} // namespace pceditor
+} // namespace JMEngine

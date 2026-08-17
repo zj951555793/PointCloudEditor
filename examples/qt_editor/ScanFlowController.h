@@ -10,10 +10,12 @@
 #include <memory>
 #include <mutex>
 #include <vector>
+#include <deque>
+#include <unordered_map>
 
-#include <pceditor/PointCloud.h>
-#ifdef PCEDITOR_HAS_TEXTURE_MAPPING
-#include <pceditor/texture/TextureMapper.h>
+#include <JMEngine/PointCloud.h>
+#ifdef JMENGINE_HAS_TEXTURE_MAPPING
+#include <JMEngine/texture/TextureMapper.h>
 #endif
 #include "CameraDeviceManager.h"
 
@@ -86,9 +88,9 @@ class ScanFlowController final : public QObject {
         Error
     };
 
-    using PointChunk = std::vector<pceditor::Point>;
+    using PointChunk = std::vector<JMEngine::Point>;
     using PointChunkPtr = std::shared_ptr<PointChunk>;
-    using CloudPtr = std::shared_ptr<pceditor::PointCloud>;
+    using CloudPtr = std::shared_ptr<JMEngine::PointCloud>;
     using StateCallback = std::function<void(State)>;
     using MessageCallback = std::function<void(const QString&)>;
     using PreviewCallback = std::function<void(PointChunkPtr)>;
@@ -99,8 +101,8 @@ class ScanFlowController final : public QObject {
     using CameraListCallback = std::function<void(const QVector<CameraDeviceInfo>&, const QString&)>;
     using CameraPreviewCallback = std::function<void(const QImage&)>;
     using PoseCallback = std::function<void(const ScanPoseState&)>;
-#ifdef PCEDITOR_HAS_TEXTURE_MAPPING
-    using TextureFrames = std::vector<pceditor::texture::CameraFrame>;
+#ifdef JMENGINE_HAS_TEXTURE_MAPPING
+    using TextureFrames = std::vector<JMEngine::texture::CameraFrame>;
     using TextureFramesPtr = std::shared_ptr<TextureFrames>;
     using TextureFramesCallback = std::function<void(TextureFramesPtr)>;
 #endif
@@ -132,7 +134,7 @@ class ScanFlowController final : public QObject {
     void setCameraListCallback(CameraListCallback cb) { cameraListCallback_ = std::move(cb); }
     void setCameraPreviewCallback(CameraPreviewCallback cb) { cameraPreviewCallback_ = std::move(cb); }
     void setPoseCallback(PoseCallback cb) { poseCallback_ = std::move(cb); }
-#ifdef PCEDITOR_HAS_TEXTURE_MAPPING
+#ifdef JMENGINE_HAS_TEXTURE_MAPPING
     void setTextureFramesCallback(TextureFramesCallback cb) { textureFramesCallback_ = std::move(cb); }
 #endif
 
@@ -147,6 +149,8 @@ class ScanFlowController final : public QObject {
     void requestNextFrame();
     void beginStopping(bool sourceExhausted);
     void shutdownThreads();
+    void scheduleRenderDispatch();
+    void flushRenderMailbox();
 
     ScanConfig config_;
     State state_{State::Idle};
@@ -168,13 +172,32 @@ class ScanFlowController final : public QObject {
     CameraListCallback cameraListCallback_;
     CameraPreviewCallback cameraPreviewCallback_;
     PoseCallback poseCallback_;
-#ifdef PCEDITOR_HAS_TEXTURE_MAPPING
+#ifdef JMENGINE_HAS_TEXTURE_MAPPING
     TextureFramesCallback textureFramesCallback_;
 #endif
 
-    // Latest-frame-only UI preview. Replacing stale frames prevents latency from
-    // accumulating when the 3D viewport is temporarily busy.
+    // Latest-frame-only camera preview.
     std::mutex cameraPreviewMutex_;
     QImage latestCameraPreview_;
     std::atomic<bool> cameraPreviewDispatchPending_{false};
+
+    // Render mailbox: worker threads never flood the GUI event queue. Persistent live frames
+    // are batched (not dropped); transient overlays/pose are latest-only; pose optimization
+    // updates are coalesced by frameId. This keeps rendering responsive even when SLAM bursts.
+    struct PendingLiveFrame {
+        PointChunkPtr points;
+        std::array<float,16> pose{1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1};
+        int frameId{-1};
+    };
+    std::mutex renderMailboxMutex_;
+    std::deque<PendingLiveFrame> pendingLiveFrames_;
+    PointChunkPtr latestPreviewChunk_;
+    PointChunkPtr latestCurrentFrame_;
+    bool latestCurrentTrackingOk_{false};
+    int latestCurrentFrameId_{-1};
+    bool hasCurrentFrame_{false};
+    ScanPoseState latestPose_{};
+    bool hasPose_{false};
+    std::unordered_map<int, std::array<float,16>> pendingPoseUpdates_;
+    std::atomic<bool> renderDispatchPending_{false};
 };

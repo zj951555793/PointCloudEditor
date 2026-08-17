@@ -10,22 +10,22 @@
 #include <QThreadPool>
 #include <QElapsedTimer>
 
-#include <pceditor/ObjModelLoader.h>
-#include <pceditor/Alignment.h>
-#include <pceditor/Measurement.h>
-#include <pceditor/PointCloudEditor.h>
-#include <pceditor/CpuMeshSelector.h>
-#include <pceditor/MeshSelectionClosure.h>
-#include <pceditor/TriangleMesh.h>
-#include <pceditor/edit/MeshEditSession.h>
-#include <pceditor/processing/Processing.h>
-#include <pceditor/processing/Diagnostics.h>
-#ifdef PCEDITOR_HAS_TEXTURE_MAPPING
-#include <pceditor/texture/TextureMapper.h>
+#include <JMEngine/ObjModelLoader.h>
+#include <JMEngine/Alignment.h>
+#include <JMEngine/Measurement.h>
+#include <JMEngine/JMEngine.h>
+#include <JMEngine/CpuMeshSelector.h>
+#include <JMEngine/MeshSelectionClosure.h>
+#include <JMEngine/TriangleMesh.h>
+#include <JMEngine/edit/MeshEditSession.h>
+#include <JMEngine/processing/Processing.h>
+#include <JMEngine/processing/Diagnostics.h>
+#ifdef JMENGINE_HAS_TEXTURE_MAPPING
+#include <JMEngine/texture/TextureMapper.h>
 #endif
 
 #include "../common/ExampleUtils.h"
-#include <pceditor/render/RenderBackend.h>
+#include <JMEngine/render/RenderBackend.h>
 
 #include <cstdint>
 #include <functional>
@@ -70,28 +70,28 @@ class PointCloudWidget final : public QOpenGLWidget, protected QOpenGLExtraFunct
     // 扫描预览专用接口：只在 UI 线程改场景对象，重活均由 ScanFlowController 工作线程完成。
     // reservePoints 同时用于 CPU vector 与 GPU VBO 预留，避免实时扫描期间反复 realloc/glBufferData。
     QString beginScanPreview(std::size_t reservePoints = 2000000);
-    void appendScanPreview(const std::shared_ptr<std::vector<pceditor::Point>>& points, std::size_t pointLimit = 2000000);
+    void appendScanPreview(const std::shared_ptr<std::vector<JMEngine::Point>>& points, std::size_t pointLimit = 2000000);
     struct LiveFramePoseUpdate { int frameId{-1}; std::array<float,16> pose{1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1}; };
     // Live SLAM history: local points are uploaded exactly once; later optimization only updates frame poses.
-    void appendScanLocalFrame(int frameId, const std::shared_ptr<std::vector<pceditor::Point>>& localPoints,
+    void appendScanLocalFrame(int frameId, const std::shared_ptr<std::vector<JMEngine::Point>>& localPoints,
                               const std::array<float,16>& pose);
     void updateScanFramePoses(const std::shared_ptr<std::vector<LiveFramePoseUpdate>>& updates);
     // Normal: current frame = green. Lost: last valid frame = yellow reference, current lost frame = green.
-    void setCurrentScanFrame(const std::shared_ptr<std::vector<pceditor::Point>>& points, bool trackingOk);
+    void setCurrentScanFrame(const std::shared_ptr<std::vector<JMEngine::Point>>& points, bool trackingOk);
     // Commit the last valid/recovery reference to RGB history, then remove temporary status layers.
     void finalizeCurrentScanFrame();
     void clearCurrentScanFrame();
-    void replaceScanPreview(const std::shared_ptr<pceditor::PointCloud>& cloud);
-    void updateOptimizedScanPreview(const std::shared_ptr<pceditor::PointCloud>& cloud);
+    void replaceScanPreview(const std::shared_ptr<JMEngine::PointCloud>& cloud);
+    void updateOptimizedScanPreview(const std::shared_ptr<JMEngine::PointCloud>& cloud);
     void clearScanPreview();
     QString scanPreviewPath() const { return scanPreviewPath_; }
     double renderFps() const noexcept { return double(renderFpsTenths_.load(std::memory_order_relaxed)) / 10.0; }
 
     struct ScanCameraViewPose {
-        pceditor::Vec3f position{};
-        pceditor::Vec3f right{1.0f, 0.0f, 0.0f};
-        pceditor::Vec3f up{0.0f, 1.0f, 0.0f};
-        pceditor::Vec3f forward{0.0f, 0.0f, 1.0f};
+        JMEngine::Vec3f position{};
+        JMEngine::Vec3f right{1.0f, 0.0f, 0.0f};
+        JMEngine::Vec3f up{0.0f, 1.0f, 0.0f};
+        JMEngine::Vec3f forward{0.0f, 0.0f, 1.0f};
         bool trackingOk{false};
         int frameId{-1};
     };
@@ -155,30 +155,30 @@ class PointCloudWidget final : public QOpenGLWidget, protected QOpenGLExtraFunct
     bool exportActiveModel(const QString& path, QString* message = nullptr);
     bool exportActiveModelAsync(const QString& path, std::function<void(bool, const QString&)> finished);
 
-    // 处理算法全部位于 pceditor Core；这里只负责把任务提交到现有加载线程池。
+    // 处理算法全部位于 JMEngine Core；这里只负责把任务提交到现有加载线程池。
     using ProcessingProgressCallback = std::function<void(float, const QString&)>;
     using ProcessingFinishedCallback = std::function<void(bool, const QString&)>;
-    pceditor::processing::OperationDescriptor processingDescriptor(const std::string& operationId) const;
-    pceditor::processing::ModelDiagnostics activeModelDiagnostics() const;
-    pceditor::processing::ProcessingPreflight
-    processingPreflight(const std::string& operationId, const pceditor::processing::ParameterMap& params) const;
+    JMEngine::processing::OperationDescriptor processingDescriptor(const std::string& operationId) const;
+    JMEngine::processing::ModelDiagnostics activeModelDiagnostics() const;
+    JMEngine::processing::ProcessingPreflight
+    processingPreflight(const std::string& operationId, const JMEngine::processing::ParameterMap& params) const;
     using DiagnosticsFinishedCallback =
-        std::function<void(bool, const pceditor::processing::ModelDiagnostics&, const QString&)>;
+        std::function<void(bool, const JMEngine::processing::ModelDiagnostics&, const QString&)>;
     bool analyzeActiveModelAsync(DiagnosticsFinishedCallback finished);
-    bool startProcessingOperation(const std::string& operationId, pceditor::processing::ParameterMap params,
+    bool startProcessingOperation(const std::string& operationId, JMEngine::processing::ParameterMap params,
                                   ProcessingProgressCallback progress, ProcessingFinishedCallback finished);
     void cancelProcessing();
     bool processingBusy() const noexcept {
         return processingBusy_;
     }
-#ifdef PCEDITOR_HAS_TEXTURE_MAPPING
-    using TextureFramesPtr = std::shared_ptr<std::vector<pceditor::texture::CameraFrame>>;
+#ifdef JMENGINE_HAS_TEXTURE_MAPPING
+    using TextureFramesPtr = std::shared_ptr<std::vector<JMEngine::texture::CameraFrame>>;
     void setTextureFrames(TextureFramesPtr frames);
     std::size_t textureFrameCount() const noexcept { return textureFrames_ ? textureFrames_->size() : 0u; }
-    bool startTextureMappingAsync(pceditor::texture::Backend backend, ProcessingFinishedCallback finished);
+    bool startTextureMappingAsync(JMEngine::texture::Backend backend, ProcessingFinishedCallback finished);
     // Scan workflow helper: if the active scan result is still a point cloud, first run
     // industrial Poisson reconstruction with auto-tuned defaults, then texture the new mesh.
-    bool startScanTextureMappingAsync(pceditor::texture::Backend backend,
+    bool startScanTextureMappingAsync(JMEngine::texture::Backend backend,
                                       ProcessingProgressCallback progress,
                                       ProcessingFinishedCallback finished);
 #endif
@@ -198,11 +198,11 @@ class PointCloudWidget final : public QOpenGLWidget, protected QOpenGLExtraFunct
   private:
     struct ProcessingSnapshot {
         QString path;
-        std::shared_ptr<pceditor::PointCloud> cloud;
-        std::shared_ptr<pceditor::TriangleMesh> mesh;
+        std::shared_ptr<JMEngine::PointCloud> cloud;
+        std::shared_ptr<JMEngine::TriangleMesh> mesh;
         bool meshMode{false};
         DisplayMode displayMode{DisplayMode::Solid};
-        pceditor::Mat4f modelTransform{pceditor::Mat4f::identity()};
+        JMEngine::Mat4f modelTransform{JMEngine::Mat4f::identity()};
         QColor displayColor{220, 220, 220};
         bool useDisplayColor{false};
     };
@@ -213,18 +213,18 @@ class PointCloudWidget final : public QOpenGLWidget, protected QOpenGLExtraFunct
         bool meshMode{false};
         DisplayMode displayMode{DisplayMode::Solid};
 
-        std::shared_ptr<pceditor::PointCloud> cloud;
-        pceditor::PointCloudEditor editor;
-        std::shared_ptr<pceditor::TriangleMesh> mesh;
-        pceditor::MeshEditSession meshEditor;
-#ifdef PCEDITOR_HAS_TEXTURE_MAPPING
-        std::shared_ptr<pceditor::texture::Result> textureResult;
+        std::shared_ptr<JMEngine::PointCloud> cloud;
+        JMEngine::Engine editor;
+        std::shared_ptr<JMEngine::TriangleMesh> mesh;
+        JMEngine::MeshEditSession meshEditor;
+#ifdef JMENGINE_HAS_TEXTURE_MAPPING
+        std::shared_ptr<JMEngine::texture::Result> textureResult;
         GLuint textureGl{0};
 #endif
 
         std::vector<std::uint8_t> selectionMask;
-        std::vector<pceditor::PointId> selectedIds;
-        std::vector<pceditor::TriangleId> selectedTriangleIds;
+        std::vector<JMEngine::PointId> selectedIds;
+        std::vector<JMEngine::TriangleId> selectedTriangleIds;
 
         // GPU Buffer 结构统一使用 VAO + VBO/EBO。
         IRenderBackend::Buffers gpu;
@@ -241,7 +241,7 @@ class PointCloudWidget final : public QOpenGLWidget, protected QOpenGLExtraFunct
         // 初始加载直接使用 mesh->indices()，不复制一份完整 EBO。
         // 只有发生删除/Undo/Redo 后才生成过滤后的 visibleMeshIndices。
         std::vector<std::uint32_t> visibleMeshIndices;
-        std::vector<pceditor::TriangleId> visibleTriangleIds;
+        std::vector<JMEngine::TriangleId> visibleTriangleIds;
         bool meshFiltered{false};
         bool meshUploadComplete{false};
         bool glCreated{false};
@@ -254,10 +254,10 @@ class PointCloudWidget final : public QOpenGLWidget, protected QOpenGLExtraFunct
         IRenderBackend::Buffers liveBackGpu;
         bool liveBackCreated{false};
         std::size_t liveBackCapacity{0};
-        std::shared_ptr<pceditor::PointCloud> liveBackCloud;
+        std::shared_ptr<JMEngine::PointCloud> liveBackCloud;
         std::size_t liveBackUploadCursor{0};
         // back 上传期间继续到来的正常实时帧，swap 后再追加，避免优化刷新吃掉最新历史帧。
-        std::vector<pceditor::Point> livePostSwapPoints;
+        std::vector<JMEngine::Point> livePostSwapPoints;
 
         // Live SLAM history is stored in frame-local coordinates. Each frame's points are appended
         // to the shared VBO exactly once. Backend optimization only changes pose matrices.
@@ -265,14 +265,14 @@ class PointCloudWidget final : public QOpenGLWidget, protected QOpenGLExtraFunct
             int frameId{-1};
             std::size_t first{0};
             std::size_t count{0};
-            pceditor::Mat4f pose{pceditor::Mat4f::identity()};
+            JMEngine::Mat4f pose{JMEngine::Mat4f::identity()};
         };
         bool liveFramePoseMode{false};
         std::vector<LiveFrameRange> liveFrames;
         std::unordered_map<int, std::size_t> liveFrameIndex;
 
         // 场景级非破坏变换。当前交互器只修改平移，不重写点/三角形数据。
-        pceditor::Mat4f modelTransform{pceditor::Mat4f::identity()};
+        JMEngine::Mat4f modelTransform{JMEngine::Mat4f::identity()};
         QColor displayColor{220, 220, 220};
         bool useDisplayColor{false};
 
@@ -280,22 +280,22 @@ class PointCloudWidget final : public QOpenGLWidget, protected QOpenGLExtraFunct
         // 选择时先投影 Block AABB 做粗筛，再仅对候选点做精确手势/深度测试。
         // 删除只改变 flags，不影响索引；点坐标/点数发生变化时会自动重建。
         struct PickBlock {
-            pceditor::Vec3f min{};
-            pceditor::Vec3f max{};
+            JMEngine::Vec3f min{};
+            JMEngine::Vec3f max{};
             std::size_t offset{0};
             std::size_t count{0};
         };
-        std::vector<pceditor::PointId> pickGridIds;
+        std::vector<JMEngine::PointId> pickGridIds;
         std::vector<PickBlock> pickBlocks;
-        const pceditor::PointCloud* pickIndexedCloud{nullptr};
+        const JMEngine::PointCloud* pickIndexedCloud{nullptr};
         std::size_t pickIndexedPointCount{0};
 
         // 每个模型独立保存 Processing 历史，避免多模型交替操作时全局栈互相阻塞。
         std::vector<ProcessingSnapshot> processingUndo;
         std::vector<ProcessingSnapshot> processingRedo;
 
-        Model(QString p, std::shared_ptr<pceditor::PointCloud> c, pceditor::ObjMeshData m, bool meshModeFlag);
-        Model(QString p, std::shared_ptr<pceditor::TriangleMesh> meshValue);
+        Model(QString p, std::shared_ptr<JMEngine::PointCloud> c, JMEngine::ObjMeshData m, bool meshModeFlag);
+        Model(QString p, std::shared_ptr<JMEngine::TriangleMesh> meshValue);
     };
 
     const std::vector<std::uint32_t>& meshDrawIndices(const Model& model) const;
@@ -318,10 +318,10 @@ class PointCloudWidget final : public QOpenGLWidget, protected QOpenGLExtraFunct
     void uploadLiveBackIncremental(Model& model, std::size_t& byteBudget);
     void uploadModelIncremental(Model& model, std::size_t& byteBudget);
     void uploadSelectionMask(Model& model);
-    void uploadChangedFlags(Model& model, const std::vector<pceditor::PointId>& ids);
+    void uploadChangedFlags(Model& model, const std::vector<JMEngine::PointId>& ids);
 
     void rebuildVisibleMeshAsync(Model& model);
-    void applyTriangleSelection(Model& model, std::vector<pceditor::TriangleId> ids, Qt::KeyboardModifiers modifiers);
+    void applyTriangleSelection(Model& model, std::vector<JMEngine::TriangleId> ids, Qt::KeyboardModifiers modifiers);
 
     void drawScene();
     void drawModel(Model& model);
@@ -340,22 +340,22 @@ class PointCloudWidget final : public QOpenGLWidget, protected QOpenGLExtraFunct
     void performSurfaceSelection(Qt::KeyboardModifiers modifiers);
     void performThroughSelection(Qt::KeyboardModifiers modifiers);
     void ensurePointPickIndex(Model& model);
-    std::vector<pceditor::PointId> pointPickCandidates(Model& model, const pceditor::Mat4f& mvp,
+    std::vector<JMEngine::PointId> pointPickCandidates(Model& model, const JMEngine::Mat4f& mvp,
                                                        const QRect& logicalBounds);
-    std::vector<pceditor::PointId> filterPickedPointIds(const Model& model,
+    std::vector<JMEngine::PointId> filterPickedPointIds(const Model& model,
                                                         const std::vector<std::uint32_t>& ids) const;
-    void applySelection(Model& model, std::vector<pceditor::PointId> ids, Qt::KeyboardModifiers modifiers);
+    void applySelection(Model& model, std::vector<JMEngine::PointId> ids, Qt::KeyboardModifiers modifiers);
 
     bool handleTouchEvent(QTouchEvent* event);
 
-    pceditor::Mat4f currentMvp() const;
-    pceditor::Mat4f modelMvp(const Model& model) const;
+    JMEngine::Mat4f currentMvp() const;
+    JMEngine::Mat4f modelMvp(const Model& model) const;
     void moveActiveModelByPixels(float dxPixels, float dyPixels);
-    std::optional<pceditor::Vec3f> pickActiveWorldPoint(const QPoint& pos);
+    std::optional<JMEngine::Vec3f> pickActiveWorldPoint(const QPoint& pos);
     void handleUtilityClick(const QPoint& pos);
     QPoint toPhysical(const QPointF& p) const;
     void upsertScanStatusLayer(QString& path, const QString& fileName,
-                               const std::shared_ptr<std::vector<pceditor::Point>>& points,
+                               const std::shared_ptr<std::vector<JMEngine::Point>>& points,
                                std::uint32_t rgba);
     void clearScanStatusLayer(QString& path);
 
@@ -364,10 +364,10 @@ class PointCloudWidget final : public QOpenGLWidget, protected QOpenGLExtraFunct
     std::vector<QString> loadingPaths_;
     QString scanPreviewPath_;
     QString currentScanFramePath_;
-    std::shared_ptr<std::vector<pceditor::Point>> currentScanFrameSource_;
+    std::shared_ptr<std::vector<JMEngine::Point>> currentScanFrameSource_;
     bool currentScanFrameTrackingOk_{false};
     QString recoveryScanFramePath_;
-    std::shared_ptr<std::vector<pceditor::Point>> recoveryScanFrameSource_;
+    std::shared_ptr<std::vector<JMEngine::Point>> recoveryScanFrameSource_;
     std::size_t scanPreviewPointLimit_{2000000};
     // 实时扫描默认跟随最新一帧扫描区域。第一帧自动 fit，后续只平滑移动
     // camera target，不扫描整个累计点云，也不改变用户当前观察方向。
@@ -379,8 +379,8 @@ class PointCloudWidget final : public QOpenGLWidget, protected QOpenGLExtraFunct
     struct BasePlaneInteractor {
         bool active{false};
         bool dragging{false};
-        pceditor::Vec3f point{};      // 拟合平面上的基准点（模型局部坐标）
-        pceditor::Vec3f normal{0.0f, 1.0f, 0.0f}; // 指向模型主体一侧
+        JMEngine::Vec3f point{};      // 拟合平面上的基准点（模型局部坐标）
+        JMEngine::Vec3f normal{0.0f, 1.0f, 0.0f}; // 指向模型主体一侧
         float offset{0.0f};           // 沿 normal 的交互偏移
         float visualRadius{1.0f};
         QPoint dragLast{};
@@ -388,7 +388,7 @@ class PointCloudWidget final : public QOpenGLWidget, protected QOpenGLExtraFunct
 
     int activeModelIndex_{-1};
 
-    pceditor::example::OrbitCamera camera_;
+    JMEngine::example::OrbitCamera camera_;
 
     QOpenGLShaderProgram pointProgram_;
     QOpenGLShaderProgram meshProgram_;
@@ -407,9 +407,9 @@ class PointCloudWidget final : public QOpenGLWidget, protected QOpenGLExtraFunct
     bool touchEditMode_{false};
     bool objectMoveMode_{false};
     UtilityMode utilityMode_{UtilityMode::None};
-    std::vector<pceditor::Vec3f> utilityPoints_;
+    std::vector<JMEngine::Vec3f> utilityPoints_;
     QString alignmentSourcePath_;
-    std::array<pceditor::Vec3f, 3> alignmentSourceWorld_{};
+    std::array<JMEngine::Vec3f, 3> alignmentSourceWorld_{};
     int alignmentSourceCount_{0};
     QString autoAlignmentSourcePath_;
     bool autoAlignmentBusy_{false};
@@ -436,14 +436,14 @@ class PointCloudWidget final : public QOpenGLWidget, protected QOpenGLExtraFunct
     qreal lastTouchDistance_{0.0};
 
     QThreadPool workerPool_;
-#ifdef PCEDITOR_HAS_TEXTURE_MAPPING
+#ifdef JMENGINE_HAS_TEXTURE_MAPPING
     TextureFramesPtr textureFrames_;
 #endif
     bool editBusy_{false};
     bool processingBusy_{false};
     bool exportBusy_{false};
     bool diagnosticsBusy_{false};
-    pceditor::processing::CancelToken processingCancel_;
+    JMEngine::processing::CancelToken processingCancel_;
     std::unique_ptr<IRenderBackend> backend_;
     bool renderReady_{false};
     bool pickingReady_{false};

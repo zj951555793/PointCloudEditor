@@ -1,5 +1,5 @@
-#include <pceditor/processing/Operations.h>
-#include <pceditor/processing/Parallel.h>
+#include <JMEngine/processing/Operations.h>
+#include <JMEngine/processing/Parallel.h>
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -8,11 +8,11 @@
 #include <queue>
 #include <unordered_map>
 #include <unordered_set>
-#ifdef PCEDITOR_USE_OPENMP
+#ifdef JMENGINE_USE_OPENMP
 #include <omp.h>
 #endif
 
-namespace pceditor::processing {
+namespace JMEngine::processing {
 namespace {
 struct Key {
     int x, y, z;
@@ -103,7 +103,7 @@ std::unordered_map<Key, std::vector<std::uint32_t>, KeyHash> grid(const PointClo
 }
 
 std::unordered_map<Key, std::vector<std::uint32_t>, KeyHash> gridParallel(const PointCloud& c, float cell) {
-#ifndef PCEDITOR_USE_OPENMP
+#ifndef JMENGINE_USE_OPENMP
     return grid(c, cell);
 #else
     const int nt = std::max(1, processingThreadCount());
@@ -432,7 +432,7 @@ ProcessResult VoxelDownsampleOperation::run(const ProcessInput& i, const Paramet
         std::uint64_t rr = 0, gg = 0, bb = 0, aa = 0, n = 0;
     };
     std::unordered_map<Key, A, KeyHash> all;
-#ifdef PCEDITOR_USE_OPENMP
+#ifdef JMENGINE_USE_OPENMP
     int nt = processingThreadCount();
     std::vector<std::unordered_map<Key, A, KeyHash>> local(nt);
 #pragma omp parallel num_threads(nt)
@@ -538,7 +538,7 @@ ProcessResult RadiusOutlierOperation::run(const ProcessInput& i, const Parameter
     auto g = grid(*i.cloud, rad);
     std::vector<unsigned char> keep(i.cloud->size(), 1);
     int nt = processingThreadCount();
-#ifdef PCEDITOR_USE_OPENMP
+#ifdef JMENGINE_USE_OPENMP
 #pragma omp parallel for schedule(dynamic, 256) num_threads(nt)
 #endif
     for (long long id = 0; id < (long long)i.cloud->size(); ++id) {
@@ -609,7 +609,7 @@ ProcessResult StatisticalOutlierOperation::run(const ProcessInput& i, const Para
     auto g = grid(*i.cloud, rad);
     std::vector<double> d(i.cloud->size(), 0);
     int nt = processingThreadCount();
-#ifdef PCEDITOR_USE_OPENMP
+#ifdef JMENGINE_USE_OPENMP
 #pragma omp parallel for schedule(dynamic, 128) num_threads(nt)
 #endif
     for (long long id = 0; id < (long long)i.cloud->size(); ++id) {
@@ -757,7 +757,7 @@ ProcessResult NormalEstimationOperation::run(const ProcessInput& i, const Parame
             return r;
         }
         const long long stop = std::min(count, base + kProgressBlock);
-#ifdef PCEDITOR_USE_OPENMP
+#ifdef JMENGINE_USE_OPENMP
 #pragma omp parallel for schedule(static) num_threads(nt)
 #endif
         for (long long id = base; id < stop; ++id) {
@@ -984,7 +984,7 @@ static ProcessResult smoothMesh(const ProcessInput& i, const ParameterMap& p, co
     std::vector<Vec3f> tmp(out->vertices()->size());
     auto step = [&](float alpha) {
         const int threadCount = processingThreadCount();
-#ifdef PCEDITOR_USE_OPENMP
+#ifdef JMENGINE_USE_OPENMP
 #pragma omp parallel for schedule(static) num_threads(threadCount)
 #endif
         for (long long v = 0; v < (long long)out->vertices()->size(); ++v) {
@@ -1341,4 +1341,4 @@ ProcessResult HoleFillOperation::run(const ProcessInput& i, const ParameterMap& 
     return r;
 }
 
-} // namespace pceditor::processing
+} // namespace JMEngine::processing

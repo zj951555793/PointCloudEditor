@@ -1,5 +1,5 @@
-#include <pceditor/CpuMeshSelector.h>
-#include <pceditor/processing/Parallel.h>
+#include <JMEngine/CpuMeshSelector.h>
+#include <JMEngine/processing/Parallel.h>
 
 #include <algorithm>
 #include <cmath>
@@ -7,11 +7,11 @@
 #include <limits>
 #include <vector>
 
-#ifdef PCEDITOR_USE_OPENMP
+#ifdef JMENGINE_USE_OPENMP
 #include <omp.h>
 #endif
 
-namespace pceditor {
+namespace JMEngine {
 namespace {
 
 struct P2 {
@@ -153,7 +153,7 @@ std::vector<TriangleId> selectThrough(const TriangleMesh& mesh, const Mat4f& m, 
         return out;
     const auto& idx = mesh.indices();
     const std::size_t n = mesh.triangleCount();
-#ifdef PCEDITOR_USE_OPENMP
+#ifdef JMENGINE_USE_OPENMP
     const int tc = processing::processingThreadCount();
     std::vector<std::vector<TriangleId>> per(static_cast<std::size_t>(tc));
 #pragma omp parallel num_threads(tc)
@@ -382,4 +382,4 @@ std::vector<TriangleId> CpuMeshSelector::surfaceBrushStroke(const TriangleMesh& 
     return selectSurface(mesh, m, vp, region, [&](P2 p) { return brushHit(p, path, float(rad)); });
 }
 
-} // namespace pceditor
+} // namespace JMEngine

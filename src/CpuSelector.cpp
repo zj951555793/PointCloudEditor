@@ -1,5 +1,5 @@
-#include <pceditor/CpuSelector.h>
-#include <pceditor/processing/Parallel.h>
+#include <JMEngine/CpuSelector.h>
+#include <JMEngine/processing/Parallel.h>
 
 #include <algorithm>
 #include <cmath>
@@ -7,11 +7,11 @@
 #include <cstdint>
 #include <limits>
 
-#ifdef PCEDITOR_USE_OPENMP
+#ifdef JMENGINE_USE_OPENMP
 #include <omp.h>
 #endif
 
-namespace pceditor {
+namespace JMEngine {
 namespace {
 
 // 把一个三维点投影到 UI 屏幕坐标。
@@ -150,7 +150,7 @@ std::vector<PointId> selectSurfaceProjected(const PointCloud& cloud, const Mat4f
         const float tolerance = std::min(0.0025f, std::max(requestedTolerance, distanceAwareFloor));
         return depth <= front + tolerance;
     };
-#ifdef PCEDITOR_USE_OPENMP
+#ifdef JMENGINE_USE_OPENMP
     const int threadCount = processing::processingThreadCount();
     std::vector<std::vector<PointId>> perThread(static_cast<std::size_t>(threadCount));
 #pragma omp parallel num_threads(threadCount)
@@ -198,7 +198,7 @@ std::vector<PointId> selectProjected(const PointCloud& cloud, const Mat4f& mvp, 
     if (viewport.width <= 0 || viewport.height <= 0 || cloud.empty())
         return selected;
 
-#ifdef PCEDITOR_USE_OPENMP
+#ifdef JMENGINE_USE_OPENMP
     // 穿透选择必须遍历全部点。千万点情况下如果仍然单线程投影，
     // 鼠标松开后会明显卡住，因此这里对 CPU 投影阶段做 OpenMP 并行。
     // 每个线程使用自己的结果数组，最后再顺序合并，避免 push_back 锁竞争。
@@ -365,4 +365,4 @@ std::vector<PointId> CpuSelector::brushStroke(const PointCloud& cloud, const Mat
     });
 }
 
-} // namespace pceditor
+} // namespace JMEngine

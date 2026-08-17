@@ -30,7 +30,7 @@ GlesMainWindow::GlesMainWindow(const QString& initialFile, QWidget* parent)
     createMenus();
     createToolbar();
 
-    setWindowTitle(QString::fromUtf8("PointCloudEditor RK3588 - Qt OpenGL ES 3.1"));
+    setWindowTitle(QString::fromUtf8("JMEngine RK3588 - Qt OpenGL ES 3.1"));
     resize(1280, 800);
     statusBar()->showMessage(QString::fromUtf8(
         "单指旋转 | 双指平移/缩放 | 开启编辑后单指选择 | Delete删除高亮"));
@@ -149,7 +149,7 @@ void GlesMainWindow::createMenus()
     auto* about = help->addAction(QString::fromUtf8("关于"));
     connect(about, &QAction::triggered, this, [this] {
         QMessageBox::information(this, QString::fromUtf8("关于"),
-            QString::fromUtf8("PointCloudEditor RK3588\nQt6 + QOpenGLWidget + OpenGL ES 3.1\n支持触摸、OBJ/PLY、GPU 表面选择。"));
+            QString::fromUtf8("JMEngine RK3588\nQt6 + QOpenGLWidget + OpenGL ES 3.1\n支持触摸、OBJ/PLY、GPU 表面选择。"));
     });
 }
 

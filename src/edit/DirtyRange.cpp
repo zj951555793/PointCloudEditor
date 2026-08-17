@@ -1,8 +1,8 @@
-#include <pceditor/edit/DirtyRange.h>
+#include <JMEngine/edit/DirtyRange.h>
 
 #include <algorithm>
 
-namespace pceditor {
+namespace JMEngine {
 
 std::vector<DirtyRange> makeDirtyRanges(std::vector<std::uint32_t> ids) {
     if (ids.empty())
@@ -27,4 +27,4 @@ std::vector<DirtyRange> makeDirtyRanges(std::vector<std::uint32_t> ids) {
     return out;
 }
 
-} // namespace pceditor
+} // namespace JMEngine

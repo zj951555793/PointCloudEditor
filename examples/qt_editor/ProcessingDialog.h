@@ -1,6 +1,6 @@
 #pragma once
 #include <QDialog>
-#include <pceditor/processing/Processing.h>
+#include <JMEngine/processing/Processing.h>
 #include <unordered_map>
 
 class QLabel;
@@ -11,9 +11,9 @@ class QWidget;
 
 class ProcessingDialog final : public QDialog {
   public:
-    explicit ProcessingDialog(const pceditor::processing::OperationDescriptor& descriptor, QWidget* parent = nullptr);
+    explicit ProcessingDialog(const JMEngine::processing::OperationDescriptor& descriptor, QWidget* parent = nullptr);
 
-    pceditor::processing::ParameterMap parameters() const;
+    JMEngine::processing::ParameterMap parameters() const;
     QPushButton* applyButton() const noexcept {
         return applyButton_;
     }
@@ -29,7 +29,7 @@ class ProcessingDialog final : public QDialog {
     }
 
   private:
-    pceditor::processing::OperationDescriptor descriptor_;
+    JMEngine::processing::OperationDescriptor descriptor_;
     std::unordered_map<std::string, QWidget*> editors_;
     QLabel* summaryLabel_{nullptr};
     QLabel* stageLabel_{nullptr};

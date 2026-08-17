@@ -1,12 +1,12 @@
-#include <pceditor/edit/MeshEditSession.h>
-#include <pceditor/edit/DirtyRange.h>
+#include <JMEngine/edit/MeshEditSession.h>
+#include <JMEngine/edit/DirtyRange.h>
 
 #include <algorithm>
 #include <iterator>
 #include <unordered_set>
 #include <utility>
 
-namespace pceditor {
+namespace JMEngine {
 
 struct MeshEditSession::ICommand {
     virtual ~ICommand() = default;
@@ -289,4 +289,4 @@ std::vector<TriangleId> MeshEditSession::compactTriangles() {
     return map;
 }
 
-} // namespace pceditor
+} // namespace JMEngine

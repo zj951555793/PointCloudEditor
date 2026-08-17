@@ -11,7 +11,7 @@
 #include <QVBoxLayout>
 #include <algorithm>
 
-ProcessingDialog::ProcessingDialog(const pceditor::processing::OperationDescriptor& descriptor, QWidget* parent)
+ProcessingDialog::ProcessingDialog(const JMEngine::processing::OperationDescriptor& descriptor, QWidget* parent)
     : QDialog(parent), descriptor_(descriptor) {
     setWindowTitle(QString::fromUtf8(descriptor_.title.c_str()));
     setModal(true);
@@ -24,7 +24,7 @@ ProcessingDialog::ProcessingDialog(const pceditor::processing::OperationDescript
     auto* form = new QFormLayout;
     for (const auto& spec : descriptor_.parameters) {
         QWidget* editor = nullptr;
-        if (spec.kind == pceditor::processing::ParameterKind::Integer) {
+        if (spec.kind == JMEngine::processing::ParameterKind::Integer) {
             auto* spin = new QSpinBox(this);
             spin->setRange(static_cast<int>(spec.minValue), static_cast<int>(spec.maxValue));
             spin->setSingleStep(std::max(1, static_cast<int>(spec.step)));
@@ -32,7 +32,7 @@ ProcessingDialog::ProcessingDialog(const pceditor::processing::OperationDescript
             if (!spec.unit.empty())
                 spin->setSuffix(QStringLiteral(" ") + QString::fromUtf8(spec.unit.c_str()));
             editor = spin;
-        } else if (spec.kind == pceditor::processing::ParameterKind::Real) {
+        } else if (spec.kind == JMEngine::processing::ParameterKind::Real) {
             auto* spin = new QDoubleSpinBox(this);
             spin->setDecimals(5);
             spin->setRange(spec.minValue, spec.maxValue);
@@ -41,7 +41,7 @@ ProcessingDialog::ProcessingDialog(const pceditor::processing::OperationDescript
             if (!spec.unit.empty())
                 spin->setSuffix(QStringLiteral(" ") + QString::fromUtf8(spec.unit.c_str()));
             editor = spin;
-        } else if (spec.kind == pceditor::processing::ParameterKind::Boolean) {
+        } else if (spec.kind == JMEngine::processing::ParameterKind::Boolean) {
             auto* check = new QCheckBox(this);
             check->setChecked(spec.defaultValue != 0.0);
             editor = check;
@@ -74,24 +74,24 @@ ProcessingDialog::ProcessingDialog(const pceditor::processing::OperationDescript
     root->addWidget(buttons);
 }
 
-pceditor::processing::ParameterMap ProcessingDialog::parameters() const {
-    pceditor::processing::ParameterMap out;
+JMEngine::processing::ParameterMap ProcessingDialog::parameters() const {
+    JMEngine::processing::ParameterMap out;
     for (const auto& spec : descriptor_.parameters) {
         auto it = editors_.find(spec.key);
         if (it == editors_.end())
             continue;
         QWidget* w = it->second;
         switch (spec.kind) {
-        case pceditor::processing::ParameterKind::Integer:
+        case JMEngine::processing::ParameterKind::Integer:
             out[spec.key] = static_cast<std::int64_t>(static_cast<QSpinBox*>(w)->value());
             break;
-        case pceditor::processing::ParameterKind::Real:
+        case JMEngine::processing::ParameterKind::Real:
             out[spec.key] = static_cast<QDoubleSpinBox*>(w)->value();
             break;
-        case pceditor::processing::ParameterKind::Boolean:
+        case JMEngine::processing::ParameterKind::Boolean:
             out[spec.key] = static_cast<QCheckBox*>(w)->isChecked();
             break;
-        case pceditor::processing::ParameterKind::Choice:
+        case JMEngine::processing::ParameterKind::Choice:
             out[spec.key] = static_cast<QComboBox*>(w)->currentText().toStdString();
             break;
         }

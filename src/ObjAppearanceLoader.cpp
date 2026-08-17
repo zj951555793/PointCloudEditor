@@ -1,10 +1,10 @@
-#include "pceditor/ObjAppearanceLoader.h"
-#include "pceditor/ObjModelLoader.h"
-#include <pceditor/processing/Parallel.h>
+#include "JMEngine/ObjAppearanceLoader.h"
+#include "JMEngine/ObjModelLoader.h"
+#include <JMEngine/processing/Parallel.h>
 
 #include <algorithm>
 
-namespace pceditor {
+namespace JMEngine {
 
 bool ObjAppearanceLoader::load(const std::string& objFile, std::size_t vertexCount, ObjAppearanceData& out,
                                std::string* message) {
@@ -30,7 +30,7 @@ bool ObjAppearanceLoader::load(const std::string& objFile, std::size_t vertexCou
 
 void ObjAppearanceLoader::applyNormals(PointCloud& cloud, const ObjAppearanceData& appearance) {
     const std::size_t count = std::min(cloud.size(), appearance.vertexNormals.size());
-#ifdef PCEDITOR_USE_OPENMP
+#ifdef JMENGINE_USE_OPENMP
 #pragma omp parallel for schedule(static) num_threads(processing::processingThreadCount())
 #endif
     for (std::int64_t ii = 0; ii < static_cast<std::int64_t>(count); ++ii) {
@@ -39,4 +39,4 @@ void ObjAppearanceLoader::applyNormals(PointCloud& cloud, const ObjAppearanceDat
     }
 }
 
-} // namespace pceditor
+} // namespace JMEngine

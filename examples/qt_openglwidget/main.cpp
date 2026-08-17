@@ -5,7 +5,7 @@
 #include <QSurfaceFormat>
 
 int main(int argc, char* argv[]) {
-    pceditor::example::enableUtf8Console();
+    JMEngine::example::enableUtf8Console();
 
     // R32UI GPU Picking 和整数顶点属性要求桌面 OpenGL 2.1 Core。
     QSurfaceFormat format;

@@ -1,4 +1,4 @@
-#include <pceditor/ModelIO.h>
+#include <JMEngine/ModelIO.h>
 
 #include <algorithm>
 #include <array>
@@ -10,7 +10,7 @@
 #include <sstream>
 #include <vector>
 
-namespace pceditor {
+namespace JMEngine {
 namespace {
 std::string lowerExt(const std::string& name) {
     std::string e = std::filesystem::path(name).extension().string();
@@ -184,7 +184,7 @@ bool ModelIO::saveStl(const PointCloud& cloud, const TriangleMesh& mesh, const s
         setError(errorMessage, "无法创建 STL 文件");
         return false;
     }
-    out << "solid PointCloudEditor\n" << std::setprecision(9);
+    out << "solid JMEngine\n" << std::setprecision(9);
     const auto& pts = cloud.points();
     const auto& idx = mesh.indices();
     for (std::size_t i = 0; i + 2 < idx.size(); i += 3) {
@@ -209,7 +209,7 @@ bool ModelIO::saveStl(const PointCloud& cloud, const TriangleMesh& mesh, const s
         out << "  vertex " << p0.x << ' ' << p0.y << ' ' << p0.z << "\n  vertex " << p1.x << ' ' << p1.y << ' ' << p1.z
             << "\n  vertex " << p2.x << ' ' << p2.y << ' ' << p2.z << "\n endloop\nendfacet\n";
     }
-    out << "endsolid PointCloudEditor\n";
+    out << "endsolid JMEngine\n";
     return static_cast<bool>(out);
 }
 
@@ -277,4 +277,4 @@ bool ModelIO::saveAsc(const PointCloud& cloud, const std::string& fileName, std:
     return true;
 }
 
-} // namespace pceditor
+} // namespace JMEngine

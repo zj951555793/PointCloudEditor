@@ -3,7 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 
-namespace pceditor {
+namespace JMEngine {
 namespace texture {
 namespace detail {
 
@@ -53,4 +53,4 @@ bool cudaApiSelectBestCameras(const CudaPointPod* points,
 
 } // namespace detail
 } // namespace texture
-} // namespace pceditor
+} // namespace JMEngine

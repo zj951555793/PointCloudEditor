@@ -4,14 +4,14 @@
 // 1. OBJ/PLY 导入；
 // 2. GL_R32UI PointId Picking；
 // 3. 矩形 / 圆形 / Lasso / Brush 四种 GPU 选择；
-// 4. PointCloudEditor 软删除 + Undo/Redo；
+// 4. JMEngine 软删除 + Undo/Redo；
 // 5. 删除后只更新 flags VBO 的脏区，不重新上传 position/color 全 VBO。
 
 #include "../common/ExampleUtils.h"
 
-#include <pceditor/PixelIdPicker.h>
-#include <pceditor/PointCloudEditor.h>
-#include <pceditor/PointCloudIO.h>
+#include <JMEngine/PixelIdPicker.h>
+#include <JMEngine/JMEngine.h>
+#include <JMEngine/PointCloudIO.h>
 
 #include <EGL/egl.h>
 #include <GLES3/gl3.h>
@@ -188,7 +188,7 @@ bool createPickingFbo(GLuint& fbo, GLuint& texture, GLuint& depth) {
 
 // 将一组 changed PointId 合并成连续区间，仅更新 flags VBO。
 // 即使删除几十万点，也不重新上传 position/id 全 VBO。
-void updateFlagRanges(GLuint flagsVbo, const pceditor::PointCloud& cloud, std::vector<pceditor::PointId> ids) {
+void updateFlagRanges(GLuint flagsVbo, const JMEngine::PointCloud& cloud, std::vector<JMEngine::PointId> ids) {
     if (ids.empty())
         return;
     if (!std::is_sorted(ids.begin(), ids.end()))
@@ -198,8 +198,8 @@ void updateFlagRanges(GLuint flagsVbo, const pceditor::PointCloud& cloud, std::v
     glBindBuffer(GL_ARRAY_BUFFER, flagsVbo);
     std::size_t i = 0;
     while (i < ids.size()) {
-        pceditor::PointId begin = ids[i];
-        pceditor::PointId end = begin;
+        JMEngine::PointId begin = ids[i];
+        JMEngine::PointId end = begin;
         std::size_t j = i + 1;
         while (j < ids.size() && ids[j] <= end + 32 && ids[j] - begin < 65536) {
             end = ids[j++];
@@ -220,17 +220,17 @@ void updateFlagRanges(GLuint flagsVbo, const pceditor::PointCloud& cloud, std::v
 } // namespace
 
 int main(int argc, char* argv[]) {
-    pceditor::example::enableUtf8Console();
+    JMEngine::example::enableUtf8Console();
 
     const std::string fileName = argc > 1 ? argv[1] : std::string{};
-    auto cloud = pceditor::example::loadCloudOrEmpty(fileName);
+    auto cloud = JMEngine::example::loadCloudOrEmpty(fileName);
     if (!cloud)
         return 2;
 
-    pceditor::PointCloudEditor editor(cloud);
-    pceditor::example::OrbitCamera camera;
+    JMEngine::Engine editor(cloud);
+    JMEngine::example::OrbitCamera camera;
     camera.fit(*cloud);
-    const pceditor::Mat4f mvp = camera.mvp(kWidth, kHeight);
+    const JMEngine::Mat4f mvp = camera.mvp(kWidth, kHeight);
 
     EglState egl;
     if (!createEgl(egl)) {
@@ -296,7 +296,7 @@ int main(int argc, char* argv[]) {
     auto renderIds = [&]() {
         glBindFramebuffer(GL_FRAMEBUFFER, fbo);
         glViewport(0, 0, kWidth, kHeight);
-        const GLuint clearId = pceditor::kInvalidPointId;
+        const GLuint clearId = JMEngine::kInvalidPointId;
         glClearBufferuiv(GL_COLOR, 0, &clearId);
         glClear(GL_DEPTH_BUFFER_BIT);
         glEnable(GL_DEPTH_TEST);
@@ -309,7 +309,7 @@ int main(int argc, char* argv[]) {
 
     renderIds();
 
-    pceditor::PixelIdPicker picker(
+    JMEngine::PixelIdPicker picker(
         kWidth, kHeight,
         [fbo](int x, int y, int w, int h, std::uint32_t* dst) {
             glBindFramebuffer(GL_FRAMEBUFFER, fbo);
@@ -320,9 +320,9 @@ int main(int argc, char* argv[]) {
 
     const auto rectIds = picker.pickRectangle(kWidth / 4, kHeight / 4, kWidth * 3 / 4, kHeight * 3 / 4);
     const auto circleIds = picker.pickCircle(kWidth / 2, kHeight / 2, 120);
-    const std::vector<pceditor::Point2i> lasso = {{250, 180}, {550, 190}, {620, 330}, {470, 460}, {230, 390}};
+    const std::vector<JMEngine::Point2i> lasso = {{250, 180}, {550, 190}, {620, 330}, {470, 460}, {230, 390}};
     const auto lassoIds = picker.pickLasso(lasso);
-    const std::vector<pceditor::Point2i> brush = {{250, 300}, {350, 280}, {450, 320}, {550, 300}};
+    const std::vector<JMEngine::Point2i> brush = {{250, 300}, {350, 280}, {450, 320}, {550, 300}};
     const auto brushIds = picker.pickBrushStroke(brush, 24);
 
     std::cout << "矩形选择=" << rectIds.size() << " 圆选=" << circleIds.size() << " Lasso=" << lassoIds.size()
@@ -343,7 +343,7 @@ int main(int argc, char* argv[]) {
     }
 
     std::string error;
-    if (!pceditor::PointCloudIO::savePly(*cloud, "rk3588_edited_output.ply", &error))
+    if (!JMEngine::PointCloudIO::savePly(*cloud, "rk3588_edited_output.ply", &error))
         std::cerr << "保存失败: " << error << '\n';
     else
         std::cout << "已保存 rk3588_edited_output.ply\n";

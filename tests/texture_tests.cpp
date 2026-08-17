@@ -1,13 +1,13 @@
-#include <pceditor/PointCloud.h>
-#include <pceditor/TriangleMesh.h>
-#include <pceditor/texture/TextureMapper.h>
+#include <JMEngine/PointCloud.h>
+#include <JMEngine/TriangleMesh.h>
+#include <JMEngine/texture/TextureMapper.h>
 
 #include <cassert>
 #include <iostream>
 
 int main() {
-    using namespace pceditor;
-    using namespace pceditor::texture;
+    using namespace JMEngine;
+    using namespace JMEngine::texture;
 
     PointCloud::Container pts(3);
     pts[0].position = {-10.0f, -10.0f, 100.0f};

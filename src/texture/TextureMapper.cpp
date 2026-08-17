@@ -1,4 +1,4 @@
-#include <pceditor/texture/TextureMapper.h>
+#include <JMEngine/texture/TextureMapper.h>
 #include "TextureMapperCuda.h"
 
 #include <algorithm>
@@ -12,11 +12,11 @@
 #include <sstream>
 #include <unordered_map>
 
-#ifdef PCEDITOR_USE_OPENMP
+#ifdef JMENGINE_USE_OPENMP
 #include <omp.h>
 #endif
 
-namespace pceditor::texture {
+namespace JMEngine::texture {
 namespace {
 
 constexpr float kPi = 3.14159265358979323846f;
@@ -312,7 +312,7 @@ void globalOptimizeCameraLabels(const TriangleMesh& mesh, const std::vector<Came
     const auto neighbors = triangleNeighbors(mesh);
     std::vector<std::vector<CameraCandidate>> candidates(best.size());
 
-#ifdef PCEDITOR_USE_OPENMP
+#ifdef JMENGINE_USE_OPENMP
 #pragma omp parallel for schedule(dynamic,32)
 #endif
     for (int ti=0; ti<static_cast<int>(best.size()); ++ti) {
@@ -658,7 +658,7 @@ std::uint32_t packRgb(std::uint8_t r,std::uint8_t g,std::uint8_t b){ return std:
 } // namespace
 
 bool TextureMapper::cudaCompiled() noexcept {
-#ifdef PCEDITOR_TEXTURE_HAS_CUDA
+#ifdef JMENGINE_TEXTURE_HAS_CUDA
     return true;
 #else
     return false;
@@ -666,7 +666,7 @@ bool TextureMapper::cudaCompiled() noexcept {
 }
 
 bool TextureMapper::cudaAvailable(std::string* reason) noexcept {
-#ifdef PCEDITOR_TEXTURE_HAS_CUDA
+#ifdef JMENGINE_TEXTURE_HAS_CUDA
     return detail::cudaRuntimeAvailable(reason);
 #else
     if(reason) *reason="CUDA backend was not compiled";
@@ -699,7 +699,7 @@ Result TextureMapper::map(const TriangleMesh& mesh, const std::vector<CameraFram
     // CUDA owns both visibility depth rasterization and camera scoring. Auto falls back to the
     // complete CPU pipeline if the device is absent or a CUDA stage fails.
     if (cfg.backend != Backend::Cpu) {
-#ifdef PCEDITOR_TEXTURE_HAS_CUDA
+#ifdef JMENGINE_TEXTURE_HAS_CUDA
         std::string why;
         if (detail::cudaRuntimeAvailable(&why)) {
             std::string err;
@@ -724,7 +724,7 @@ Result TextureMapper::map(const TriangleMesh& mesh, const std::vector<CameraFram
     if (!usedCuda) {
         if (cfg.buildVisibilityDepth) {
             packedDepth.resize(static_cast<std::size_t>(cameras.size()) * dw * dh);
-#ifdef PCEDITOR_USE_OPENMP
+#ifdef JMENGINE_USE_OPENMP
 #pragma omp parallel for schedule(dynamic)
 #endif
             for (int ci = 0; ci < static_cast<int>(cameras.size()); ++ci) {
@@ -734,7 +734,7 @@ Result TextureMapper::map(const TriangleMesh& mesh, const std::vector<CameraFram
                           packedDepth.begin() + static_cast<std::size_t>(ci) * dw * dh);
             }
         }
-#ifdef PCEDITOR_USE_OPENMP
+#ifdef JMENGINE_USE_OPENMP
 #pragma omp parallel for schedule(dynamic,64)
 #endif
         for (int ti = 0; ti < static_cast<int>(mesh.triangleCount()); ++ti) {
@@ -761,7 +761,7 @@ Result TextureMapper::map(const TriangleMesh& mesh, const std::vector<CameraFram
     // initial CUDA winner. Build the compact CPU depth buffers once when CUDA did not return them.
     if (cfg.globalViewSelection && cfg.quality != Quality::Fast && cfg.buildVisibilityDepth && packedDepth.empty()) {
         packedDepth.resize(static_cast<std::size_t>(cameras.size()) * dw * dh);
-#ifdef PCEDITOR_USE_OPENMP
+#ifdef JMENGINE_USE_OPENMP
 #pragma omp parallel for schedule(dynamic)
 #endif
         for (int ci=0; ci<static_cast<int>(cameras.size()); ++ci) {
@@ -944,4 +944,4 @@ bool saveObj(const Result& result, const std::string& path, std::string* message
     return true;
 }
 
-} // namespace pceditor::texture
+} // namespace JMEngine::texture

@@ -2,7 +2,7 @@
 #include "PointCloudWidget.h"
 #include "ProcessingDialog.h"
 
-#include <pceditor/processing/Processing.h>
+#include <JMEngine/processing/Processing.h>
 
 #include <algorithm>
 #include <cmath>
@@ -103,7 +103,7 @@ MainWindow::MainWindow(const QString& initialFile, QWidget* parent) : QMainWindo
     });
     createMenus();
 
-    setWindowTitle(QString::fromUtf8("PointCloudEditor - Unified Qt Editor"));
+    setWindowTitle(QString::fromUtf8("JMEngine - Unified Qt Editor"));
     resize(1280, 800);
     statusBar()->showMessage(
         QString::fromUtf8("左键旋转 | Alt+左键移动当前对象 | Ctrl+左键选择 | 右/中键平移 | Delete删除高亮"));
@@ -361,9 +361,9 @@ void MainWindow::createMenus() {
     addProcessAction(meshProcessMenu, QString::fromUtf8("QEM 简化..."), "qem_decimate");
     addProcessAction(meshRepair, QString::fromUtf8("检测/填充孔洞..."), "hole_fill");
     addProcessAction(meshReconstruct, QString::fromUtf8("工业泊松重建..."), "poisson_octree");
-#ifdef PCEDITOR_HAS_TEXTURE_MAPPING
+#ifdef JMENGINE_HAS_TEXTURE_MAPPING
     auto* textureMenu = meshProcessMenu->addMenu(QString::fromUtf8("纹理映射"));
-    auto runTextureMapping = [this](pceditor::texture::Backend backend) {
+    auto runTextureMapping = [this](JMEngine::texture::Backend backend) {
         statusBar()->showMessage(QString::fromUtf8("正在后台执行纹理映射..."));
         view_->startTextureMappingAsync(backend, [this](bool ok, const QString& message) {
             statusBar()->showMessage(message, 10000);
@@ -373,9 +373,9 @@ void MainWindow::createMenus() {
     auto* textureAuto = textureMenu->addAction(QString::fromUtf8("自动（CUDA 优先）"));
     auto* textureCpu = textureMenu->addAction(QString::fromUtf8("CPU"));
     auto* textureCuda = textureMenu->addAction(QString::fromUtf8("CUDA"));
-    connect(textureAuto, &QAction::triggered, this, [runTextureMapping] { runTextureMapping(pceditor::texture::Backend::Auto); });
-    connect(textureCpu, &QAction::triggered, this, [runTextureMapping] { runTextureMapping(pceditor::texture::Backend::Cpu); });
-    connect(textureCuda, &QAction::triggered, this, [runTextureMapping] { runTextureMapping(pceditor::texture::Backend::Cuda); });
+    connect(textureAuto, &QAction::triggered, this, [runTextureMapping] { runTextureMapping(JMEngine::texture::Backend::Auto); });
+    connect(textureCpu, &QAction::triggered, this, [runTextureMapping] { runTextureMapping(JMEngine::texture::Backend::Cpu); });
+    connect(textureCuda, &QAction::triggered, this, [runTextureMapping] { runTextureMapping(JMEngine::texture::Backend::Cuda); });
 #endif
 
     auto* tools = menuBar()->addMenu(QString::fromUtf8("工具"));
@@ -393,7 +393,7 @@ void MainWindow::createMenus() {
     auto* diagnosticsAction = tools->addAction(QString::fromUtf8("模型诊断..."));
     connect(diagnosticsAction, &QAction::triggered, this, [this] {
         statusBar()->showMessage(QString::fromUtf8("正在后台诊断当前模型..."));
-        view_->analyzeActiveModelAsync([this](bool ok, const pceditor::processing::ModelDiagnostics& diagnostics,
+        view_->analyzeActiveModelAsync([this](bool ok, const JMEngine::processing::ModelDiagnostics& diagnostics,
                                               const QString& error) {
             if (!ok) {
                 statusBar()->showMessage(error);
@@ -403,7 +403,7 @@ void MainWindow::createMenus() {
             }
             statusBar()->showMessage(QString::fromUtf8("模型诊断完成"));
             QMessageBox::information(this, QString::fromUtf8("模型诊断"),
-                                     QString::fromUtf8(pceditor::processing::diagnosticsSummary(diagnostics).c_str()));
+                                     QString::fromUtf8(JMEngine::processing::diagnosticsSummary(diagnostics).c_str()));
         });
     });
 
@@ -433,7 +433,7 @@ void MainWindow::createMenus() {
     connect(about, &QAction::triggered, this, [this] {
         QMessageBox::information(
             this, QString::fromUtf8("关于"),
-            QString::fromUtf8("PointCloudEditor\n统一 Qt 编辑器 + 可切换渲染后端\nDesktop OpenGL 2.1 / OpenGL ES "
+            QString::fromUtf8("JMEngine\n统一 Qt 编辑器 + 可切换渲染后端\nDesktop OpenGL 2.1 / OpenGL ES "
                               "3.1\n支持触摸、OBJ/PLY/TXT/ASC、现代 R32UI GPU 表面选择（不可用自动 CPU）。"));
     });
 }
@@ -579,7 +579,7 @@ void MainWindow::createScanControl() {
     scanStartButton_ = new QPushButton(QString::fromUtf8("开始"), panel);
     scanStopButton_ = new QPushButton(QString::fromUtf8("结束"), panel);
     scanOfflineButton_ = new QPushButton(QString::fromUtf8("离线重建"), panel);
-#ifdef PCEDITOR_HAS_TEXTURE_MAPPING
+#ifdef JMENGINE_HAS_TEXTURE_MAPPING
     scanTextureButton_ = new QPushButton(QString::fromUtf8("纹理映射"), panel);
     scanTextureButton_->setToolTip(QString::fromUtf8(
         "扫描完成并执行离线重建后使用。若当前结果还是点云，会先自动进行工业泊松重建，再执行纹理映射。"));
@@ -589,7 +589,7 @@ void MainWindow::createScanControl() {
     scanResetButton_ = new QPushButton(QString::fromUtf8("重置"), panel);
     for (auto* button : {scanStartButton_, scanStopButton_, scanOfflineButton_, scanResetButton_})
         button->setMinimumWidth(76);
-#ifdef PCEDITOR_HAS_TEXTURE_MAPPING
+#ifdef JMENGINE_HAS_TEXTURE_MAPPING
     scanTextureButton_->setMinimumWidth(86);
 #endif
 
@@ -605,7 +605,7 @@ void MainWindow::createScanControl() {
     quickGrid->addWidget(scanStartButton_, 0, 8);
     quickGrid->addWidget(scanStopButton_, 0, 9);
     quickGrid->addWidget(scanOfflineButton_, 0, 10);
-#ifdef PCEDITOR_HAS_TEXTURE_MAPPING
+#ifdef JMENGINE_HAS_TEXTURE_MAPPING
     quickGrid->addWidget(scanTextureButton_, 0, 11);
     quickGrid->addWidget(scanResetButton_, 0, 12);
 #else
@@ -623,7 +623,7 @@ void MainWindow::createScanControl() {
 
     // Runtime rendering cadence: this is the actual paintGL rate, not camera/SLAM FPS.
     quickGrid->addWidget(scanRenderFpsLabel_, 2, 0, 1, 2);
-#ifdef PCEDITOR_HAS_TEXTURE_MAPPING
+#ifdef JMENGINE_HAS_TEXTURE_MAPPING
     quickGrid->addWidget(scanTextureFramesLabel_, 2, 2, 1, 2);
 #endif
     auto* renderFpsTimer = new QTimer(panel);
@@ -855,7 +855,7 @@ void MainWindow::createScanControl() {
         }
         removeScanModelListEntry();
         view_->clearScanPreview();
-#ifdef PCEDITOR_HAS_TEXTURE_MAPPING
+#ifdef JMENGINE_HAS_TEXTURE_MAPPING
         view_->setTextureFrames(nullptr);
         scanTextureFramesReady_ = false;
         if (scanTextureFramesLabel_) scanTextureFramesLabel_->setText(QString::fromUtf8("纹理帧：0"));
@@ -867,13 +867,13 @@ void MainWindow::createScanControl() {
     });
     connect(scanStopButton_, &QPushButton::clicked, this, [this] { scanController_->stopScan(); });
     connect(scanOfflineButton_, &QPushButton::clicked, this, [this] { scanController_->offlineReconstruct(); });
-#ifdef PCEDITOR_HAS_TEXTURE_MAPPING
+#ifdef JMENGINE_HAS_TEXTURE_MAPPING
     connect(scanTextureButton_, &QPushButton::clicked, this, [this] {
         if (!view_) return;
         scanTextureButton_->setEnabled(false);
         statusBar()->showMessage(QString::fromUtf8("正在准备扫描网格并执行纹理映射..."));
         const bool started = view_->startScanTextureMappingAsync(
-            pceditor::texture::Backend::Auto,
+            JMEngine::texture::Backend::Auto,
             [this](float progress, const QString& stage) {
                 statusBar()->showMessage(QString::fromUtf8("纹理流程 %1%：%2")
                                              .arg(int(std::lround(progress * 100.0f)))
@@ -898,7 +898,7 @@ void MainWindow::createScanControl() {
         scanController_->reset();
         removeScanModelListEntry();
         view_->clearScanPreview();
-#ifdef PCEDITOR_HAS_TEXTURE_MAPPING
+#ifdef JMENGINE_HAS_TEXTURE_MAPPING
         view_->setTextureFrames(nullptr);
         scanTextureFramesReady_ = false;
         if (scanTextureFramesLabel_) scanTextureFramesLabel_->setText(QString::fromUtf8("纹理帧：0"));
@@ -937,7 +937,7 @@ void MainWindow::createScanControl() {
         view_->updateScanCameraPose(viewPose);
     });
     scanController_->setReconstructionCallback([this](ScanFlowController::CloudPtr cloud) { view_->replaceScanPreview(cloud); });
-#ifdef PCEDITOR_HAS_TEXTURE_MAPPING
+#ifdef JMENGINE_HAS_TEXTURE_MAPPING
     scanController_->setTextureFramesCallback([this](ScanFlowController::TextureFramesPtr frames) {
         const std::size_t count = frames ? frames->size() : 0u;
         scanTextureFramesReady_ = count > 0u;
@@ -1134,7 +1134,7 @@ void MainWindow::applyScanState(ScanFlowController::State state) {
     if (scanStartButton_) scanStartButton_->setEnabled(idleLike);
     if (scanStopButton_) scanStopButton_->setEnabled(scanning);
     if (scanOfflineButton_) scanOfflineButton_->setEnabled(ready);
-#ifdef PCEDITOR_HAS_TEXTURE_MAPPING
+#ifdef JMENGINE_HAS_TEXTURE_MAPPING
     if (scanTextureButton_) scanTextureButton_->setEnabled(ready && scanTextureFramesReady_);
 #endif
     if (scanResetButton_)
@@ -1285,7 +1285,7 @@ void MainWindow::setCurrentModelColor() {
 }
 
 void MainWindow::openProcessingDialog(const std::string& operationId) {
-    auto operation = pceditor::processing::createOperation(operationId);
+    auto operation = JMEngine::processing::createOperation(operationId);
     if (!operation) {
         QMessageBox::warning(this, QString::fromUtf8("处理"), QString::fromUtf8("未知算法"));
         return;
@@ -1322,7 +1322,7 @@ void MainWindow::openProcessingDialog(const std::string& operationId) {
         // Poisson 前置确认保持 O(1)：不扫描点云/法向；完整检查进入 worker 并尽量并行。
         const auto preflight = view_->processingPreflight(operationId, params);
         if (!preflight.warnings.empty()) {
-            const QString details = QString::fromUtf8(pceditor::processing::preflightSummary(preflight).c_str());
+            const QString details = QString::fromUtf8(JMEngine::processing::preflightSummary(preflight).c_str());
             if (!preflight.allowed) {
                 QMessageBox::warning(this, QString::fromUtf8("处理预检未通过"), details);
                 safeDialog->setResultSummary(QString::fromUtf8("未启动：模型预检未通过"));

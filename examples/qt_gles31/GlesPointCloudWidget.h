@@ -6,8 +6,8 @@
 #include <QPoint>
 #include <QThreadPool>
 
-#include <pceditor/ObjModelLoader.h>
-#include <pceditor/PointCloudEditor.h>
+#include <JMEngine/ObjModelLoader.h>
+#include <JMEngine/JMEngine.h>
 
 #include "../common/ExampleUtils.h"
 
@@ -83,7 +83,7 @@ protected:
 
 private:
     struct PickVertex {
-        pceditor::Vec3f position{};
+        JMEngine::Vec3f position{};
         std::uint32_t id{0};
     };
 
@@ -92,12 +92,12 @@ private:
         bool visible{true};
         bool meshMode{false};
 
-        std::shared_ptr<pceditor::PointCloud> cloud;
-        pceditor::PointCloudEditor editor;
-        pceditor::ObjMeshData mesh;
+        std::shared_ptr<JMEngine::PointCloud> cloud;
+        JMEngine::Engine editor;
+        JMEngine::ObjMeshData mesh;
 
         std::vector<std::uint32_t> selectionMask;
-        std::vector<pceditor::PointId> selectedIds;
+        std::vector<JMEngine::PointId> selectedIds;
 
         // GPU 正常显示 Buffer。
         GLuint vao{0};
@@ -128,8 +128,8 @@ private:
         bool meshIndexUploadPending{false};
 
         Model(QString p,
-              std::shared_ptr<pceditor::PointCloud> c,
-              pceditor::ObjMeshData m,
+              std::shared_ptr<JMEngine::PointCloud> c,
+              JMEngine::ObjMeshData m,
               bool mesh);
     };
 
@@ -144,7 +144,7 @@ private:
     void destroyModelGl(Model& model);
     void uploadModelIncremental(Model& model, std::size_t& byteBudget);
     void uploadSelectionMask(Model& model);
-    void uploadChangedFlags(Model& model, const std::vector<pceditor::PointId>& ids);
+    void uploadChangedFlags(Model& model, const std::vector<JMEngine::PointId>& ids);
 
     void rebuildVisibleMeshAsync(Model& model);
 
@@ -160,17 +160,17 @@ private:
 
     void performSurfaceSelection(Qt::KeyboardModifiers modifiers);
     void performThroughSelection(Qt::KeyboardModifiers modifiers);
-    std::vector<pceditor::PointId> filterPickedIds(
+    std::vector<JMEngine::PointId> filterPickedIds(
         const Model& model,
         const std::vector<std::uint32_t>& ids,
         bool triangleIds) const;
     void applySelection(Model& model,
-                        std::vector<pceditor::PointId> ids,
+                        std::vector<JMEngine::PointId> ids,
                         Qt::KeyboardModifiers modifiers);
 
     bool handleTouchEvent(QTouchEvent* event);
 
-    pceditor::Mat4f currentMvp() const;
+    JMEngine::Mat4f currentMvp() const;
     QPoint toPhysical(const QPointF& p) const;
 
 private:
@@ -178,7 +178,7 @@ private:
     std::vector<QString> loadingPaths_;
     int activeModelIndex_{-1};
 
-    pceditor::example::OrbitCamera camera_;
+    JMEngine::example::OrbitCamera camera_;
 
     QOpenGLShaderProgram pointProgram_;
     QOpenGLShaderProgram meshProgram_;

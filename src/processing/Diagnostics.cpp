@@ -1,4 +1,4 @@
-#include <pceditor/processing/Diagnostics.h>
+#include <JMEngine/processing/Diagnostics.h>
 
 #include <algorithm>
 #include <cmath>
@@ -19,7 +19,7 @@
 #include <unistd.h>
 #endif
 
-namespace pceditor::processing {
+namespace JMEngine::processing {
 namespace {
 
 bool finite(const Vec3f& v) {
@@ -322,4 +322,4 @@ std::string preflightSummary(const ProcessingPreflight& p) {
     return out.str();
 }
 
-} // namespace pceditor::processing
+} // namespace JMEngine::processing

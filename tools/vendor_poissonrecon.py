@@ -50,7 +50,7 @@ def validate(root: Path) -> None:
 
 def download(url: str) -> bytes:
     print(f"Downloading official PoissonRecon {EXPECTED_VERSION}: {url}")
-    request = urllib.request.Request(url, headers={"User-Agent": "PointCloudEditor-vendor/2.2.0"})
+    request = urllib.request.Request(url, headers={"User-Agent": "JMEngine-vendor/2.2.0"})
     with urllib.request.urlopen(request, timeout=120) as response:
         return response.read()
 
@@ -73,7 +73,7 @@ def main() -> int:
     else:
         data = download(args.url)
 
-    with tempfile.TemporaryDirectory(prefix="pceditor-poisson-") as td:
+    with tempfile.TemporaryDirectory(prefix="JMEngine-poisson-") as td:
         temp = Path(td)
         with zipfile.ZipFile(io.BytesIO(data)) as zf:
             bad = zf.testzip()
@@ -88,7 +88,7 @@ def main() -> int:
         shutil.copytree(source_root, DEST)
 
     validate(DEST)
-    marker = DEST / "PCEDITOR_VENDOR_VERSION.txt"
+    marker = DEST / "JMENGINE_VENDOR_VERSION.txt"
     marker.write_text(
         "PoissonRecon 18.76\n"
         f"Source: {args.url if not args.archive else args.archive}\n"

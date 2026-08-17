@@ -1,7 +1,7 @@
 #pragma once
-#include <pceditor/texture/TextureMapper.h>
+#include <JMEngine/texture/TextureMapper.h>
 
-namespace pceditor::texture::detail {
+namespace JMEngine::texture::detail {
 bool cudaRuntimeAvailable(std::string* reason) noexcept;
 bool selectBestCamerasCuda(const TriangleMesh& mesh,
                            const std::vector<CameraFrame>& cameras,

@@ -1,7 +1,7 @@
 #pragma once
 
-#include <pceditor/PointCloudIO.h>
-#include <pceditor/Types.h>
+#include <JMEngine/PointCloudIO.h>
+#include <JMEngine/Types.h>
 
 #include <algorithm>
 #include <cmath>
@@ -20,7 +20,7 @@
 #include <windows.h>
 #endif
 
-namespace pceditor::example {
+namespace JMEngine::example {
 
 // Windows 控制台默认经常不是 UTF-8，直接 std::cout 中文会乱码。
 // 示例程序启动时调用一次即可；核心库本身不修改宿主程序控制台设置。
@@ -352,4 +352,4 @@ inline Mat4f makeFitMvp(const PointCloud& cloud) {
     return m;
 }
 
-} // namespace pceditor::example
+} // namespace JMEngine::example

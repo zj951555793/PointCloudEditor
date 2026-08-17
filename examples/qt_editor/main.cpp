@@ -12,7 +12,7 @@ int main(int argc, char* argv[]) {
     // Windows/x86 Desktop：OpenGL 3.2 Compatibility（现代 R32UI GPU Picking）
     // RK3588/ARM64 Linux：OpenGL ES 3.1
     QSurfaceFormat fmt;
-#ifdef PCEDITOR_RENDER_GLES31
+#ifdef JMENGINE_RENDER_GLES31
     fmt.setRenderableType(QSurfaceFormat::OpenGLES);
     fmt.setVersion(3, 1);
     fmt.setProfile(QSurfaceFormat::NoProfile);

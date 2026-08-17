@@ -1,5 +1,5 @@
-#include "pceditor/ObjModelLoader.h"
-#include <pceditor/processing/Parallel.h>
+#include "JMEngine/ObjModelLoader.h"
+#include <JMEngine/processing/Parallel.h>
 
 #include <algorithm>
 #include <cctype>
@@ -13,11 +13,11 @@
 #include <utility>
 #include <vector>
 
-#ifdef PCEDITOR_USE_OPENMP
+#ifdef JMENGINE_USE_OPENMP
 #include <omp.h>
 #endif
 
-namespace pceditor {
+namespace JMEngine {
 namespace {
 
 struct FaceRef {
@@ -412,7 +412,7 @@ bool ObjModelLoader::load(const std::string& objFile, ObjModelData& out, std::st
     std::vector<FaceRef>().swap(faceRefs);
 
     if (!normalSum.empty()) {
-#ifdef PCEDITOR_USE_OPENMP
+#ifdef JMENGINE_USE_OPENMP
 #pragma omp parallel for schedule(static) num_threads(processing::processingThreadCount())
 #endif
         for (std::int64_t ii = 0; ii < static_cast<std::int64_t>(points.size()); ++ii) {
@@ -442,7 +442,7 @@ bool ObjModelLoader::load(const std::string& objFile, ObjModelData& out, std::st
         std::ostringstream ss;
         ss << "OBJ 加载完成：顶点=" << out.cloud->size() << "，三角形=" << out.mesh.triangleCount()
            << "，低峰值双遍流式解析";
-#ifdef PCEDITOR_USE_OPENMP
+#ifdef JMENGINE_USE_OPENMP
         ss << "，OpenMP=" << processing::processingThreadCount() << "线程(法向归一化，保留1核)";
 #else
         ss << "，OpenMP=关闭";
@@ -466,4 +466,4 @@ bool ObjAppearanceData::hasNormals() const noexcept {
     return false;
 }
 
-} // namespace pceditor
+} // namespace JMEngine

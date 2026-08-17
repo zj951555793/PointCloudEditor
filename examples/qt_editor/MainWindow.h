@@ -84,7 +84,7 @@ class MainWindow final : public QMainWindow {
     QPushButton* scanStartButton_{nullptr};
     QPushButton* scanStopButton_{nullptr};
     QPushButton* scanOfflineButton_{nullptr};
-#ifdef PCEDITOR_HAS_TEXTURE_MAPPING
+#ifdef JMENGINE_HAS_TEXTURE_MAPPING
     QPushButton* scanTextureButton_{nullptr};
     QLabel* scanTextureFramesLabel_{nullptr};
     bool scanTextureFramesReady_{false};

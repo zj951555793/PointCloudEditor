@@ -1,7 +1,7 @@
-#include <pceditor/processing/Processing.h>
-#include <pceditor/processing/Operations.h>
+#include <JMEngine/processing/Processing.h>
+#include <JMEngine/processing/Operations.h>
 #include <cmath>
-namespace pceditor::processing {
+namespace JMEngine::processing {
 std::unique_ptr<IProcessingOperation> createOperation(const std::string& id) {
     if (id == "voxel")
         return std::make_unique<VoxelDownsampleOperation>();
@@ -39,9 +39,9 @@ std::vector<OperationDescriptor> builtinOperations() {
     }
     return out;
 }
-} // namespace pceditor::processing
+} // namespace JMEngine::processing
 
-namespace pceditor::processing {
+namespace JMEngine::processing {
 namespace {
 struct ModelStatistics {
     double diagonal{1.0};
@@ -197,4 +197,4 @@ OperationDescriptor estimateOperationDescriptor(const IProcessingOperation& oper
     }
     return d;
 }
-} // namespace pceditor::processing
+} // namespace JMEngine::processing

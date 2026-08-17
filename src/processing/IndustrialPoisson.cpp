@@ -1,7 +1,7 @@
-#include <pceditor/processing/Operations.h>
-#include <pceditor/MeshUtils.h>
-#include <pceditor/processing/Parallel.h>
-#include <pceditor/processing/Diagnostics.h>
+#include <JMEngine/processing/Operations.h>
+#include <JMEngine/MeshUtils.h>
+#include <JMEngine/processing/Parallel.h>
+#include <JMEngine/processing/Diagnostics.h>
 
 #include <algorithm>
 #include <array>
@@ -32,13 +32,13 @@
 #include <unistd.h>
 #endif
 
-#ifdef PCEDITOR_HAS_POISSONRECON
+#ifdef JMENGINE_HAS_POISSONRECON
 #include "MultiThreading.h"
 #include "PreProcessor.h"
 #include "Reconstructors.h"
 #endif
 
-namespace pceditor::processing {
+namespace JMEngine::processing {
 namespace {
 
 float normalLength(const Vec3f& n) {
@@ -135,7 +135,7 @@ float distanceSquared(const Vec3f& a, const Vec3f& b) {
     }
 
     const int nt = processingThreadCount();
-#ifdef PCEDITOR_USE_OPENMP
+#ifdef JMENGINE_USE_OPENMP
 #pragma omp parallel for schedule(static) num_threads(nt)
 #endif
     for (long long vi = 0; vi < static_cast<long long>(vertices->size()); ++vi) {
@@ -211,7 +211,7 @@ std::shared_ptr<PointCloud> ensurePoissonNormals(const ProcessInput& input, cons
         // MeshLab 的 Pre-Clean 默认关闭；开启时才复制并清理无效点/空法线。
         auto cleaned = std::make_shared<PointCloud>(cloud->points());
         const int nt = processingThreadCount();
-#ifdef PCEDITOR_USE_OPENMP
+#ifdef JMENGINE_USE_OPENMP
 #pragma omp parallel for schedule(static) num_threads(nt)
 #endif
         for (long long i = 0; i < static_cast<long long>(cleaned->size()); ++i) {
@@ -231,7 +231,7 @@ std::shared_ptr<PointCloud> ensurePoissonNormals(const ProcessInput& input, cons
     unsigned long long validNormals64 = 0;
     unsigned long long active64 = 0;
     const int validationThreads = processingThreadCount();
-#ifdef PCEDITOR_USE_OPENMP
+#ifdef JMENGINE_USE_OPENMP
 #pragma omp parallel for reduction(+ : validNormals64, active64) schedule(static) num_threads(validationThreads)
 #endif
     for (long long i = 0; i < static_cast<long long>(cloud->size()); ++i) {
@@ -292,7 +292,7 @@ std::shared_ptr<PointCloud> ensurePoissonNormals(const ProcessInput& input, cons
     return cloud;
 }
 
-#ifdef PCEDITOR_HAS_POISSONRECON
+#ifdef JMENGINE_HAS_POISSONRECON
 
 using PoissonReal = float;
 constexpr unsigned int kPoissonDim = 3;
@@ -407,7 +407,7 @@ bool writeOfficialSurfaceTrimmerInput(const MeshVertexStream& vertices, const Tr
     std::ofstream out(fileName, std::ios::binary);
     if (!out) return false;
     out << "ply\nformat ascii 1.0\n";
-    out << "comment PointCloudEditor official PoissonRecon SurfaceTrimmer input\n";
+    out << "comment JMEngine official PoissonRecon SurfaceTrimmer input\n";
     out << "element vertex " << vertices.points.size() << "\n";
     out << "property float x\nproperty float y\nproperty float z\nproperty float value\n";
     out << "element face " << faces.polygons.size() << "\n";
@@ -486,16 +486,16 @@ std::shared_ptr<TriangleMesh> readOfficialSurfaceTrimmerOutput(const std::filesy
 }
 
 std::filesystem::path officialSurfaceTrimmerExecutable() {
-#ifdef PCEDITOR_OFFICIAL_SURFACE_TRIMMER_EXE
-    std::filesystem::path configured(PCEDITOR_OFFICIAL_SURFACE_TRIMMER_EXE);
+#ifdef JMENGINE_OFFICIAL_SURFACE_TRIMMER_EXE
+    std::filesystem::path configured(JMENGINE_OFFICIAL_SURFACE_TRIMMER_EXE);
     std::error_code ec;
     if (std::filesystem::exists(configured, ec)) return configured;
     const auto fileName = configured.filename();
 #else
 #ifdef _WIN32
-    const std::filesystem::path fileName("pceditor_surface_trimmer_official.exe");
+    const std::filesystem::path fileName("JMEngine_surface_trimmer_official.exe");
 #else
-    const std::filesystem::path fileName("pceditor_surface_trimmer_official");
+    const std::filesystem::path fileName("JMEngine_surface_trimmer_official");
 #endif
 #endif
 #ifdef _WIN32
@@ -546,7 +546,7 @@ std::shared_ptr<TriangleMesh> runOfficialSurfaceTrimmer(const MeshVertexStream& 
     const auto stamp = std::chrono::high_resolution_clock::now().time_since_epoch().count();
     const auto tid = std::hash<std::thread::id>{}(std::this_thread::get_id());
     const auto dir = std::filesystem::temp_directory_path(ec) /
-                     ("pceditor_surface_trimmer_" + std::to_string(stamp) + "_" + std::to_string(tid));
+                     ("JMEngine_surface_trimmer_" + std::to_string(stamp) + "_" + std::to_string(tid));
     if (ec || !std::filesystem::create_directories(dir, ec)) return {};
     struct Cleanup { std::filesystem::path p; ~Cleanup(){ std::error_code e; std::filesystem::remove_all(p,e); } } cleanup{dir};
     const auto input = dir / "poisson_density.ply";
@@ -565,7 +565,7 @@ std::shared_ptr<TriangleMesh> runOfficialSurfaceTrimmer(const MeshVertexStream& 
     return readOfficialSurfaceTrimmerOutput(output);
 }
 
-#endif // PCEDITOR_HAS_POISSONRECON
+#endif // JMENGINE_HAS_POISSONRECON
 
 // Surface trimming is delegated to the unmodified upstream SurfaceTrimmer executable.
 
@@ -771,7 +771,7 @@ ProcessResult OctreePoissonOperation::run(const ProcessInput& input, const Param
         return result;
     }
 
-#ifndef PCEDITOR_HAS_POISSONRECON
+#ifndef JMENGINE_HAS_POISSONRECON
     result.message = "工业泊松后端未配置。请先运行 tools/vendor_poissonrecon.py，将官方 PoissonRecon 18.76 放入 "
                      "third_party/PoissonRecon，然后重新 Configure。";
     return result;
@@ -928,7 +928,7 @@ ProcessResult OctreePoissonOperation::run(const ProcessInput& input, const Param
     // 顶点集合与输入点云已经不是一一对应，因此必须在最终拓扑上重新计算渲染/后处理法线。
     if (progress)
         progress({0.975f, "6/7 重建最终网格法线"});
-    if (!pceditor::recomputeVertexNormals(*mesh)) {
+    if (!JMEngine::recomputeVertexNormals(*mesh)) {
         result.message = "泊松网格已生成，但最终顶点法线重建失败";
         return result;
     }
@@ -988,11 +988,11 @@ ProcessResult OctreePoissonOperation::run(const ProcessInput& input, const Param
 }
 
 bool industrialPoissonAvailable() noexcept {
-#ifdef PCEDITOR_HAS_POISSONRECON
+#ifdef JMENGINE_HAS_POISSONRECON
     return true;
 #else
     return false;
 #endif
 }
 
-} // namespace pceditor::processing
+} // namespace JMEngine::processing

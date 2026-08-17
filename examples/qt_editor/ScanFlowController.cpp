@@ -21,7 +21,7 @@
 #include <mutex>
 #include <thread>
 
-#ifdef PCEDITOR_HAS_RULERMVS
+#ifdef JMENGINE_HAS_RULERMVS
 #include <opencv2/opencv.hpp>
 #include <DBoW3/DBoW3.h>
 #include "rulermvs.hpp"
@@ -33,7 +33,7 @@
 namespace fs = std::filesystem;
 
 namespace {
-#ifdef PCEDITOR_HAS_RULERMVS
+#ifdef JMENGINE_HAS_RULERMVS
 struct RawScanFrame {
     int index{-1};
     cv::Mat rgb;   // Camera B / virtual img/c: BGR color image.
@@ -62,7 +62,7 @@ std::uint32_t packBgr(const cv::Vec3b& bgr) {
            (std::uint32_t(bgr[0]) << 16u) | 0xff000000u;
 }
 
-pceditor::Vec3f transformPoint(const cv::Mat& rt, const cv::Point3f& p) {
+JMEngine::Vec3f transformPoint(const cv::Mat& rt, const cv::Point3f& p) {
     if (rt.empty() || rt.rows < 3 || rt.cols < 4) return {p.x, p.y, p.z};
     auto at = [&rt](int r, int c) -> double {
         return rt.type() == CV_32F ? double(rt.at<float>(r, c)) : rt.at<double>(r, c);
@@ -72,13 +72,13 @@ pceditor::Vec3f transformPoint(const cv::Mat& rt, const cv::Point3f& p) {
             float(at(2,0)*p.x + at(2,1)*p.y + at(2,2)*p.z + at(2,3))};
 }
 
-pceditor::Vec3f transformDirection(const cv::Mat& rt, const cv::Point3f& v) {
+JMEngine::Vec3f transformDirection(const cv::Mat& rt, const cv::Point3f& v) {
     if (rt.empty() || rt.rows < 3 || rt.cols < 3)
         return {v.x, v.y, v.z};
     auto at = [&rt](int r, int c) -> double {
         return rt.type() == CV_32F ? double(rt.at<float>(r, c)) : rt.at<double>(r, c);
     };
-    pceditor::Vec3f out{float(at(0,0)*v.x + at(0,1)*v.y + at(0,2)*v.z),
+    JMEngine::Vec3f out{float(at(0,0)*v.x + at(0,1)*v.y + at(0,2)*v.z),
                         float(at(1,0)*v.x + at(1,1)*v.y + at(1,2)*v.z),
                         float(at(2,0)*v.x + at(2,1)*v.y + at(2,2)*v.z)};
     const float len = std::sqrt(out.x*out.x + out.y*out.y + out.z*out.z);
@@ -86,12 +86,12 @@ pceditor::Vec3f transformDirection(const cv::Mat& rt, const cv::Point3f& v) {
     return out;
 }
 
-pceditor::Vec3f transformNormal(const cv::Mat& rt, const cv::Point3f& n) {
+JMEngine::Vec3f transformNormal(const cv::Mat& rt, const cv::Point3f& n) {
     if (rt.empty() || rt.rows < 3 || rt.cols < 3) return {n.x, n.y, n.z};
     auto at = [&rt](int r, int c) -> double {
         return rt.type() == CV_32F ? double(rt.at<float>(r, c)) : rt.at<double>(r, c);
     };
-    pceditor::Vec3f out{float(at(0,0)*n.x + at(0,1)*n.y + at(0,2)*n.z),
+    JMEngine::Vec3f out{float(at(0,0)*n.x + at(0,1)*n.y + at(0,2)*n.z),
                        float(at(1,0)*n.x + at(1,1)*n.y + at(1,2)*n.z),
                        float(at(2,0)*n.x + at(2,1)*n.y + at(2,2)*n.z)};
     const float len = std::sqrt(out.x*out.x + out.y*out.y + out.z*out.z);
@@ -109,7 +109,7 @@ cv::Mat poseToCvMat(const rulermvs::Pose& pose) {
     return rt;
 }
 
-// cv::Mat uses row/column indexing, while pceditor::Mat4f/OpenGL stores matrices
+// cv::Mat uses row/column indexing, while JMEngine::Mat4f/OpenGL stores matrices
 // in column-major order. Convert the latest SLAM RT once before publishing it to UI.
 std::array<float, 16> cvPoseToColumnMajor(const cv::Mat& rt) {
     std::array<float, 16> out{1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
@@ -167,9 +167,9 @@ bool poseUpdateLooksReasonable(const std::array<float, 16>& oldPose,
     return translation <= 120.0f && angleDeg <= 20.0f;
 }
 
-#ifdef PCEDITOR_HAS_TEXTURE_MAPPING
-pceditor::texture::ImageRGB8 bgrToTextureRgb(const cv::Mat& image) {
-    pceditor::texture::ImageRGB8 out;
+#ifdef JMENGINE_HAS_TEXTURE_MAPPING
+JMEngine::texture::ImageRGB8 bgrToTextureRgb(const cv::Mat& image) {
+    JMEngine::texture::ImageRGB8 out;
     if (image.empty()) return out;
     cv::Mat rgb;
     if (image.channels() == 3) cv::cvtColor(image, rgb, cv::COLOR_BGR2RGB);
@@ -429,7 +429,7 @@ class DualCameraCapture {
 
 class ScanFlowController::ScanSourceWorker final : public QObject {
   public:
-#ifdef PCEDITOR_HAS_RULERMVS
+#ifdef JMENGINE_HAS_RULERMVS
     using FrameCallback = std::function<void(quint64, RawScanFramePtr)>;
 #else
     using FrameCallback = std::function<void(quint64, std::shared_ptr<void>)>;
@@ -461,7 +461,7 @@ class ScanFlowController::ScanSourceWorker final : public QObject {
         virtualRequestScheduled_ = false;
         lastVirtualEmitMs_ = -1;
         virtualClock_.restart();
-#ifdef PCEDITOR_HAS_RULERMVS
+#ifdef JMENGINE_HAS_RULERMVS
         if (config_.sourceMode == ScanSourceMode::Virtual) {
             rgbNames_ = sortedJpegs(fs::path(config.dataDir.toStdString()) / "img" / "c");
             codeNames_ = sortedJpegs(fs::path(config.dataDir.toStdString()) / "img" / "p");
@@ -527,7 +527,7 @@ class ScanFlowController::ScanSourceWorker final : public QObject {
 
     void requestNext() {
         if (stopped_) return;
-#ifdef PCEDITOR_HAS_RULERMVS
+#ifdef JMENGINE_HAS_RULERMVS
         if (index_ >= total_) {
             stopped_ = true;
             cameras_.stop();
@@ -625,7 +625,7 @@ class ScanFlowController::ScanSourceWorker final : public QObject {
     void setExposure(ScanCameraRole role, double value) {
         if (role == ScanCameraRole::CameraA) config_.cameraAExposure = value;
         else config_.cameraBExposure = value;
-#ifdef PCEDITOR_HAS_RULERMVS
+#ifdef JMENGINE_HAS_RULERMVS
         cameras_.setExposure(role == ScanCameraRole::CameraA, value);
 #endif
     }
@@ -633,14 +633,14 @@ class ScanFlowController::ScanSourceWorker final : public QObject {
     void setBacklight(ScanCameraRole role, double value) {
         if (role == ScanCameraRole::CameraA) config_.cameraABacklight = value;
         else config_.cameraBBacklight = value;
-#ifdef PCEDITOR_HAS_RULERMVS
+#ifdef JMENGINE_HAS_RULERMVS
         cameras_.setBacklight(role == ScanCameraRole::CameraA, value);
 #endif
     }
 
     void stop() {
         stopped_ = true;
-#ifdef PCEDITOR_HAS_RULERMVS
+#ifdef JMENGINE_HAS_RULERMVS
         cameras_.stop();
 #endif
     }
@@ -649,7 +649,7 @@ class ScanFlowController::ScanSourceWorker final : public QObject {
         virtualRequestScheduled_ = false;
         lastVirtualEmitMs_ = -1;
         index_ = total_ = 0;
-#ifdef PCEDITOR_HAS_RULERMVS
+#ifdef JMENGINE_HAS_RULERMVS
         rgbNames_.clear();
         codeNames_.clear();
 #endif
@@ -665,7 +665,7 @@ class ScanFlowController::ScanSourceWorker final : public QObject {
     QElapsedTimer virtualClock_;
     qint64 lastVirtualEmitMs_{-1};
     bool virtualRequestScheduled_{false};
-#ifdef PCEDITOR_HAS_RULERMVS
+#ifdef JMENGINE_HAS_RULERMVS
     std::vector<std::string> rgbNames_;
     std::vector<std::string> codeNames_;
     DualCameraCapture cameras_;
@@ -683,7 +683,7 @@ class ScanFlowController::RulerMvsWorker final : public QObject {
     using PoseCallback = ScanFlowController::PoseCallback;
     using LiveFrameCallback = ScanFlowController::LiveFrameCallback;
     using LivePoseUpdatesCallback = ScanFlowController::LivePoseUpdatesCallback;
-#ifdef PCEDITOR_HAS_TEXTURE_MAPPING
+#ifdef JMENGINE_HAS_TEXTURE_MAPPING
     using TextureFramesCallback = ScanFlowController::TextureFramesCallback;
 #endif
 
@@ -697,13 +697,13 @@ class ScanFlowController::RulerMvsWorker final : public QObject {
     ProgressCallback onReconstructProgress;
     MessageCallback onMessage;
     PoseCallback onPose;
-#ifdef PCEDITOR_HAS_TEXTURE_MAPPING
+#ifdef JMENGINE_HAS_TEXTURE_MAPPING
     TextureFramesCallback onTextureFrames;
 #endif
 
     void initialize(const ScanConfig& config, quint64 runEpoch) {
         config_ = config;
-#ifdef PCEDITOR_HAS_RULERMVS
+#ifdef JMENGINE_HAS_RULERMVS
         activeEpoch_ = runEpoch;
         resetInternal();
         QString calibQ = config.calibrationPath.trimmed();
@@ -745,7 +745,7 @@ class ScanFlowController::RulerMvsWorker final : public QObject {
         depthK_.at<double>(1,1) = cam_.fy * sy;
         depthK_.at<double>(1,2) = cam_.cy * sy;
         rulermvs::createUndistorRectifyMap(cam_, {}, cam_.nodistor().noskew() / 4, mapX_, mapY_);
-#ifdef PCEDITOR_HAS_TEXTURE_MAPPING
+#ifdef JMENGINE_HAS_TEXTURE_MAPPING
         textureScaleDivisor_ = 1; // Final texturing must use the original undistorted RGB resolution.
         textureSize_ = rgbSize_ / textureScaleDivisor_;
         textureK_ = cv::Mat::eye(3, 3, CV_64F);
@@ -792,7 +792,7 @@ class ScanFlowController::RulerMvsWorker final : public QObject {
 #endif
     }
 
-#ifdef PCEDITOR_HAS_RULERMVS
+#ifdef JMENGINE_HAS_RULERMVS
     // Camera/source input is latest-frame-only when RGBDFusion is busy.  The input credit is
     // released by completion of the SDK decode callback, NOT by trace/result callbacks: LOST
     // tracking is therefore still allowed to receive fresh observations for relocalization.
@@ -864,7 +864,7 @@ class ScanFlowController::RulerMvsWorker final : public QObject {
             cv::remap(rgb, color, mapX, mapY, cv::INTER_LINEAR);
             cv::cvtColor(color, gray, cv::COLOR_BGR2GRAY);
             cv::resize(color, color, depthSize_);
-#ifdef PCEDITOR_HAS_TEXTURE_MAPPING
+#ifdef JMENGINE_HAS_TEXTURE_MAPPING
             const int textureStride = std::max(1, config_.textureKeyframeStride);
             if ((frameIndex % textureStride) == 0) {
                 cv::Mat textureColor;
@@ -890,7 +890,7 @@ class ScanFlowController::RulerMvsWorker final : public QObject {
 #endif
 
     void finishInput() {
-#ifdef PCEDITOR_HAS_RULERMVS
+#ifdef JMENGINE_HAS_RULERMVS
         accepting_.store(false);
         inputFinished_.store(true);
         pendingFrame_.reset();
@@ -913,7 +913,7 @@ class ScanFlowController::RulerMvsWorker final : public QObject {
     }
 
     void offlineReconstruct() {
-#ifdef PCEDITOR_HAS_RULERMVS
+#ifdef JMENGINE_HAS_RULERMVS
         if (!fusion_) {
             if (onMessage) onMessage(QString::fromUtf8("没有可用于离线重建的扫描数据"));
             return;
@@ -923,7 +923,7 @@ class ScanFlowController::RulerMvsWorker final : public QObject {
                                       stop = false;
                                       if (onReconstructProgress) onReconstructProgress(progress);
                                   });
-#ifdef PCEDITOR_HAS_TEXTURE_MAPPING
+#ifdef JMENGINE_HAS_TEXTURE_MAPPING
         if (onTextureFrames) {
             std::unordered_map<int, cv::Mat> finalWorldFromCamera;
             fusion_->getResults([&](const rgbdslam::IRGBDResult& r) {
@@ -949,7 +949,7 @@ class ScanFlowController::RulerMvsWorker final : public QObject {
                 const int frameId = savedImages[i].first;
                 const auto pit = finalWorldFromCamera.find(frameId);
                 if (pit == finalWorldFromCamera.end()) continue;
-                pceditor::texture::CameraFrame tf;
+                JMEngine::texture::CameraFrame tf;
                 tf.frameId = frameId;
                 tf.image = bgrToTextureRgb(savedImages[i].second);
                 tf.fx = static_cast<float>(textureK_.at<double>(0, 0));
@@ -974,29 +974,29 @@ class ScanFlowController::RulerMvsWorker final : public QObject {
         std::vector<cv::Point3f> pts, nls;
         std::vector<cv::Vec3b> rgbs;
         fusion_->fusePoints(pts, nls, rgbs);
-        pceditor::PointCloud::Container out;
+        JMEngine::PointCloud::Container out;
         out.reserve(pts.size());
         for (std::size_t i = 0; i < pts.size(); ++i) {
-            pceditor::Point p;
+            JMEngine::Point p;
             p.position = {pts[i].x, pts[i].y, pts[i].z};
             if (i < nls.size()) p.normal = {nls[i].x, nls[i].y, nls[i].z};
             if (i < rgbs.size()) p.rgba = packBgr(rgbs[i]);
             out.push_back(p);
         }
-        if (onReconstructed) onReconstructed(std::make_shared<pceditor::PointCloud>(std::move(out)));
+        if (onReconstructed) onReconstructed(std::make_shared<JMEngine::PointCloud>(std::move(out)));
 #else
         if (onMessage) onMessage(QString::fromUtf8("当前构建未启用 rulermvs"));
 #endif
     }
 
     void reset() {
-#ifdef PCEDITOR_HAS_RULERMVS
+#ifdef JMENGINE_HAS_RULERMVS
         resetInternal();
 #endif
     }
 
   private:
-#ifdef PCEDITOR_HAS_RULERMVS
+#ifdef JMENGINE_HAS_RULERMVS
     void handleFusionResult(const rgbdslam::IRGBDResult& result) {
         // Result callbacks are OUTPUT ONLY. They never release/enable input submission.
         // Some accepted frames may not produce a trace callback, especially while tracking is lost.
@@ -1052,13 +1052,13 @@ class ScanFlowController::RulerMvsWorker final : public QObject {
             localChunk->reserve(std::min<std::size_t>(pts.size(), std::size_t(limit)));
             worldChunk->reserve(localChunk->capacity());
             for (std::size_t i = 0; i < pts.size(); i += stride) {
-                pceditor::Point local;
+                JMEngine::Point local;
                 local.position = {pts[i].x, pts[i].y, pts[i].z};
                 if (i < nls.size()) local.normal = {nls[i].x, nls[i].y, nls[i].z};
                 if (i < colors.size()) local.rgba = packBgr(colors[i]);
                 localChunk->push_back(local);
 
-                pceditor::Point world = local;
+                JMEngine::Point world = local;
                 world.position = transformPoint(framePose, pts[i]);
                 if (i < nls.size()) world.normal = transformNormal(framePose, nls[i]);
                 worldChunk->push_back(world);
@@ -1139,7 +1139,7 @@ class ScanFlowController::RulerMvsWorker final : public QObject {
         submitted_.store(0);
         completed_.store(0);
         lastPublishedPoseByFrame_.clear();
-#ifdef PCEDITOR_HAS_TEXTURE_MAPPING
+#ifdef JMENGINE_HAS_TEXTURE_MAPPING
         {
             std::lock_guard<std::mutex> lock(textureFrameMutex_);
             textureImagesByFrame_.clear();
@@ -1154,7 +1154,7 @@ class ScanFlowController::RulerMvsWorker final : public QObject {
     rulermvs::Imagef mapX_, mapY_;
     cv::Size depthSize_, rgbSize_;
     cv::Mat depthK_;
-#ifdef PCEDITOR_HAS_TEXTURE_MAPPING
+#ifdef JMENGINE_HAS_TEXTURE_MAPPING
     rulermvs::Imagef textureMapX_, textureMapY_;
     cv::Size textureSize_;
     cv::Mat textureK_;
@@ -1179,7 +1179,7 @@ class ScanFlowController::RulerMvsWorker final : public QObject {
     std::atomic<bool> stopped_{false};
     std::atomic<bool> liveRefreshPending_{false};
     std::unordered_map<int, std::array<float,16>> lastPublishedPoseByFrame_;
-#ifdef PCEDITOR_HAS_TEXTURE_MAPPING
+#ifdef JMENGINE_HAS_TEXTURE_MAPPING
     std::mutex textureFrameMutex_;
     std::unordered_map<int, cv::Mat> textureImagesByFrame_;
 #endif
@@ -1198,7 +1198,7 @@ ScanFlowController::ScanFlowController(QObject* parent) : QObject(parent) {
     QPointer<ScanFlowController> self(this);
     source_->onFrame = [self](quint64 epoch, auto frame) {
         if (!self || !frame) return;
-#ifdef PCEDITOR_HAS_RULERMVS
+#ifdef JMENGINE_HAS_RULERMVS
         // Raw scan frames go straight SourceThread -> PipelineThread.  Do not route 10 FPS
         // image traffic through the GUI event queue; the pipeline validates runEpoch itself.
         QMetaObject::invokeMethod(self->pipeline_,
@@ -1275,41 +1275,52 @@ ScanFlowController::ScanFlowController(QObject* parent) : QObject(parent) {
         }, Qt::QueuedConnection);
     };
     pipeline_->onPreview = [self](PointChunkPtr chunk) {
-        if (!self) return;
-        QMetaObject::invokeMethod(self, [self, chunk = std::move(chunk)]() mutable {
-            if (self && self->previewCallback_ && self->state_ != State::Idle)
-                self->previewCallback_(std::move(chunk));
-        }, Qt::QueuedConnection);
+        if (!self || !chunk) return;
+        {
+            std::lock_guard<std::mutex> lock(self->renderMailboxMutex_);
+            self->latestPreviewChunk_ = std::move(chunk); // transient preview: newest wins
+        }
+        self->scheduleRenderDispatch();
     };
     pipeline_->onLiveFrame = [self](PointChunkPtr points, const std::array<float,16>& pose, int frameId) {
-        if (!self) return;
-        QMetaObject::invokeMethod(self, [self, points = std::move(points), pose, frameId]() mutable {
-            if (self && self->liveFrameCallback_ && self->state_ == State::Scanning && points)
-                self->liveFrameCallback_(std::move(points), pose, frameId);
-        }, Qt::QueuedConnection);
+        if (!self || !points) return;
+        {
+            std::lock_guard<std::mutex> lock(self->renderMailboxMutex_);
+            // Persistent history is never replaced: accepted SLAM frames are batched into one GUI wake-up.
+            self->pendingLiveFrames_.push_back({std::move(points), pose, frameId});
+        }
+        self->scheduleRenderDispatch();
     };
     pipeline_->onLivePoseUpdates = [self](std::shared_ptr<std::vector<LiveFramePoseUpdate>> updates) {
-        if (!self) return;
-        QMetaObject::invokeMethod(self, [self, updates = std::move(updates)]() mutable {
-            if (self && self->livePoseUpdatesCallback_ && self->state_ == State::Scanning && updates)
-                self->livePoseUpdatesCallback_(std::move(updates));
-        }, Qt::QueuedConnection);
+        if (!self || !updates) return;
+        {
+            std::lock_guard<std::mutex> lock(self->renderMailboxMutex_);
+            for (const auto& u : *updates)
+                self->pendingPoseUpdates_[u.frameId] = u.pose; // only latest RT for each frame matters
+        }
+        self->scheduleRenderDispatch();
     };
     pipeline_->onCurrentFrame = [self](PointChunkPtr chunk, bool trackingOk, int frameId) {
-        if (!self) return;
-        QMetaObject::invokeMethod(self, [self, chunk = std::move(chunk), trackingOk, frameId]() mutable {
-            if (self && self->currentFrameCallback_ && self->state_ == State::Scanning)
-                self->currentFrameCallback_(std::move(chunk), trackingOk, frameId);
-        }, Qt::QueuedConnection);
+        if (!self || !chunk) return;
+        {
+            std::lock_guard<std::mutex> lock(self->renderMailboxMutex_);
+            self->latestCurrentFrame_ = std::move(chunk);
+            self->latestCurrentTrackingOk_ = trackingOk;
+            self->latestCurrentFrameId_ = frameId;
+            self->hasCurrentFrame_ = true;
+        }
+        self->scheduleRenderDispatch();
     };
     pipeline_->onPose = [self](const ScanPoseState& pose) {
         if (!self) return;
-        QMetaObject::invokeMethod(self, [self, pose] {
-            if (self && self->poseCallback_ && self->state_ != State::Idle)
-                self->poseCallback_(pose);
-        }, Qt::QueuedConnection);
+        {
+            std::lock_guard<std::mutex> lock(self->renderMailboxMutex_);
+            self->latestPose_ = pose;
+            self->hasPose_ = true;
+        }
+        self->scheduleRenderDispatch();
     };
-#ifdef PCEDITOR_HAS_TEXTURE_MAPPING
+#ifdef JMENGINE_HAS_TEXTURE_MAPPING
     pipeline_->onTextureFrames = [self](ScanFlowController::TextureFramesPtr frames) {
         if (!self) return;
         QMetaObject::invokeMethod(self, [self, frames = std::move(frames)]() mutable {
@@ -1440,6 +1451,15 @@ void ScanFlowController::offlineReconstruct() {
 void ScanFlowController::reset() {
     // Invalidate already-posted onFrame/onDone/onError callbacks before resetting workers.
     ++runEpoch_;
+    {
+        std::lock_guard<std::mutex> lock(renderMailboxMutex_);
+        pendingLiveFrames_.clear();
+        latestPreviewChunk_.reset();
+        latestCurrentFrame_.reset();
+        hasCurrentFrame_ = false;
+        hasPose_ = false;
+        pendingPoseUpdates_.clear();
+    }
     if (state_ == State::Scanning || state_ == State::Stopping || state_ == State::Initializing)
         QMetaObject::invokeMethod(source_, [s = source_] { s->stop(); }, Qt::QueuedConnection);
     setState(State::Idle);
@@ -1463,6 +1483,75 @@ void ScanFlowController::setState(State state) {
 
 void ScanFlowController::postMessage(const QString& message) {
     if (messageCallback_) messageCallback_(message);
+}
+
+void ScanFlowController::scheduleRenderDispatch() {
+    // One queued GUI event is enough. Worker callbacks keep filling/replacing the mailbox while
+    // the UI is busy; this prevents a 10 FPS scan + optimization burst from becoming hundreds
+    // of stale queued invokeMethod calls.
+    if (renderDispatchPending_.exchange(true, std::memory_order_acq_rel)) return;
+    QPointer<ScanFlowController> self(this);
+    QMetaObject::invokeMethod(this, [self] {
+        if (self) self->flushRenderMailbox();
+    }, Qt::QueuedConnection);
+}
+
+void ScanFlowController::flushRenderMailbox() {
+    std::deque<PendingLiveFrame> liveFrames;
+    PointChunkPtr preview;
+    PointChunkPtr current;
+    bool currentTrackingOk = false;
+    int currentFrameId = -1;
+    bool hasCurrent = false;
+    ScanPoseState pose;
+    bool hasPose = false;
+    std::unordered_map<int, std::array<float,16>> poseMap;
+    {
+        std::lock_guard<std::mutex> lock(renderMailboxMutex_);
+        liveFrames.swap(pendingLiveFrames_);
+        preview = std::move(latestPreviewChunk_);
+        current = std::move(latestCurrentFrame_);
+        currentTrackingOk = latestCurrentTrackingOk_;
+        currentFrameId = latestCurrentFrameId_;
+        hasCurrent = hasCurrentFrame_;
+        hasCurrentFrame_ = false;
+        hasPose = hasPose_;
+        pose = latestPose_;
+        hasPose_ = false;
+        poseMap.swap(pendingPoseUpdates_);
+        renderDispatchPending_.store(false, std::memory_order_release);
+    }
+
+    if (state_ != State::Idle && previewCallback_ && preview)
+        previewCallback_(std::move(preview));
+
+    // Append accepted history frames in order. PointCloudWidget uploads each local point block once;
+    // future optimization changes only its RT, so no whole-cloud VBO rebuild is introduced here.
+    if (state_ == State::Scanning && liveFrameCallback_) {
+        for (auto& f : liveFrames)
+            if (f.points) liveFrameCallback_(std::move(f.points), f.pose, f.frameId);
+    }
+
+    if (state_ == State::Scanning && livePoseUpdatesCallback_ && !poseMap.empty()) {
+        auto updates = std::make_shared<std::vector<LiveFramePoseUpdate>>();
+        updates->reserve(poseMap.size());
+        for (auto& kv : poseMap) updates->push_back({kv.first, kv.second});
+        livePoseUpdatesCallback_(std::move(updates));
+    }
+
+    if (state_ == State::Scanning && currentFrameCallback_ && hasCurrent && current)
+        currentFrameCallback_(std::move(current), currentTrackingOk, currentFrameId);
+    if (state_ != State::Idle && poseCallback_ && hasPose)
+        poseCallback_(pose);
+
+    // A producer may have filled the mailbox after we released the lock but before callbacks
+    // completed. Schedule exactly one more pass if anything arrived meanwhile.
+    bool more = false;
+    {
+        std::lock_guard<std::mutex> lock(renderMailboxMutex_);
+        more = !pendingLiveFrames_.empty() || latestPreviewChunk_ || hasCurrentFrame_ || hasPose_ || !pendingPoseUpdates_.empty();
+    }
+    if (more) scheduleRenderDispatch();
 }
 
 QString ScanFlowController::stateText(State state) {

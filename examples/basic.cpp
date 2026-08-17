@@ -1,18 +1,18 @@
-#include <pceditor/PointCloudEditor.h>
-#include <pceditor/PointCloudIO.h>
+#include <JMEngine/JMEngine.h>
+#include <JMEngine/PointCloudIO.h>
 
 #include <iostream>
 #include <memory>
 #include <string>
 
 int main(int argc, char* argv[]) {
-    using namespace pceditor;
+    using namespace JMEngine;
 
     std::shared_ptr<PointCloud> cloud;
 
     // 可以直接传入 OBJ/PLY：
-    //   pceditor_example model.ply
-    //   pceditor_example model.obj
+    //   JMEngine_example model.ply
+    //   JMEngine_example model.obj
     if (argc > 1) {
         std::string error;
         cloud = PointCloudIO::load(argv[1], &error);
@@ -29,7 +29,7 @@ int main(int argc, char* argv[]) {
         cloud = std::make_shared<PointCloud>(std::move(pts));
     }
 
-    PointCloudEditor editor(cloud);
+    Engine editor(cloud);
     std::cout << "初始点数 = " << cloud->size() << '\n';
 
     // 至少有 2 个点时，演示删除和 Undo。

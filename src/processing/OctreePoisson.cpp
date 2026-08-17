@@ -1,5 +1,5 @@
-#include <pceditor/processing/Operations.h>
-#include <pceditor/processing/Parallel.h>
+#include <JMEngine/processing/Operations.h>
+#include <JMEngine/processing/Parallel.h>
 
 #include <algorithm>
 #include <array>
@@ -9,11 +9,11 @@
 #include <numeric>
 #include <vector>
 
-#ifdef PCEDITOR_USE_OPENMP
+#ifdef JMENGINE_USE_OPENMP
 #include <omp.h>
 #endif
 
-namespace pceditor::processing {
+namespace JMEngine::processing {
 namespace {
 
 Vec3f addP(const Vec3f& a, const Vec3f& b) {
@@ -338,7 +338,7 @@ ProcessResult OctreePoissonOperation::run(const ProcessInput& input, const Param
     if (boolParam(params, "orient_normals", true)) {
         auto oriented = std::make_shared<PointCloud>(cloud->points());
         const int nt = processingThreadCount();
-#ifdef PCEDITOR_USE_OPENMP
+#ifdef JMENGINE_USE_OPENMP
 #pragma omp parallel for schedule(static) num_threads(nt)
 #endif
         for (long long i = 0; i < static_cast<long long>(oriented->size()); ++i) {
@@ -370,7 +370,7 @@ ProcessResult OctreePoissonOperation::run(const ProcessInput& input, const Param
     const auto& order = tree.order();
     const auto& leaves = tree.leaves();
     const int nt = processingThreadCount();
-#ifdef PCEDITOR_USE_OPENMP
+#ifdef JMENGINE_USE_OPENMP
 #pragma omp parallel for schedule(dynamic, 64) num_threads(nt)
 #endif
     for (long long li = 0; li < static_cast<long long>(leaves.size()); ++li) {
@@ -409,7 +409,7 @@ ProcessResult OctreePoissonOperation::run(const ProcessInput& input, const Param
     for (std::size_t i = 0; i < leaves.size(); ++i)
         nodeToLeaf[static_cast<std::size_t>(leaves[i])] = static_cast<std::int32_t>(i);
 
-#ifdef PCEDITOR_USE_OPENMP
+#ifdef JMENGINE_USE_OPENMP
 #pragma omp parallel for schedule(dynamic, 64) num_threads(nt)
 #endif
     for (long long li = 0; li < static_cast<long long>(leaves.size()); ++li) {
@@ -444,7 +444,7 @@ ProcessResult OctreePoissonOperation::run(const ProcessInput& input, const Param
             result.cancelled = true;
             return result;
         }
-#ifdef PCEDITOR_USE_OPENMP
+#ifdef JMENGINE_USE_OPENMP
 #pragma omp parallel for schedule(static) num_threads(nt)
 #endif
         for (long long li = 0; li < static_cast<long long>(leaves.size()); ++li) {
@@ -537,4 +537,4 @@ ProcessResult OctreePoissonOperation::run(const ProcessInput& input, const Param
     return result;
 }
 
-} // namespace pceditor::processing
+} // namespace JMEngine::processing

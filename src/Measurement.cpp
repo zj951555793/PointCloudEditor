@@ -1,10 +1,10 @@
-#include <pceditor/Measurement.h>
+#include <JMEngine/Measurement.h>
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <unordered_map>
 
-namespace pceditor {
+namespace JMEngine {
 namespace {
 inline Vec3f sub(const Vec3f& a,const Vec3f& b){return {a.x-b.x,a.y-b.y,a.z-b.z};}
 inline Vec3f cross(const Vec3f& a,const Vec3f& b){return {a.y*b.z-a.z*b.y,a.z*b.x-a.x*b.z,a.x*b.y-a.y*b.x};}
@@ -59,4 +59,4 @@ VolumeMeasurement measureVolume(const TriangleMesh& mesh,const MeshMeasureOption
     out.valid=out.triangleCount>0&&std::isfinite(out.volume)&&(!options.requireWatertightForVolume||topoOk);
     return out;
 }
-} // namespace pceditor
+} // namespace JMEngine

@@ -6,8 +6,8 @@
 #include <cstring>
 #include <vector>
 
-namespace pceditor::texture::detail {
-#ifdef PCEDITOR_TEXTURE_HAS_CUDA
+namespace JMEngine::texture::detail {
+#ifdef JMENGINE_TEXTURE_HAS_CUDA
 namespace {
 
 std::string apiError(const char* text) {
@@ -18,7 +18,7 @@ std::string apiError(const char* text) {
 #endif
 
 bool cudaRuntimeAvailable(std::string* reason) noexcept {
-#ifdef PCEDITOR_TEXTURE_HAS_CUDA
+#ifdef JMENGINE_TEXTURE_HAS_CUDA
     std::array<char, 1024> error{};
     const bool ok = cudaApiRuntimeAvailable(error.data(), error.size());
     if (reason) {
@@ -41,7 +41,7 @@ bool selectBestCamerasCuda(const TriangleMesh& mesh,
                            std::vector<int>& bestCamera,
                            std::vector<float>& bestScore,
                            std::string& error) {
-#ifdef PCEDITOR_TEXTURE_HAS_CUDA
+#ifdef JMENGINE_TEXTURE_HAS_CUDA
     const auto cloud = mesh.vertices();
     if (!cloud) {
         error = "mesh has no vertices";
@@ -111,4 +111,4 @@ bool selectBestCamerasCuda(const TriangleMesh& mesh,
 #endif
 }
 
-} // namespace pceditor::texture::detail
+} // namespace JMEngine::texture::detail

@@ -1,6 +1,6 @@
-#include <pceditor/PointCloud.h>
-#include <pceditor/TriangleMesh.h>
-#include <pceditor/texture/TextureMapper.h>
+#include <JMEngine/PointCloud.h>
+#include <JMEngine/TriangleMesh.h>
+#include <JMEngine/texture/TextureMapper.h>
 
 #include <algorithm>
 #include <cctype>
@@ -14,8 +14,8 @@
 #include <vector>
 
 namespace fs = std::filesystem;
-using namespace pceditor;
-using namespace pceditor::texture;
+using namespace JMEngine;
+using namespace JMEngine::texture;
 
 namespace {
 
@@ -77,7 +77,7 @@ bool loadMesh(const fs::path& path, TriangleMesh& mesh, std::string& error) {
     std::string magic;
     std::size_t nv = 0, nt = 0;
     in >> magic >> nv >> nt;
-    if (!in || magic != "PCEDITOR_ETH3D_MESH_V1" || nv == 0 || nt == 0) {
+    if (!in || magic != "JMENGINE_ETH3D_MESH_V1" || nv == 0 || nt == 0) {
         error = "invalid mesh header: " + path.string();
         return false;
     }

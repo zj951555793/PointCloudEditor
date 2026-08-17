@@ -1,19 +1,19 @@
-#include <pceditor/CpuSelector.h>
-#include <pceditor/CpuMeshSelector.h>
-#include <pceditor/MeshSelectionClosure.h>
-#include <pceditor/processing/Processing.h>
-#include <pceditor/processing/Parallel.h>
-#include <pceditor/processing/Diagnostics.h>
-#include <pceditor/ColorPicking24.h>
-#include <pceditor/BlockPicking24.h>
-#include <pceditor/PixelIdPicker.h>
-#include <pceditor/PointCloudEditor.h>
-#include <pceditor/PointCloudIO.h>
-#include <pceditor/MeshUtils.h>
-#include <pceditor/ModelIO.h>
-#include <pceditor/ObjModelLoader.h>
-#include <pceditor/TriangleMesh.h>
-#include <pceditor/edit/MeshEditSession.h>
+#include <JMEngine/CpuSelector.h>
+#include <JMEngine/CpuMeshSelector.h>
+#include <JMEngine/MeshSelectionClosure.h>
+#include <JMEngine/processing/Processing.h>
+#include <JMEngine/processing/Parallel.h>
+#include <JMEngine/processing/Diagnostics.h>
+#include <JMEngine/ColorPicking24.h>
+#include <JMEngine/BlockPicking24.h>
+#include <JMEngine/PixelIdPicker.h>
+#include <JMEngine/JMEngine.h>
+#include <JMEngine/PointCloudIO.h>
+#include <JMEngine/MeshUtils.h>
+#include <JMEngine/ModelIO.h>
+#include <JMEngine/ObjModelLoader.h>
+#include <JMEngine/TriangleMesh.h>
+#include <JMEngine/edit/MeshEditSession.h>
 
 #include <cassert>
 #include <cstdint>
@@ -24,7 +24,7 @@
 #include <string>
 #include <vector>
 
-using namespace pceditor;
+using namespace JMEngine;
 
 namespace {
 
@@ -39,7 +39,7 @@ std::shared_ptr<PointCloud> makeCloud() {
 
 void testSelectionDeleteUndoRedo() {
     auto cloud = makeCloud();
-    PointCloudEditor editor(cloud);
+    Engine editor(cloud);
 
     // set() 会自动排序去重，所以重复 2 最终只保留一次。
     editor.select({1, 2, 2});
@@ -65,7 +65,7 @@ void testSelectionDeleteUndoRedo() {
 
 void testCrop() {
     auto cloud = makeCloud();
-    PointCloudEditor editor(cloud);
+    Engine editor(cloud);
 
     assert(editor.crop({{-1.f, -1.f, -1.f}, {1.f, 1.f, 1.f}}));
     assert(cloud->activeCount() == 3);
@@ -75,7 +75,7 @@ void testCrop() {
 
 void testTransform() {
     auto cloud = makeCloud();
-    PointCloudEditor editor(cloud);
+    Engine editor(cloud);
 
     editor.select({0});
     Mat4f translate = Mat4f::identity();
@@ -148,7 +148,7 @@ void testPixelIdPicker() {
 }
 
 void testPointCloudIo() {
-    const std::filesystem::path dataDir = PCEDITOR_TEST_DATA_DIR;
+    const std::filesystem::path dataDir = JMENGINE_TEST_DATA_DIR;
 
     std::string error;
     auto ply = PointCloudIO::load((dataDir / "sample_ascii.ply").string(), &error);
@@ -179,18 +179,18 @@ void testPointCloudIo() {
     assert(asc);
     assert(asc->size() == 4);
 
-    const auto ascOutput = std::filesystem::temp_directory_path() / "pceditor_io_test.asc";
+    const auto ascOutput = std::filesystem::temp_directory_path() / "JMEngine_io_test.asc";
     error.clear();
     assert(ModelIO::saveAsc(*asc, ascOutput.string(), &error));
     auto ascReload = ModelIO::loadAsc(ascOutput.string(), &error);
     assert(ascReload && ascReload->size() == asc->size());
 
     // 验证编辑结果能够重新保存成 PLY。
-    PointCloudEditor editor(obj);
+    Engine editor(obj);
     editor.select({1});
     assert(editor.deleteSelection());
 
-    const auto output = std::filesystem::temp_directory_path() / "pceditor_io_test.ply";
+    const auto output = std::filesystem::temp_directory_path() / "JMEngine_io_test.ply";
     error.clear();
     assert(PointCloudIO::savePly(*obj, output.string(), &error));
     assert(error.empty());
@@ -207,7 +207,7 @@ void testPointCloudIo() {
 
 void testCompactRemap() {
     auto cloud = makeCloud();
-    PointCloudEditor editor(cloud);
+    Engine editor(cloud);
 
     editor.select({1});
     assert(editor.deleteSelection());
@@ -232,7 +232,7 @@ void testCompactRemap() {
 } // namespace
 
 static void testColorPicking24() {
-    using namespace pceditor;
+    using namespace JMEngine;
     const std::uint32_t ids[] = {0u, 1u, 254u, 255u, 65534u, 65535u, 10000000u, kColorPicking24MaxObjectId};
     for (const auto id : ids) {
         const auto c = encodeColorId24(id);
@@ -246,7 +246,7 @@ static void testColorPicking24() {
 }
 
 static void testBlockPicking24() {
-    using namespace pceditor;
+    using namespace JMEngine;
 
     // 250 万对象会被拆成 100 万 + 100 万 + 50 万三个 block。
     constexpr std::uint64_t total = 2'500'000u;
@@ -377,8 +377,8 @@ static void testMeshSelectionClosure() {
 }
 
 static void testProcessingOperations() {
-    using namespace pceditor;
-    using namespace pceditor::processing;
+    using namespace JMEngine;
+    using namespace JMEngine::processing;
 
     // Voxel：两个极近点应合并。
     PointCloud::Container pts = {{{0.0000f, 0, 0}, 0xff0000ffu, PointValid},
@@ -577,49 +577,49 @@ int main() {
     testPointCloudIo();
     testCompactRemap();
 
-    std::cout << "All PointCloudEditor core tests passed.\n";
+    std::cout << "All JMEngine core tests passed.\n";
     {
-        pceditor::Point p0;
+        JMEngine::Point p0;
         p0.position = {0, 0, 0};
-        pceditor::Point p1;
+        JMEngine::Point p1;
         p1.position = {1, 0, 0};
-        pceditor::Point p2;
+        JMEngine::Point p2;
         p2.position = {0, 1, 0};
-        auto cloud = std::make_shared<pceditor::PointCloud>(pceditor::PointCloud::Container{p0, p1, p2});
-        pceditor::TriangleMesh mesh(cloud, {0, 1, 2});
-        assert(pceditor::recomputeVertexNormals(mesh));
+        auto cloud = std::make_shared<JMEngine::PointCloud>(JMEngine::PointCloud::Container{p0, p1, p2});
+        JMEngine::TriangleMesh mesh(cloud, {0, 1, 2});
+        assert(JMEngine::recomputeVertexNormals(mesh));
         for (const auto& p : cloud->points())
             assert(p.normal.z > 0.99f);
     }
 
     {
-        const auto temp = std::filesystem::temp_directory_path() / "pceditor_txt_import_221.txt";
+        const auto temp = std::filesystem::temp_directory_path() / "JMEngine_txt_import_221.txt";
         {
             std::ofstream out(temp);
             out << "0 0 0 255 0 0 0 0 1\n";
             out << "1,0,0,0,255,0,0,0,1\n";
         }
         std::string error;
-        auto cloud = pceditor::ModelIO::loadTxt(temp.string(), &error);
+        auto cloud = JMEngine::ModelIO::loadTxt(temp.string(), &error);
         assert(cloud && cloud->size() == 2);
         assert(cloud->points()[0].normal.z > 0.99f);
         std::filesystem::remove(temp);
     }
     {
-        pceditor::Point p0;
+        JMEngine::Point p0;
         p0.position = {0, 0, 0};
-        pceditor::Point p1;
+        JMEngine::Point p1;
         p1.position = {1, 0, 0};
-        pceditor::Point p2;
+        JMEngine::Point p2;
         p2.position = {0, 1, 0};
-        auto cloud = std::make_shared<pceditor::PointCloud>(pceditor::PointCloud::Container{p0, p1, p2});
-        pceditor::TriangleMesh mesh(cloud, {0, 1, 2});
-        assert(pceditor::recomputeVertexNormals(mesh));
-        const auto base = std::filesystem::temp_directory_path() / "pceditor_export_221";
+        auto cloud = std::make_shared<JMEngine::PointCloud>(JMEngine::PointCloud::Container{p0, p1, p2});
+        JMEngine::TriangleMesh mesh(cloud, {0, 1, 2});
+        assert(JMEngine::recomputeVertexNormals(mesh));
+        const auto base = std::filesystem::temp_directory_path() / "JMEngine_export_221";
         std::string error;
-        assert(pceditor::ModelIO::save(*cloud, &mesh, (base.string() + ".obj"), &error));
-        assert(pceditor::ModelIO::save(*cloud, &mesh, (base.string() + ".stl"), &error));
-        assert(pceditor::ModelIO::save(*cloud, &mesh, (base.string() + ".ply"), &error));
+        assert(JMEngine::ModelIO::save(*cloud, &mesh, (base.string() + ".obj"), &error));
+        assert(JMEngine::ModelIO::save(*cloud, &mesh, (base.string() + ".stl"), &error));
+        assert(JMEngine::ModelIO::save(*cloud, &mesh, (base.string() + ".ply"), &error));
         assert(std::filesystem::file_size(base.string() + ".obj") > 0);
         assert(std::filesystem::file_size(base.string() + ".stl") > 0);
         assert(std::filesystem::file_size(base.string() + ".ply") > 0);
@@ -631,18 +631,18 @@ int main() {
     {
         // 2.2.2 回归：网格模型切到“点显示”后按 PointId 删除，
         // 任何引用该点的三角形都必须从 Visible EBO 中消失。
-        pceditor::Point p0;
+        JMEngine::Point p0;
         p0.position = {0, 0, 0};
-        pceditor::Point p1;
+        JMEngine::Point p1;
         p1.position = {1, 0, 0};
-        pceditor::Point p2;
+        JMEngine::Point p2;
         p2.position = {0, 1, 0};
-        pceditor::Point p3;
+        JMEngine::Point p3;
         p3.position = {1, 1, 0};
-        auto cloud = std::make_shared<pceditor::PointCloud>(pceditor::PointCloud::Container{p0, p1, p2, p3});
-        pceditor::TriangleMesh mesh(cloud, {0, 1, 2, 1, 3, 2});
+        auto cloud = std::make_shared<JMEngine::PointCloud>(JMEngine::PointCloud::Container{p0, p1, p2, p3});
+        JMEngine::TriangleMesh mesh(cloud, {0, 1, 2, 1, 3, 2});
         assert(mesh.activeTriangleCount() == 2);
-        cloud->points()[0].flags |= pceditor::PointDeleted;
+        cloud->points()[0].flags |= JMEngine::PointDeleted;
         const auto visible = mesh.buildVisibleBuffer();
         assert(mesh.activeTriangleCount() == 1);
         assert(visible.triangleIds.size() == 1);
@@ -653,16 +653,16 @@ int main() {
     {
         // 2.2.3 回归：CPU Surface 必须与 Through 严格区分。两个点投影到同一像素时，
         // Through 选择两点；Surface 只保留最前深度附近的点。
-        pceditor::Point front;
+        JMEngine::Point front;
         front.position = {0.0f, 0.0f, -0.5f};
-        pceditor::Point back;
+        JMEngine::Point back;
         back.position = {0.0f, 0.0f, 0.5f};
-        pceditor::PointCloud cloud({front, back});
-        const auto mvp = pceditor::Mat4f::identity();
-        const pceditor::Viewport vp{100, 100};
-        const pceditor::RectI rect{40, 40, 60, 60};
-        const auto through = pceditor::CpuSelector::rectangle(cloud, mvp, vp, rect);
-        const auto surface = pceditor::CpuSelector::rectangleSurface(cloud, mvp, vp, rect, 0.001f);
+        JMEngine::PointCloud cloud({front, back});
+        const auto mvp = JMEngine::Mat4f::identity();
+        const JMEngine::Viewport vp{100, 100};
+        const JMEngine::RectI rect{40, 40, 60, 60};
+        const auto through = JMEngine::CpuSelector::rectangle(cloud, mvp, vp, rect);
+        const auto surface = JMEngine::CpuSelector::rectangleSurface(cloud, mvp, vp, rect, 0.001f);
         assert(through.size() == 2);
         assert(surface.size() == 1);
         assert(surface[0] == 0);
@@ -671,30 +671,30 @@ int main() {
     {
         // 2.2.6 回归：前点的 4px point-sprite 覆盖后点中心时，即使两个点中心落在相邻像素，
         // CPU Surface 也必须剔除后点；旧版只写中心 1 像素会错误选中两点。
-        pceditor::Point front;
+        JMEngine::Point front;
         front.position = {0.0f, 0.0f, -0.5f};
-        pceditor::Point back;
+        JMEngine::Point back;
         back.position = {0.02f, 0.0f, 0.5f};
-        pceditor::PointCloud cloud({front, back});
-        const auto mvp = pceditor::Mat4f::identity();
-        const pceditor::Viewport vp{100, 100};
-        const pceditor::RectI rect{40, 40, 60, 60};
-        const auto through = pceditor::CpuSelector::rectangle(cloud, mvp, vp, rect);
-        const auto surface = pceditor::CpuSelector::rectangleSurface(cloud, mvp, vp, rect, 0.0005f);
+        JMEngine::PointCloud cloud({front, back});
+        const auto mvp = JMEngine::Mat4f::identity();
+        const JMEngine::Viewport vp{100, 100};
+        const JMEngine::RectI rect{40, 40, 60, 60};
+        const auto through = JMEngine::CpuSelector::rectangle(cloud, mvp, vp, rect);
+        const auto surface = JMEngine::CpuSelector::rectangleSurface(cloud, mvp, vp, rect, 0.0005f);
         assert(through.size() == 2);
         assert(surface.size() == 1);
         assert(surface[0] == 0);
     }
 
     {
-        auto poisson = pceditor::processing::createOperation("poisson_octree");
+        auto poisson = JMEngine::processing::createOperation("poisson_octree");
         assert(poisson);
-        assert(poisson->descriptor().outputPolicy == pceditor::processing::OutputPolicy::AddModelOnKindChange);
+        assert(poisson->descriptor().outputPolicy == JMEngine::processing::OutputPolicy::AddModelOnKindChange);
         const auto poissonDesc = poisson->descriptor();
         const auto colorIt = std::find_if(poissonDesc.parameters.begin(), poissonDesc.parameters.end(),
                                           [](const auto& spec) { return spec.key == "use_input_color"; });
         assert(colorIt != poissonDesc.parameters.end());
-        assert(colorIt->kind == pceditor::processing::ParameterKind::Boolean);
+        assert(colorIt->kind == JMEngine::processing::ParameterKind::Boolean);
         assert(colorIt->defaultValue == 1.0);
     }
 

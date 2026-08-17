@@ -1,6 +1,6 @@
 ply
 format ascii 1.0
-comment PointCloudEditor test data
+comment JMEngine test data
 element vertex 4
 property float x
 property float y

@@ -1,6 +1,6 @@
-#include <pceditor/PointCloud.h>
-#include <pceditor/TriangleMesh.h>
-#include <pceditor/texture/TextureMapper.h>
+#include <JMEngine/PointCloud.h>
+#include <JMEngine/TriangleMesh.h>
+#include <JMEngine/texture/TextureMapper.h>
 
 #include <algorithm>
 #include <cstdint>
@@ -15,8 +15,8 @@
 #include <vector>
 
 namespace fs = std::filesystem;
-using namespace pceditor;
-using namespace pceditor::texture;
+using namespace JMEngine;
+using namespace JMEngine::texture;
 
 namespace {
 
@@ -47,7 +47,7 @@ TriangleMesh loadMesh(const fs::path& path) {
     std::string token;
     int version = 0;
     f >> token >> version;
-    require(token == "PCEDITOR_TEXTURE_MESH" && version == 1, "invalid mesh case header");
+    require(token == "JMENGINE_TEXTURE_MESH" && version == 1, "invalid mesh case header");
     std::size_t n = 0;
     f >> token >> n;
     require(token == "vertices" && n > 0, "mesh has no vertices");
@@ -73,7 +73,7 @@ std::vector<CameraFrame> loadCameras(const fs::path& caseDir) {
     std::string token;
     int version = 0;
     f >> token >> version;
-    require(token == "PCEDITOR_TEXTURE_CAMERAS" && version == 1, "invalid camera case header");
+    require(token == "JMENGINE_TEXTURE_CAMERAS" && version == 1, "invalid camera case header");
     std::size_t n = 0;
     f >> token >> n;
     require(token == "cameras" && n >= 2, "not enough cameras");
@@ -121,7 +121,7 @@ void validateResult(const char* label, const TriangleMesh& input, const Result& 
 
 int main(int argc, char** argv) {
     try {
-        if (argc < 2) throw std::runtime_error("usage: pceditor_texture_bop_dataset_test <prepared-case-dir> [output-dir]");
+        if (argc < 2) throw std::runtime_error("usage: JMEngine_texture_bop_dataset_test <prepared-case-dir> [output-dir]");
         const fs::path caseDir = fs::absolute(argv[1]);
         const fs::path outputDir = argc >= 3 ? fs::absolute(argv[2]) : caseDir / "output";
         require(fs::is_regular_file(caseDir / "READY.txt"), "dataset case is not prepared: " + caseDir.string());

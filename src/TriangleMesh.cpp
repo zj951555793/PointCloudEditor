@@ -1,8 +1,8 @@
-#include <pceditor/TriangleMesh.h>
+#include <JMEngine/TriangleMesh.h>
 
 #include <algorithm>
 
-namespace pceditor {
+namespace JMEngine {
 
 TriangleMesh::TriangleMesh() : vertices_(std::make_shared<PointCloud>()) {}
 
@@ -100,4 +100,4 @@ std::vector<TriangleId> TriangleMesh::compactTriangles() {
     return oldToNew;
 }
 
-} // namespace pceditor
+} // namespace JMEngine

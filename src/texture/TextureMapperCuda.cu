@@ -6,7 +6,7 @@
 #include <cstdio>
 #include <cstring>
 
-namespace pceditor {
+namespace JMEngine {
 namespace texture {
 namespace detail {
 namespace {
@@ -363,4 +363,4 @@ bool cudaApiSelectBestCameras(const CudaPointPod* points,
 
 } // namespace detail
 } // namespace texture
-} // namespace pceditor
+} // namespace JMEngine

@@ -1,7 +1,7 @@
-#include "pceditor/ObjMeshLoader.h"
-#include "pceditor/ObjModelLoader.h"
+#include "JMEngine/ObjMeshLoader.h"
+#include "JMEngine/ObjModelLoader.h"
 
-namespace pceditor {
+namespace JMEngine {
 
 bool ObjMeshLoader::load(const std::string& objFile, std::size_t vertexCount, ObjMeshData& out, std::string* message) {
     ObjModelData model;
@@ -24,4 +24,4 @@ bool ObjMeshLoader::load(const std::string& objFile, std::size_t vertexCount, Ob
     return !out.empty();
 }
 
-} // namespace pceditor
+} // namespace JMEngine

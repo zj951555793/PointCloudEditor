@@ -103,7 +103,7 @@ def write_mesh(path: Path):
     ]
 
     with path.open("w", encoding="utf-8") as f:
-        f.write("PCEDITOR_TEXTURE_MESH 1\n")
+        f.write("JMENGINE_TEXTURE_MESH 1\n")
         f.write(f"vertices {len(vertices)}\n")
         for x, y, z in vertices:
             f.write(f"{x:.9g} {y:.9g} {z:.9g}\n")
@@ -269,7 +269,7 @@ def main() -> int:
         camera_lines.append((i, name, width, height, fx, fy, cx, cy, m))
 
     with (out / "cameras.txt").open("w", encoding="utf-8") as f:
-        f.write("PCEDITOR_TEXTURE_CAMERAS 1\n")
+        f.write("JMENGINE_TEXTURE_CAMERAS 1\n")
         f.write(f"cameras {len(camera_lines)}\n")
         for im_id, name, w, h, fx0, fy0, cx0, cy0, m in camera_lines:
             vals = " ".join(f"{x:.9g}" for x in m)
@@ -279,7 +279,7 @@ def main() -> int:
             )
 
     marker.write_text(
-        "dataset=PCEDITOR synthetic tiny texture case\n"
+        "dataset=JMENGINE synthetic tiny texture case\n"
         "mesh=cube_100mm\n"
         f"vertices={len(vertices)}\n"
         f"triangles={len(faces)}\n"

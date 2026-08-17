@@ -1,4 +1,4 @@
-#include <pceditor/Alignment.h>
+#include <JMEngine/Alignment.h>
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -7,7 +7,7 @@
 #include <unordered_map>
 #include <vector>
 
-namespace pceditor {
+namespace JMEngine {
 namespace {
 Vec3f add(Vec3f a,Vec3f b){return {a.x+b.x,a.y+b.y,a.z+b.z};}
 Vec3f sub(Vec3f a,Vec3f b){return {a.x-b.x,a.y-b.y,a.z-b.z};}
@@ -58,4 +58,4 @@ AlignmentResult alignThreePoints(const std::array<Vec3f,3>& source,const std::ar
 
 AutoAlignmentResult alignPointClouds(const PointCloud& source,const Mat4f& sourceTransform,const PointCloud& target,const Mat4f& targetTransform,const AutoAlignmentOptions& o){AutoAlignmentResult out;if(source.empty()||target.empty()){out.status=AutoAlignmentStatus::InvalidInput;return out;}std::vector<Vec3f> probe;probe.reserve(std::min<std::size_t>(target.size(),50000));std::size_t stride=std::max<std::size_t>(1,target.size()/50000);for(std::size_t i=0;i<target.size();i+=stride){auto&p=target.points()[i];if(!(p.flags&PointDeleted))probe.push_back(transformPoint(targetTransform,p.position));}if(probe.size()<20){out.status=AutoAlignmentStatus::NotEnoughPoints;return out;}float d=diag(boundsOf(probe));if(!(d>1e-8f)){out.status=AutoAlignmentStatus::InvalidInput;return out;}float coarse=o.coarseVoxelSize>0?o.coarseVoxelSize:d*0.02f;float fine=o.fineVoxelSize>0?o.fineVoxelSize:d*0.006f;float maxD=o.maxCorrespondenceDistance>0?o.maxCorrespondenceDistance:d*0.08f;float accept=o.maxAcceptedRms>0?o.maxAcceptedRms:d*0.01f;auto sCoarse=sampleCloud(source,sourceTransform,coarse,std::max<std::size_t>(2000,o.maxSamplePoints/4));auto tCoarse=sampleCloud(target,targetTransform,coarse,std::max<std::size_t>(2000,o.maxSamplePoints/4));if(sCoarse.size()<20||tCoarse.size()<20){out.status=AutoAlignmentStatus::NotEnoughPoints;return out;}Vec3f sa[3],ta[3],cs,ct;if(!pcaFrame(sCoarse,sa,cs)||!pcaFrame(tCoarse,ta,ct)){out.status=AutoAlignmentStatus::NotEnoughPoints;return out;}const int signs[4][3]={{1,1,1},{1,-1,-1},{-1,1,-1},{-1,-1,1}};IcpEval best;for(auto&sg:signs){Mat4f init=frameTransform(sa,cs,ta,ct,sg);auto e=icp(sCoarse,tCoarse,init,maxD,o.coarseIterations,o.trimFraction);if(e.count>best.count/2&&e.rms<best.rms)best=e;}if(best.count<6||!std::isfinite(best.rms)){out.status=AutoAlignmentStatus::NoCorrespondence;return out;}auto sFine=sampleCloud(source,sourceTransform,fine,o.maxSamplePoints);auto tFine=sampleCloud(target,targetTransform,fine,o.maxSamplePoints);auto fin=icp(sFine,tFine,best.tf,std::max(maxD*.35f,fine*3.f),o.fineIterations,o.trimFraction);out.transform=fin.tf;out.rmsError=fin.rms;out.inlierRatio=fin.ratio;out.correspondenceCount=fin.count;out.iterations=best.iterations+fin.iterations;if(fin.count<6||!std::isfinite(fin.rms)){out.status=AutoAlignmentStatus::NotConverged;return out;}if(fin.ratio<o.minInlierRatio||fin.rms>accept){out.status=AutoAlignmentStatus::QualityRejected;return out;}out.status=AutoAlignmentStatus::Success;out.success=true;return out;}
 
-} // namespace pceditor
+} // namespace JMEngine

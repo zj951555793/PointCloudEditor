@@ -1,4 +1,4 @@
-#include <pceditor/render/RenderBackend.h>
+#include <JMEngine/render/RenderBackend.h>
 
 #include <QOpenGLContext>
 #include <QSurfaceFormat>
@@ -528,7 +528,7 @@ class Gles31Backend final : public BackendBase {
 } // namespace
 
 std::unique_ptr<IRenderBackend> createRenderBackend() {
-#ifdef PCEDITOR_RENDER_GLES31
+#ifdef JMENGINE_RENDER_GLES31
     return std::make_unique<Gles31Backend>();
 #else
     return std::make_unique<DesktopGl21Backend>();

@@ -1,8 +1,8 @@
 #include "PointCloudWidget.h"
 
-#include <pceditor/CpuSelector.h>
-#include <pceditor/PixelIdPicker.h>
-#include <pceditor/PointCloudIO.h>
+#include <JMEngine/CpuSelector.h>
+#include <JMEngine/PixelIdPicker.h>
+#include <JMEngine/PointCloudIO.h>
 
 #include <QImage>
 #include <QFileInfo>
@@ -31,8 +31,8 @@ namespace {
 
 // Core 只返回 UV/纹理路径；Qt 示例用 QImage 解码 PNG/JPG。
 // 该步骤运行在后台线程，不会阻塞 UI。
-bool bakeTextureWithQImage(const pceditor::ObjAppearanceData& appearance,
-                           pceditor::PointCloud& cloud,
+bool bakeTextureWithQImage(const JMEngine::ObjAppearanceData& appearance,
+                           JMEngine::PointCloud& cloud,
                            std::string& message)
 {
     if (appearance.diffuseTexturePath.empty() || !appearance.hasTextureCoordinates()) return false;
@@ -50,7 +50,7 @@ bool bakeTextureWithQImage(const pceditor::ObjAppearanceData& appearance,
     if (width <= 0 || height <= 0 || bits == nullptr) return false;
 
     const std::size_t count = std::min(cloud.size(), appearance.vertexUv.size());
-#ifdef PCEDITOR_USE_OPENMP
+#ifdef JMENGINE_USE_OPENMP
 #pragma omp parallel for schedule(static)
 #endif
     for (std::int64_t ii = 0; ii < static_cast<std::int64_t>(count); ++ii) {
@@ -71,19 +71,19 @@ bool bakeTextureWithQImage(const pceditor::ObjAppearanceData& appearance,
     return true;
 }
 
-std::vector<pceditor::PointId> unionSorted(const std::vector<pceditor::PointId>& a,
-                                           const std::vector<pceditor::PointId>& b)
+std::vector<JMEngine::PointId> unionSorted(const std::vector<JMEngine::PointId>& a,
+                                           const std::vector<JMEngine::PointId>& b)
 {
-    std::vector<pceditor::PointId> out;
+    std::vector<JMEngine::PointId> out;
     out.reserve(a.size() + b.size());
     std::set_union(a.begin(), a.end(), b.begin(), b.end(), std::back_inserter(out));
     return out;
 }
 
-std::vector<pceditor::PointId> differenceSorted(const std::vector<pceditor::PointId>& a,
-                                                const std::vector<pceditor::PointId>& b)
+std::vector<JMEngine::PointId> differenceSorted(const std::vector<JMEngine::PointId>& a,
+                                                const std::vector<JMEngine::PointId>& b)
 {
-    std::vector<pceditor::PointId> out;
+    std::vector<JMEngine::PointId> out;
     out.reserve(a.size());
     std::set_difference(a.begin(), a.end(), b.begin(), b.end(), std::back_inserter(out));
     return out;
@@ -300,8 +300,8 @@ void main() { outId = gTriangleId; }
 } // namespace
 
 PointCloudWidget::SceneModel::SceneModel(QString modelPath,
-                                         std::shared_ptr<pceditor::PointCloud> modelCloud,
-                                         pceditor::ObjMeshData modelMesh,
+                                         std::shared_ptr<JMEngine::PointCloud> modelCloud,
+                                         JMEngine::ObjMeshData modelMesh,
                                          bool isMesh)
     : path(std::move(modelPath)),
       cloud(std::move(modelCloud)),
@@ -465,8 +465,8 @@ void PointCloudWidget::loadModelAsync(const QString& fileName) {
     const std::string path = absolute.toStdString();
     QPointer<PointCloudWidget> self(this);
     workerPool_.start([self, path, absolute]() {
-        std::shared_ptr<pceditor::PointCloud> loaded;
-        pceditor::ObjMeshData mesh;
+        std::shared_ptr<JMEngine::PointCloud> loaded;
+        JMEngine::ObjMeshData mesh;
         bool meshMode = false;
         std::string error;
         std::string message;
@@ -477,8 +477,8 @@ void PointCloudWidget::loadModelAsync(const QString& fileName) {
         });
 
         if (ext == ".obj") {
-            pceditor::ObjModelData model;
-            if (!pceditor::ObjModelLoader::load(path, model, &message)) {
+            JMEngine::ObjModelData model;
+            if (!JMEngine::ObjModelLoader::load(path, model, &message)) {
                 error = message;
             } else {
                 loaded = std::move(model.cloud);
@@ -487,7 +487,7 @@ void PointCloudWidget::loadModelAsync(const QString& fileName) {
                 if (loaded) bakeTextureWithQImage(model.appearance, *loaded, message);
             }
         } else {
-            loaded = pceditor::PointCloudIO::load(path, &error);
+            loaded = JMEngine::PointCloudIO::load(path, &error);
             if (loaded) message = "PLY 点云模式";
         }
 
@@ -752,15 +752,15 @@ void PointCloudWidget::processInitialGpuUpload(SceneModel& m, std::size_t& byteB
 }
 
 void PointCloudWidget::queueDirtyIds(SceneModel& m,
-                                     const std::vector<pceditor::PointId>& ids,
+                                     const std::vector<JMEngine::PointId>& ids,
                                      DirtyBuffer buffer)
 {
     if (ids.empty()) return;
-    std::vector<pceditor::PointId> sorted = ids;
+    std::vector<JMEngine::PointId> sorted = ids;
     std::sort(sorted.begin(), sorted.end());
     sorted.erase(std::unique(sorted.begin(), sorted.end()), sorted.end());
-    pceditor::PointId begin = sorted.front();
-    pceditor::PointId prev = begin;
+    JMEngine::PointId begin = sorted.front();
+    JMEngine::PointId prev = begin;
     for (std::size_t i = 1; i < sorted.size(); ++i) {
         if (sorted[i] <= prev + 1u) { prev = sorted[i]; continue; }
         m.dirtyRanges.push_back({begin, prev, buffer});
@@ -805,11 +805,11 @@ void PointCloudWidget::processDirtyGpuUpdates(SceneModel& m, std::size_t& byteBu
         const std::size_t used=n*bytesPerPoint;
         byteBudget=used>=byteBudget?0:byteBudget-used;
         if (n==available) m.dirtyRanges.pop_front();
-        else range.begin=static_cast<pceditor::PointId>(range.begin+n);
+        else range.begin=static_cast<JMEngine::PointId>(range.begin+n);
     }
 }
 
-pceditor::Mat4f PointCloudWidget::currentMvp() const {
+JMEngine::Mat4f PointCloudWidget::currentMvp() const {
     const qreal dpr=devicePixelRatioF();
     return camera_.mvp(std::max(1,static_cast<int>(width()*dpr)),
                        std::max(1,static_cast<int>(height()*dpr)));
@@ -1008,7 +1008,7 @@ void PointCloudWidget::startSurfacePickAsync(Qt::KeyboardModifiers modifiers) {
     glDrawBuffer(GL_COLOR_ATTACHMENT0); glReadBuffer(GL_COLOR_ATTACHMENT0);
     glViewport(0,0,pickWidth_,pickHeight_);
     glDisable(GL_BLEND); glDisable(GL_SCISSOR_TEST); glEnable(GL_DEPTH_TEST); glDepthFunc(GL_LEQUAL); glDepthMask(GL_TRUE);
-    const GLuint clearId=pceditor::kInvalidPointId; glClearBufferuiv(GL_COLOR,0,&clearId); glClear(GL_DEPTH_BUFFER_BIT);
+    const GLuint clearId=JMEngine::kInvalidPointId; glClearBufferuiv(GL_COLOR,0,&clearId); glClear(GL_DEPTH_BUFFER_BIT);
     if(m->meshMode) drawMeshPickingPass(*m); else drawPointPickingPass(*m);
 
     glPixelStorei(GL_PACK_ALIGNMENT,4);
@@ -1032,7 +1032,7 @@ void PointCloudWidget::pollPickReadback() {
 
     const PendingPick p=pendingPick_;
     const std::size_t count=static_cast<std::size_t>(p.width)*p.height;
-    std::vector<std::uint32_t> pixels(count,pceditor::kInvalidPointId);
+    std::vector<std::uint32_t> pixels(count,JMEngine::kInvalidPointId);
     glBindBuffer(GL_PIXEL_PACK_BUFFER,pickPbo_);
     const void* mapped=glMapBufferRange(GL_PIXEL_PACK_BUFFER,0,static_cast<GLsizeiptr>(count*sizeof(std::uint32_t)),GL_MAP_READ_BIT);
     if(mapped){std::memcpy(pixels.data(),mapped,count*sizeof(std::uint32_t));glUnmapBuffer(GL_PIXEL_PACK_BUFFER);} glBindBuffer(GL_PIXEL_PACK_BUFFER,0);
@@ -1052,26 +1052,26 @@ void PointCloudWidget::pollPickReadback() {
     });
 }
 
-std::vector<pceditor::PointId> PointCloudWidget::filterSurfacePixels(
+std::vector<JMEngine::PointId> PointCloudWidget::filterSurfacePixels(
     const PendingPick& p,const std::vector<std::uint32_t>& pixels) const
 {
-    pceditor::PixelIdPicker picker(p.framebufferWidth,p.framebufferHeight,
+    JMEngine::PixelIdPicker picker(p.framebufferWidth,p.framebufferHeight,
         [&p,&pixels](int x,int y,int w,int h,std::uint32_t* dst){
             if(x!=p.left||y!=p.readY||w!=p.width||h!=p.height||!dst)return false;
             std::memcpy(dst,pixels.data(),pixels.size()*sizeof(std::uint32_t));return true;
         },true);
     if(p.mode==InteractionMode::Rectangle)return picker.pickRectangle(p.press.x(),p.press.y(),p.current.x(),p.current.y());
     if(p.mode==InteractionMode::Circle){const int dx=p.current.x()-p.press.x(),dy=p.current.y()-p.press.y();const int r=static_cast<int>(std::lround(std::sqrt(static_cast<double>(dx*dx+dy*dy))));return picker.pickCircle(p.press.x(),p.press.y(),r);}
-    std::vector<pceditor::Point2i> path;path.reserve(p.stroke.size());for(const auto&q:p.stroke)path.push_back({q.x(),q.y()});
+    std::vector<JMEngine::Point2i> path;path.reserve(p.stroke.size());for(const auto&q:p.stroke)path.push_back({q.x(),q.y()});
     if(p.mode==InteractionMode::Lasso)return picker.pickLasso(path);
     if(p.mode==InteractionMode::BrushSelect)return picker.pickBrushStroke(path,p.brushRadiusPhysical);
     return{};
 }
 
-std::vector<pceditor::PointId> PointCloudWidget::expandTriangleIdsToVertices(
+std::vector<JMEngine::PointId> PointCloudWidget::expandTriangleIdsToVertices(
     const SceneModel& model,const std::vector<std::uint32_t>& triangleIds) const
 {
-    std::vector<pceditor::PointId> out; out.reserve(triangleIds.size()*3);
+    std::vector<JMEngine::PointId> out; out.reserve(triangleIds.size()*3);
     const std::size_t triCount=model.mesh.triangleIndices.size()/3;
     for(const auto tid:triangleIds){
         if(static_cast<std::size_t>(tid)>=triCount)continue;
@@ -1081,8 +1081,8 @@ std::vector<pceditor::PointId> PointCloudWidget::expandTriangleIdsToVertices(
     std::sort(out.begin(),out.end());out.erase(std::unique(out.begin(),out.end()),out.end());return out;
 }
 
-std::vector<pceditor::PointId> PointCloudWidget::expandVertexSelectionToWholeTriangles(
-    const SceneModel& model,const std::vector<pceditor::PointId>& vertexIds) const
+std::vector<JMEngine::PointId> PointCloudWidget::expandVertexSelectionToWholeTriangles(
+    const SceneModel& model,const std::vector<JMEngine::PointId>& vertexIds) const
 {
     if(!model.meshMode||vertexIds.empty())return vertexIds;
     std::vector<std::uint8_t> mark(model.cloud->size(),0u);
@@ -1094,19 +1094,19 @@ std::vector<pceditor::PointId> PointCloudWidget::expandVertexSelectionToWholeTri
             if(a<mark.size())mark[a]=1;if(b<mark.size())mark[b]=1;if(c<mark.size())mark[c]=1;
         }
     }
-    std::vector<pceditor::PointId> out;out.reserve(vertexIds.size()*2);
-    for(std::size_t i=0;i<mark.size();++i)if(mark[i])out.push_back(static_cast<pceditor::PointId>(i));
+    std::vector<JMEngine::PointId> out;out.reserve(vertexIds.size()*2);
+    for(std::size_t i=0;i<mark.size();++i)if(mark[i])out.push_back(static_cast<JMEngine::PointId>(i));
     return out;
 }
 
-std::vector<pceditor::PointId> PointCloudWidget::runThroughSelection(
-    const PendingPick& p,const pceditor::Mat4f& mvp,const pceditor::PointCloud& cloud,const pceditor::ObjMeshData* mesh) const
+std::vector<JMEngine::PointId> PointCloudWidget::runThroughSelection(
+    const PendingPick& p,const JMEngine::Mat4f& mvp,const JMEngine::PointCloud& cloud,const JMEngine::ObjMeshData* mesh) const
 {
-    const pceditor::Viewport vp{p.framebufferWidth,p.framebufferHeight};
-    std::vector<pceditor::PointId> ids;
-    if(p.mode==InteractionMode::Rectangle){ids=pceditor::CpuSelector::rectangle(cloud,mvp,vp,{p.press.x(),p.press.y(),p.current.x(),p.current.y()});}
-    else if(p.mode==InteractionMode::Circle){const int dx=p.current.x()-p.press.x(),dy=p.current.y()-p.press.y();const int r=static_cast<int>(std::lround(std::sqrt(static_cast<double>(dx*dx+dy*dy))));ids=pceditor::CpuSelector::circle(cloud,mvp,vp,{p.press.x(),p.press.y()},r);}
-    else {std::vector<pceditor::Point2i> path;path.reserve(p.stroke.size());for(const auto&q:p.stroke)path.push_back({q.x(),q.y()});if(p.mode==InteractionMode::Lasso)ids=pceditor::CpuSelector::lasso(cloud,mvp,vp,path);else if(p.mode==InteractionMode::BrushSelect)ids=pceditor::CpuSelector::brushStroke(cloud,mvp,vp,path,p.brushRadiusPhysical);}
+    const JMEngine::Viewport vp{p.framebufferWidth,p.framebufferHeight};
+    std::vector<JMEngine::PointId> ids;
+    if(p.mode==InteractionMode::Rectangle){ids=JMEngine::CpuSelector::rectangle(cloud,mvp,vp,{p.press.x(),p.press.y(),p.current.x(),p.current.y()});}
+    else if(p.mode==InteractionMode::Circle){const int dx=p.current.x()-p.press.x(),dy=p.current.y()-p.press.y();const int r=static_cast<int>(std::lround(std::sqrt(static_cast<double>(dx*dx+dy*dy))));ids=JMEngine::CpuSelector::circle(cloud,mvp,vp,{p.press.x(),p.press.y()},r);}
+    else {std::vector<JMEngine::Point2i> path;path.reserve(p.stroke.size());for(const auto&q:p.stroke)path.push_back({q.x(),q.y()});if(p.mode==InteractionMode::Lasso)ids=JMEngine::CpuSelector::lasso(cloud,mvp,vp,path);else if(p.mode==InteractionMode::BrushSelect)ids=JMEngine::CpuSelector::brushStroke(cloud,mvp,vp,path,p.brushRadiusPhysical);}
     (void)mesh;
     return ids;
 }
@@ -1128,40 +1128,40 @@ void PointCloudWidget::startThroughPickAsync(Qt::KeyboardModifiers modifiers) {
     });
 }
 
-void PointCloudWidget::setSelectionVisual(SceneModel& m,const std::vector<pceditor::PointId>& ids) {
-    std::vector<pceditor::PointId> changed;changed.reserve(m.selectedIds.size()+ids.size());
+void PointCloudWidget::setSelectionVisual(SceneModel& m,const std::vector<JMEngine::PointId>& ids) {
+    std::vector<JMEngine::PointId> changed;changed.reserve(m.selectedIds.size()+ids.size());
     for(auto id:m.selectedIds)if(id<m.selectedMask.size()){m.selectedMask[id]=0;changed.push_back(id);}
     for(auto id:ids)if(id<m.selectedMask.size()){m.selectedMask[id]=1;changed.push_back(id);}
     m.selectedIds=ids;queueDirtyIds(m,changed,DirtyBuffer::Selection);update();
 }
 void PointCloudWidget::clearSelectionVisual(SceneModel& m){setSelectionVisual(m,{});}
 
-void PointCloudWidget::applySelection(std::vector<pceditor::PointId> ids,Qt::KeyboardModifiers modifiers) {
+void PointCloudWidget::applySelection(std::vector<JMEngine::PointId> ids,Qt::KeyboardModifiers modifiers) {
     auto* m=activeModel();if(!m||editBusy_)return;
     std::sort(ids.begin(),ids.end());ids.erase(std::unique(ids.begin(),ids.end()),ids.end());
-    std::vector<pceditor::PointId> next;
+    std::vector<JMEngine::PointId> next;
     if(modifiers.testFlag(Qt::ShiftModifier))next=unionSorted(m->selectedIds,ids);
     else if(modifiers.testFlag(Qt::AltModifier))next=differenceSorted(m->selectedIds,ids);
     else next=std::move(ids);
     m->editor.select(next);setSelectionVisual(*m,next);
 }
 
-void PointCloudWidget::deleteIdsAsync(std::vector<pceditor::PointId> ids) {
+void PointCloudWidget::deleteIdsAsync(std::vector<JMEngine::PointId> ids) {
     auto* m=activeModel();if(!m||editBusy_||ids.empty())return;
     editBusy_=true;statusText_="后台删除中";clearSelectionVisual(*m);m->editor.select(std::move(ids));
     SceneModel* model=m;QPointer<PointCloudWidget> self(this);
     workerPool_.start([self,model]{
         const bool changed=model->editor.deleteSelection();const auto changedIds=model->editor.lastChangedIds();const auto kind=model->editor.lastChangeKind();const auto count=model->cloud?model->cloud->activeCount():0;
         if(!self)return;QMetaObject::invokeMethod(self,[self,model,changed,changedIds,kind,count]() mutable {
-            if(!self)return;self->editBusy_=false;model->cachedActiveCount=count;if(changed){if(kind==pceditor::ChangeKind::Flags)self->queueDirtyIds(*model,changedIds,DirtyBuffer::Flags);else if(kind==pceditor::ChangeKind::Position)self->queueDirtyIds(*model,changedIds,DirtyBuffer::Position);}self->statusText_=changed?"删除完成":"没有发生变化";self->update();
+            if(!self)return;self->editBusy_=false;model->cachedActiveCount=count;if(changed){if(kind==JMEngine::ChangeKind::Flags)self->queueDirtyIds(*model,changedIds,DirtyBuffer::Flags);else if(kind==JMEngine::ChangeKind::Position)self->queueDirtyIds(*model,changedIds,DirtyBuffer::Position);}self->statusText_=changed?"删除完成":"没有发生变化";self->update();
         },Qt::QueuedConnection);
     });
 }
 
-void PointCloudWidget::undoAsync(){auto*m=activeModel();if(!m||editBusy_||!m->editor.canUndo())return;editBusy_=true;clearSelectionVisual(*m);SceneModel*model=m;QPointer<PointCloudWidget>self(this);workerPool_.start([self,model]{const bool changed=model->editor.undo();const auto ids=model->editor.lastChangedIds();const auto kind=model->editor.lastChangeKind();const auto count=model->cloud->activeCount();if(!self)return;QMetaObject::invokeMethod(self,[self,model,changed,ids,kind,count]()mutable{if(!self)return;self->editBusy_=false;model->cachedActiveCount=count;if(changed){if(kind==pceditor::ChangeKind::Flags)self->queueDirtyIds(*model,ids,DirtyBuffer::Flags);else if(kind==pceditor::ChangeKind::Position)self->queueDirtyIds(*model,ids,DirtyBuffer::Position);}self->statusText_="撤销完成";self->update();},Qt::QueuedConnection);});}
-void PointCloudWidget::redoAsync(){auto*m=activeModel();if(!m||editBusy_||!m->editor.canRedo())return;editBusy_=true;clearSelectionVisual(*m);SceneModel*model=m;QPointer<PointCloudWidget>self(this);workerPool_.start([self,model]{const bool changed=model->editor.redo();const auto ids=model->editor.lastChangedIds();const auto kind=model->editor.lastChangeKind();const auto count=model->cloud->activeCount();if(!self)return;QMetaObject::invokeMethod(self,[self,model,changed,ids,kind,count]()mutable{if(!self)return;self->editBusy_=false;model->cachedActiveCount=count;if(changed){if(kind==pceditor::ChangeKind::Flags)self->queueDirtyIds(*model,ids,DirtyBuffer::Flags);else if(kind==pceditor::ChangeKind::Position)self->queueDirtyIds(*model,ids,DirtyBuffer::Position);}self->statusText_="重做完成";self->update();},Qt::QueuedConnection);});}
+void PointCloudWidget::undoAsync(){auto*m=activeModel();if(!m||editBusy_||!m->editor.canUndo())return;editBusy_=true;clearSelectionVisual(*m);SceneModel*model=m;QPointer<PointCloudWidget>self(this);workerPool_.start([self,model]{const bool changed=model->editor.undo();const auto ids=model->editor.lastChangedIds();const auto kind=model->editor.lastChangeKind();const auto count=model->cloud->activeCount();if(!self)return;QMetaObject::invokeMethod(self,[self,model,changed,ids,kind,count]()mutable{if(!self)return;self->editBusy_=false;model->cachedActiveCount=count;if(changed){if(kind==JMEngine::ChangeKind::Flags)self->queueDirtyIds(*model,ids,DirtyBuffer::Flags);else if(kind==JMEngine::ChangeKind::Position)self->queueDirtyIds(*model,ids,DirtyBuffer::Position);}self->statusText_="撤销完成";self->update();},Qt::QueuedConnection);});}
+void PointCloudWidget::redoAsync(){auto*m=activeModel();if(!m||editBusy_||!m->editor.canRedo())return;editBusy_=true;clearSelectionVisual(*m);SceneModel*model=m;QPointer<PointCloudWidget>self(this);workerPool_.start([self,model]{const bool changed=model->editor.redo();const auto ids=model->editor.lastChangedIds();const auto kind=model->editor.lastChangeKind();const auto count=model->cloud->activeCount();if(!self)return;QMetaObject::invokeMethod(self,[self,model,changed,ids,kind,count]()mutable{if(!self)return;self->editBusy_=false;model->cachedActiveCount=count;if(changed){if(kind==JMEngine::ChangeKind::Flags)self->queueDirtyIds(*model,ids,DirtyBuffer::Flags);else if(kind==JMEngine::ChangeKind::Position)self->queueDirtyIds(*model,ids,DirtyBuffer::Position);}self->statusText_="重做完成";self->update();},Qt::QueuedConnection);});}
 
-void PointCloudWidget::saveAsync(){auto*m=activeModel();if(!m||editBusy_||!m->cloud)return;editBusy_=true;SceneModel*model=m;QPointer<PointCloudWidget>self(this);workerPool_.start([self,model]{std::string error;const bool ok=pceditor::PointCloudIO::savePly(*model->cloud,"edited_output.ply",&error);if(!self)return;QMetaObject::invokeMethod(self,[self,ok,error]{if(!self)return;self->editBusy_=false;self->statusText_=ok?"已保存 edited_output.ply":"保存失败: "+error;self->update();},Qt::QueuedConnection);});}
+void PointCloudWidget::saveAsync(){auto*m=activeModel();if(!m||editBusy_||!m->cloud)return;editBusy_=true;SceneModel*model=m;QPointer<PointCloudWidget>self(this);workerPool_.start([self,model]{std::string error;const bool ok=JMEngine::PointCloudIO::savePly(*model->cloud,"edited_output.ply",&error);if(!self)return;QMetaObject::invokeMethod(self,[self,ok,error]{if(!self)return;self->editBusy_=false;self->statusText_=ok?"已保存 edited_output.ply":"保存失败: "+error;self->update();},Qt::QueuedConnection);});}
 
 void PointCloudWidget::setMode(InteractionMode mode){if(editBusy_)return;mode_=mode;dragging_=false;editGestureActive_=false;viewDragButton_=Qt::NoButton;stroke_.clear();update();}
 const char* PointCloudWidget::modeName() const noexcept{switch(mode_){case InteractionMode::View:return"浏览";case InteractionMode::Rectangle:return"矩形选择(R)";case InteractionMode::Lasso:return"套索(L)";case InteractionMode::Circle:return"圆形选择(C)";case InteractionMode::BrushSelect:return"画刷(B)";}return"未知";}

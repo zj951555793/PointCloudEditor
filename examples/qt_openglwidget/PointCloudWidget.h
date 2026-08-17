@@ -7,8 +7,8 @@
 #include <QString>
 #include <QThreadPool>
 
-#include <pceditor/ObjModelLoader.h>
-#include <pceditor/PointCloudEditor.h>
+#include <JMEngine/ObjModelLoader.h>
+#include <JMEngine/JMEngine.h>
 
 #include "../common/ExampleUtils.h"
 
@@ -24,7 +24,7 @@ class QWheelEvent;
 class QString;
 
 // Qt 只承担 UI + OpenGL 显示。
-// Core 模型解析、点云编辑、CPU 穿透选择均来自无 Qt 的 pceditor 库。
+// Core 模型解析、点云编辑、CPU 穿透选择均来自无 Qt 的 JMEngine 库。
 class PointCloudWidget final : public QOpenGLWidget,
                                protected QOpenGLFunctions_3_3_Core {
 public:
@@ -83,8 +83,8 @@ private:
     enum class DirtyBuffer { Flags, Selection, Position };
 
     struct DirtyRange {
-        pceditor::PointId begin{0};
-        pceditor::PointId end{0}; // 闭区间
+        JMEngine::PointId begin{0};
+        JMEngine::PointId end{0}; // 闭区间
         DirtyBuffer buffer{DirtyBuffer::Flags};
     };
 
@@ -94,13 +94,13 @@ private:
         QString path;
         bool visible{true};
 
-        std::shared_ptr<pceditor::PointCloud> cloud;
-        pceditor::PointCloudEditor editor;
-        pceditor::ObjMeshData mesh;
+        std::shared_ptr<JMEngine::PointCloud> cloud;
+        JMEngine::Engine editor;
+        JMEngine::ObjMeshData mesh;
         bool meshMode{false};
 
         std::vector<std::uint32_t> selectedMask;
-        std::vector<pceditor::PointId> selectedIds;
+        std::vector<JMEngine::PointId> selectedIds;
         std::deque<DirtyRange> dirtyRanges;
         std::size_t cachedActiveCount{0};
 
@@ -120,8 +120,8 @@ private:
         std::size_t meshUploadCursor{0};
 
         SceneModel(QString modelPath,
-                   std::shared_ptr<pceditor::PointCloud> modelCloud,
-                   pceditor::ObjMeshData modelMesh,
+                   std::shared_ptr<JMEngine::PointCloud> modelCloud,
+                   JMEngine::ObjMeshData modelMesh,
                    bool isMesh);
     };
 
@@ -155,7 +155,7 @@ private:
     void processInitialGpuUpload(SceneModel& model, std::size_t& byteBudget);
     void processDirtyGpuUpdates(SceneModel& model, std::size_t& byteBudget);
     void queueDirtyIds(SceneModel& model,
-                       const std::vector<pceditor::PointId>& ids,
+                       const std::vector<JMEngine::PointId>& ids,
                        DirtyBuffer buffer);
 
     void drawScene();
@@ -172,28 +172,28 @@ private:
     void startThroughPickAsync(Qt::KeyboardModifiers modifiers);
     void pollPickReadback();
 
-    std::vector<pceditor::PointId> filterSurfacePixels(
+    std::vector<JMEngine::PointId> filterSurfacePixels(
         const PendingPick& pending,
         const std::vector<std::uint32_t>& pixels) const;
-    std::vector<pceditor::PointId> runThroughSelection(
+    std::vector<JMEngine::PointId> runThroughSelection(
         const PendingPick& pending,
-        const pceditor::Mat4f& mvp,
-        const pceditor::PointCloud& cloud,
-        const pceditor::ObjMeshData* mesh) const;
-    std::vector<pceditor::PointId> expandTriangleIdsToVertices(
+        const JMEngine::Mat4f& mvp,
+        const JMEngine::PointCloud& cloud,
+        const JMEngine::ObjMeshData* mesh) const;
+    std::vector<JMEngine::PointId> expandTriangleIdsToVertices(
         const SceneModel& model,
         const std::vector<std::uint32_t>& triangleIds) const;
-    std::vector<pceditor::PointId> expandVertexSelectionToWholeTriangles(
+    std::vector<JMEngine::PointId> expandVertexSelectionToWholeTriangles(
         const SceneModel& model,
-        const std::vector<pceditor::PointId>& vertexIds) const;
+        const std::vector<JMEngine::PointId>& vertexIds) const;
 
-    void applySelection(std::vector<pceditor::PointId> ids,
+    void applySelection(std::vector<JMEngine::PointId> ids,
                         Qt::KeyboardModifiers modifiers);
     void setSelectionVisual(SceneModel& model,
-                            const std::vector<pceditor::PointId>& ids);
+                            const std::vector<JMEngine::PointId>& ids);
     void clearSelectionVisual(SceneModel& model);
 
-    void deleteIdsAsync(std::vector<pceditor::PointId> ids);
+    void deleteIdsAsync(std::vector<JMEngine::PointId> ids);
     void undoAsync();
     void redoAsync();
     void saveAsync();
@@ -202,7 +202,7 @@ private:
     const char* modeName() const noexcept;
     const char* depthModeName() const noexcept;
 
-    pceditor::Mat4f currentMvp() const;
+    JMEngine::Mat4f currentMvp() const;
     QPoint toPhysical(const QPoint& logical) const;
     PendingPick buildPendingPick(Qt::KeyboardModifiers modifiers, bool physical) const;
 
@@ -211,7 +211,7 @@ private:
     std::vector<QString> loadingPaths_; // 防止模型管理器重复点击时重复解析同一文件。
     int activeModel_{-1};
 
-    pceditor::example::OrbitCamera camera_;
+    JMEngine::example::OrbitCamera camera_;
 
     QOpenGLShaderProgram colorProgram_;
     QOpenGLShaderProgram meshProgram_;
