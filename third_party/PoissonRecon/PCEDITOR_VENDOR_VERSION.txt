@@ -1,0 +1,3 @@
+PoissonRecon 18.76
+Source: https://www.cs.jhu.edu/~misha/Code/PoissonRecon/Version18.76/AdaptiveSolvers.zip
+Vendored by tools/vendor_poissonrecon.py

@@ -604,16 +604,97 @@ if(PCEDITOR_BUILD_QT_EDITOR)
         # OpenCV is linked manually instead of find_package(OpenCV), because
         # the bundled OpenCV 4.8.0 package may have Visual Studio/export config
         # compatibility problems on the current development machine.
-        set(THIRD_PATH "${CMAKE_CURRENT_SOURCE_DIR}/third_party/win32")
-        set(PCEDITOR_EIGEN3_ROOT "${THIRD_PATH}/eigen3")
-        set(PCEDITOR_OPENCV_ROOT "${THIRD_PATH}/opencv")
-        set(PCEDITOR_RULERMVS_ROOT "${THIRD_PATH}/rulermvs")
+        # Keep the Windows scanner SDK layout configurable.  Android/Linux builds
+        # never enter this block.  On Windows we first honour an explicit cache
+        # path, then probe both the historical and the cross-platform layouts.
+        set(PCEDITOR_WIN32_THIRD_PARTY_ROOT "" CACHE PATH
+            "Windows third-party root containing eigen3, opencv and rulermvs")
+
+        set(_PCEDITOR_WIN32_THIRD_CANDIDATES)
+        if(PCEDITOR_WIN32_THIRD_PARTY_ROOT)
+            list(APPEND _PCEDITOR_WIN32_THIRD_CANDIDATES
+                "${PCEDITOR_WIN32_THIRD_PARTY_ROOT}")
+        endif()
+        list(APPEND _PCEDITOR_WIN32_THIRD_CANDIDATES
+            "${CMAKE_CURRENT_SOURCE_DIR}/third_party/win32"
+            "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/win32"
+            "${PROJECT_SOURCE_DIR}/third_party/win32"
+            "${PROJECT_SOURCE_DIR}/../third_party/win32"
+            "${CMAKE_CURRENT_SOURCE_DIR}/third_party"
+            "${PROJECT_SOURCE_DIR}/third_party")
+
+        set(THIRD_PATH "")
+        if(WIN32)
+            foreach(_candidate IN LISTS _PCEDITOR_WIN32_THIRD_CANDIDATES)
+                get_filename_component(_candidate_norm "${_candidate}" ABSOLUTE)
+                if(EXISTS "${_candidate_norm}/rulermvs"
+                   AND EXISTS "${_candidate_norm}/opencv"
+                   AND EXISTS "${_candidate_norm}/eigen3")
+                    set(THIRD_PATH "${_candidate_norm}")
+                    break()
+                endif()
+            endforeach()
+        endif()
+
+        if(THIRD_PATH)
+            set(PCEDITOR_EIGEN3_ROOT "${THIRD_PATH}/eigen3")
+            set(PCEDITOR_OPENCV_ROOT "${THIRD_PATH}/opencv")
+            set(PCEDITOR_RULERMVS_ROOT "${THIRD_PATH}/rulermvs")
+        else()
+            # Keep deterministic paths for diagnostics/cache editing even when
+            # auto-detection did not find the SDK.
+            set(PCEDITOR_EIGEN3_ROOT "")
+            set(PCEDITOR_OPENCV_ROOT "")
+            set(PCEDITOR_RULERMVS_ROOT "")
+        endif()
 
         set(_PCEDITOR_RULERMVS_ENABLED FALSE)
+        if(WIN32 AND THIRD_PATH)
+            find_path(PCEDITOR_RULERMVS_INCLUDE_DIR
+                NAMES rulermvs.hpp
+                PATHS
+                    "${PCEDITOR_RULERMVS_ROOT}/include"
+                    "${PCEDITOR_RULERMVS_ROOT}"
+                NO_DEFAULT_PATH)
+            find_path(PCEDITOR_DBOW3_INCLUDE_DIR
+                NAMES DBoW3/DBoW3.h
+                PATHS
+                    "${PCEDITOR_RULERMVS_ROOT}/include"
+                    "${PCEDITOR_RULERMVS_ROOT}/include/DBoW3"
+                    "${PCEDITOR_RULERMVS_ROOT}"
+                NO_DEFAULT_PATH)
+            find_path(PCEDITOR_RULERMVS_LIB_DIR
+                NAMES rulermvs.lib rulerMVS.lib
+                PATHS
+                    "${PCEDITOR_RULERMVS_ROOT}/lib"
+                    "${PCEDITOR_RULERMVS_ROOT}/lib/x64"
+                    "${PCEDITOR_RULERMVS_ROOT}/x64/lib"
+                NO_DEFAULT_PATH)
+
+            if(NOT PCEDITOR_RULERMVS_INCLUDE_DIR OR NOT PCEDITOR_DBOW3_INCLUDE_DIR)
+                message(WARNING
+                    "rulermvs headers are incomplete under ${PCEDITOR_RULERMVS_ROOT}; "
+                    "rulermvs.hpp=${PCEDITOR_RULERMVS_INCLUDE_DIR}, DBoW3=${PCEDITOR_DBOW3_INCLUDE_DIR}")
+            elseif(NOT PCEDITOR_RULERMVS_LIB_DIR)
+                # Some SDK packages use non-standard import library names.  If
+                # a lib directory exists, accept it and glob the import libs below.
+                foreach(_lib_candidate
+                        "${PCEDITOR_RULERMVS_ROOT}/lib"
+                        "${PCEDITOR_RULERMVS_ROOT}/lib/x64"
+                        "${PCEDITOR_RULERMVS_ROOT}/x64/lib")
+                    if(EXISTS "${_lib_candidate}")
+                        set(PCEDITOR_RULERMVS_LIB_DIR "${_lib_candidate}")
+                        break()
+                    endif()
+                endforeach()
+            endif()
+        endif()
+
         if(WIN32
-           AND EXISTS "${PCEDITOR_RULERMVS_ROOT}/include/rulermvs.hpp"
-           AND EXISTS "${PCEDITOR_RULERMVS_ROOT}/include/DBoW3/DBoW3.h"
-           AND EXISTS "${PCEDITOR_RULERMVS_ROOT}/lib")
+           AND THIRD_PATH
+           AND PCEDITOR_RULERMVS_INCLUDE_DIR
+           AND PCEDITOR_DBOW3_INCLUDE_DIR
+           AND PCEDITOR_RULERMVS_LIB_DIR)
 
             # Eigen3 is header-only. Support common directory layouts.
             find_path(PCEDITOR_EIGEN3_INCLUDE_DIR
@@ -633,42 +714,70 @@ if(PCEDITOR_BUILD_QT_EDITOR)
             # ---------------------------------------------------------
             # OpenCV 4.8.0 - manual include/lib configuration
             # ---------------------------------------------------------
-            set(OpenCV_INCLUDE_DIRS
-                "${PCEDITOR_OPENCV_ROOT}/include"
-            )
+            find_path(PCEDITOR_OPENCV_INCLUDE_DIR
+                NAMES opencv2/core.hpp
+                PATHS
+                    "${PCEDITOR_OPENCV_ROOT}/include"
+                    "${PCEDITOR_OPENCV_ROOT}/build/include"
+                NO_DEFAULT_PATH)
+            if(NOT PCEDITOR_OPENCV_INCLUDE_DIR)
+                message(FATAL_ERROR
+                    "OpenCV headers were not found under ${PCEDITOR_OPENCV_ROOT}")
+            endif()
+            set(OpenCV_INCLUDE_DIRS "${PCEDITOR_OPENCV_INCLUDE_DIR}")
+
+            # Locate the prebuilt OpenCV import-library directory.  Support the
+            # old opencv/lib layout and official opencv/x64/vc*/lib packages.
+            set(PCEDITOR_OPENCV_LIB_DIR "")
+            foreach(_opencv_lib_candidate
+                    "${PCEDITOR_OPENCV_ROOT}/lib")
+                if(EXISTS "${_opencv_lib_candidate}/opencv_core480.lib")
+                    set(PCEDITOR_OPENCV_LIB_DIR "${_opencv_lib_candidate}")
+                    break()
+                endif()
+            endforeach()
+            if(NOT PCEDITOR_OPENCV_LIB_DIR)
+                file(GLOB _opencv_vc_lib_dirs LIST_DIRECTORIES TRUE
+                    "${PCEDITOR_OPENCV_ROOT}/x64/vc*/lib")
+                foreach(_opencv_lib_candidate IN LISTS _opencv_vc_lib_dirs)
+                    if(EXISTS "${_opencv_lib_candidate}/opencv_core480.lib")
+                        set(PCEDITOR_OPENCV_LIB_DIR "${_opencv_lib_candidate}")
+                        break()
+                    endif()
+                endforeach()
+            endif()
+            if(NOT PCEDITOR_OPENCV_LIB_DIR)
+                message(FATAL_ERROR
+                    "OpenCV 4.8 import libraries were not found under ${PCEDITOR_OPENCV_ROOT}")
+            endif()
 
             set(OpenCV_LIBS
-                ${THIRD_PATH}/opencv/lib/opencv_core480.lib
-                ${THIRD_PATH}/opencv/lib/opencv_imgcodecs480.lib
-                ${THIRD_PATH}/opencv/lib/opencv_highgui480.lib
-                ${THIRD_PATH}/opencv/lib/opencv_imgproc480.lib
-                ${THIRD_PATH}/opencv/lib/opencv_cudaarithm480.lib
-                ${THIRD_PATH}/opencv/lib/opencv_cudabgsegm480.lib
-                ${THIRD_PATH}/opencv/lib/opencv_cudacodec480.lib
-                ${THIRD_PATH}/opencv/lib/opencv_cudafeatures2d480.lib
-                ${THIRD_PATH}/opencv/lib/opencv_cudafilters480.lib
-                ${THIRD_PATH}/opencv/lib/opencv_cudaimgproc480.lib
-                ${THIRD_PATH}/opencv/lib/opencv_cudalegacy480.lib
-                ${THIRD_PATH}/opencv/lib/opencv_cudaobjdetect480.lib
-                ${THIRD_PATH}/opencv/lib/opencv_cudaoptflow480.lib
-                ${THIRD_PATH}/opencv/lib/opencv_cudastereo480.lib
-                ${THIRD_PATH}/opencv/lib/opencv_cudawarping480.lib
-                ${THIRD_PATH}/opencv/lib/opencv_cudev480.lib
-                ${THIRD_PATH}/opencv/lib/opencv_dnn_objdetect480.lib
-                ${THIRD_PATH}/opencv/lib/opencv_dnn_superres480.lib
-                ${THIRD_PATH}/opencv/lib/opencv_dnn480.lib
-                ${THIRD_PATH}/opencv/lib/opencv_video480.lib
-                ${THIRD_PATH}/opencv/lib/opencv_ccalib480.lib
-                ${THIRD_PATH}/opencv/lib/opencv_videoio480.lib
-                ${THIRD_PATH}/opencv/lib/opencv_flann480.lib
-                ${THIRD_PATH}/opencv/lib/opencv_features2d480.lib
-                ${THIRD_PATH}/opencv/lib/opencv_calib3d480.lib
+                ${PCEDITOR_OPENCV_LIB_DIR}/opencv_core480.lib
+                ${PCEDITOR_OPENCV_LIB_DIR}/opencv_imgcodecs480.lib
+                ${PCEDITOR_OPENCV_LIB_DIR}/opencv_highgui480.lib
+                ${PCEDITOR_OPENCV_LIB_DIR}/opencv_imgproc480.lib
+                ${PCEDITOR_OPENCV_LIB_DIR}/opencv_cudaarithm480.lib
+                ${PCEDITOR_OPENCV_LIB_DIR}/opencv_cudabgsegm480.lib
+                ${PCEDITOR_OPENCV_LIB_DIR}/opencv_cudacodec480.lib
+                ${PCEDITOR_OPENCV_LIB_DIR}/opencv_cudafeatures2d480.lib
+                ${PCEDITOR_OPENCV_LIB_DIR}/opencv_cudafilters480.lib
+                ${PCEDITOR_OPENCV_LIB_DIR}/opencv_cudaimgproc480.lib
+                ${PCEDITOR_OPENCV_LIB_DIR}/opencv_cudalegacy480.lib
+                ${PCEDITOR_OPENCV_LIB_DIR}/opencv_cudaobjdetect480.lib
+                ${PCEDITOR_OPENCV_LIB_DIR}/opencv_cudaoptflow480.lib
+                ${PCEDITOR_OPENCV_LIB_DIR}/opencv_cudastereo480.lib
+                ${PCEDITOR_OPENCV_LIB_DIR}/opencv_cudawarping480.lib
+                ${PCEDITOR_OPENCV_LIB_DIR}/opencv_cudev480.lib
+                ${PCEDITOR_OPENCV_LIB_DIR}/opencv_dnn_objdetect480.lib
+                ${PCEDITOR_OPENCV_LIB_DIR}/opencv_dnn_superres480.lib
+                ${PCEDITOR_OPENCV_LIB_DIR}/opencv_dnn480.lib
+                ${PCEDITOR_OPENCV_LIB_DIR}/opencv_video480.lib
+                ${PCEDITOR_OPENCV_LIB_DIR}/opencv_ccalib480.lib
+                ${PCEDITOR_OPENCV_LIB_DIR}/opencv_videoio480.lib
+                ${PCEDITOR_OPENCV_LIB_DIR}/opencv_flann480.lib
+                ${PCEDITOR_OPENCV_LIB_DIR}/opencv_features2d480.lib
+                ${PCEDITOR_OPENCV_LIB_DIR}/opencv_calib3d480.lib
             )
-
-            if(NOT EXISTS "${PCEDITOR_OPENCV_ROOT}/include/opencv2/core.hpp")
-                message(FATAL_ERROR
-                    "OpenCV headers were not found: ${PCEDITOR_OPENCV_ROOT}/include/opencv2/core.hpp")
-            endif()
 
             # Fail during CMake configure instead of waiting for VS linker errors.
             foreach(_opencv_lib IN LISTS OpenCV_LIBS)
@@ -682,14 +791,15 @@ if(PCEDITOR_BUILD_QT_EDITOR)
 
             # rulermvs SDK libraries. Link all import libraries shipped in lib/.
             file(GLOB _PCEDITOR_RULERMVS_LIBS CONFIGURE_DEPENDS
-                "${PCEDITOR_RULERMVS_ROOT}/lib/*.lib")
+                "${PCEDITOR_RULERMVS_LIB_DIR}/*.lib")
             if(NOT _PCEDITOR_RULERMVS_LIBS)
                 message(FATAL_ERROR
-                    "No rulermvs .lib files were found in ${PCEDITOR_RULERMVS_ROOT}/lib")
+                    "No rulermvs .lib files were found in ${PCEDITOR_RULERMVS_LIB_DIR}")
             endif()
 
             target_include_directories(pceditor_qt_editor PRIVATE
-                "${PCEDITOR_RULERMVS_ROOT}/include"
+                "${PCEDITOR_RULERMVS_INCLUDE_DIR}"
+                "${PCEDITOR_DBOW3_INCLUDE_DIR}"
                 "${PCEDITOR_EIGEN3_INCLUDE_DIR}"
                 ${OpenCV_INCLUDE_DIRS}
             )
@@ -750,10 +860,12 @@ if(PCEDITOR_BUILD_QT_EDITOR)
                 VERBATIM)
         endif()
 
-        if(NOT _PCEDITOR_RULERMVS_ENABLED)
-            message(STATUS
-                "PointCloudEditor rulermvs scan integration: disabled; expected "
-                "${THIRD_PATH}/{eigen3,opencv,rulermvs}")
+        if(WIN32 AND NOT _PCEDITOR_RULERMVS_ENABLED)
+            message(WARNING
+                "PointCloudEditor rulermvs scan integration: disabled. "
+                "Set -DPCEDITOR_WIN32_THIRD_PARTY_ROOT=<path> to the directory "
+                "containing eigen3, opencv and rulermvs. Auto-probed: "
+                "${_PCEDITOR_WIN32_THIRD_CANDIDATES}")
         endif()
 
         if(_PCEDITOR_SELECTED_BACKEND STREQUAL "GLES31")
