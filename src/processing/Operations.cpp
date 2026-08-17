@@ -1,4 +1,5 @@
 #include <JMEngine/processing/Operations.h>
+#include <JMEngine/MeshUtils.h>
 #include <JMEngine/processing/Parallel.h>
 #include <algorithm>
 #include <array>
@@ -425,7 +426,7 @@ ProcessResult VoxelDownsampleOperation::run(const ProcessInput& i, const Paramet
         return r;
     }
     r.inputPoints = i.cloud->activeCount();
-    float s = std::max(1e-9, realParam(p, "voxel_mm", 2.0) * 0.001);
+    float s = std::max(1e-9f, millimetersToCloudUnits(*i.cloud, realParam(p, "voxel_mm", 2.0)));
     prog(cb, .05f, "构建体素");
     struct A {
         double x = 0, y = 0, z = 0, nx = 0, ny = 0, nz = 0;
@@ -533,7 +534,7 @@ ProcessResult RadiusOutlierOperation::run(const ProcessInput& i, const Parameter
         r.message = "需要点云";
         return r;
     }
-    float rad = (float)(realParam(p, "radius_mm", 3) * .001);
+    float rad = std::max(1e-9f, millimetersToCloudUnits(*i.cloud, realParam(p, "radius_mm", 3)));
     int mn = (int)intParam(p, "min_neighbors", 5);
     auto g = grid(*i.cloud, rad);
     std::vector<unsigned char> keep(i.cloud->size(), 1);
@@ -579,80 +580,80 @@ OperationDescriptor StatisticalOutlierOperation::descriptor() const {
 }
 ProcessResult StatisticalOutlierOperation::run(const ProcessInput& i, const ParameterMap& p, const ProgressCallback& cb,
                                                const CancelToken& ct) const {
-    (void)ct;
     ProcessResult r;
     if (!i.cloud) {
         r.message = "需要点云";
         return r;
     }
-    int k = (int)intParam(p, "k", 20);
-    double mulv = realParam(p, "stddev", 1.5); // 用自适应体素近似 KNN，避免 O(N^2)
-    Box3f b{};
-    bool init = false;
-    for (auto& q : i.cloud->points())
-        if (!(q.flags & PointDeleted)) {
-            if (!init) {
-                b.min = b.max = q.position;
-                init = true;
-            } else {
-                b.min.x = std::min(b.min.x, q.position.x);
-                b.min.y = std::min(b.min.y, q.position.y);
-                b.min.z = std::min(b.min.z, q.position.z);
-                b.max.x = std::max(b.max.x, q.position.x);
-                b.max.y = std::max(b.max.y, q.position.y);
-                b.max.z = std::max(b.max.z, q.position.z);
-            }
-        }
-    float diag = std::sqrt(dist2(b.min, b.max));
-    float rad = std::max(
-        static_cast<float>(diag / std::cbrt(static_cast<double>(std::max<size_t>(1, i.cloud->size()))) * 2.5), 1e-6f);
-    auto g = grid(*i.cloud, rad);
-    std::vector<double> d(i.cloud->size(), 0);
-    int nt = processingThreadCount();
+    const int k = std::clamp((int)intParam(p, "k", 20), 2, 200);
+    const double mulv = std::max(0.0, realParam(p, "stddev", 1.5));
+    r.inputPoints = i.cloud->activeCount();
+    if (r.inputPoints <= 2) {
+        r.cloud = std::make_shared<PointCloud>(i.cloud->points());
+        r.outputPoints = r.inputPoints;
+        r.success = true;
+        return r;
+    }
+
+    prog(cb, .05f, "构建 KNN 索引");
+    PointKdTree tree(*i.cloud);
+    std::vector<double> meanDistance(i.cloud->size(), std::numeric_limits<double>::quiet_NaN());
+    const int nt = processingThreadCount();
 #ifdef JMENGINE_USE_OPENMP
 #pragma omp parallel for schedule(dynamic, 128) num_threads(nt)
 #endif
     for (long long id = 0; id < (long long)i.cloud->size(); ++id) {
-        if (i.cloud->points()[(size_t)id].flags & PointDeleted) {
-            d[(size_t)id] = std::numeric_limits<double>::quiet_NaN();
+        const auto uid = static_cast<std::uint32_t>(id);
+        const auto& point = i.cloud->points()[static_cast<std::size_t>(id)];
+        if (point.flags & PointDeleted)
+            continue;
+        std::array<std::uint32_t, 256> ids{};
+        std::array<float, 256> d2{};
+        const auto count = tree.knn(uid, static_cast<std::size_t>(k), 0.0f, ids, d2);
+        if (count == 0) {
+            meanDistance[static_cast<std::size_t>(id)] = std::numeric_limits<double>::infinity();
             continue;
         }
-        std::vector<float> ds;
-        ds.reserve(64);
-        forNeighbors(*i.cloud, g, (uint32_t)id, rad, [&](uint32_t j) {
-            ds.push_back(dist2(i.cloud->points()[(size_t)id].position, i.cloud->points()[j].position));
-        });
-        if (ds.empty()) {
-            d[(size_t)id] = rad;
-            continue;
-        }
-        size_t kk = std::min<size_t>(k, ds.size());
-        std::nth_element(ds.begin(), ds.begin() + kk - 1, ds.end());
-        double s = 0;
-        for (size_t z = 0; z < kk; ++z)
-            s += std::sqrt(ds[z]);
-        d[(size_t)id] = s / kk;
+        double sum = 0.0;
+        for (std::size_t n = 0; n < count; ++n)
+            sum += std::sqrt(std::max(0.0f, d2[n]));
+        meanDistance[static_cast<std::size_t>(id)] = sum / static_cast<double>(count);
     }
-    double sum = 0, ss = 0;
-    size_t n = 0;
-    for (double x : d)
-        if (std::isfinite(x)) {
-            sum += x;
-            ss += x * x;
-            ++n;
-        }
-    double mean = n ? sum / n : 0;
-    double sd = n ? std::sqrt(std::max(0.0, ss / n - mean * mean)) : 0;
-    double th = mean + mulv * sd;
+    if (ct.cancelled()) {
+        r.cancelled = true;
+        return r;
+    }
+
+    double sum = 0.0, sq = 0.0;
+    std::size_t n = 0;
+    for (double d : meanDistance) {
+        if (!std::isfinite(d))
+            continue;
+        sum += d;
+        sq += d * d;
+        ++n;
+    }
+    if (!n) {
+        r.message = "没有有效点";
+        return r;
+    }
+    const double mean = sum / static_cast<double>(n);
+    const double variance = std::max(0.0, sq / static_cast<double>(n) - mean * mean);
+    const double threshold = mean + mulv * std::sqrt(variance);
+
+    prog(cb, .8f, "删除统计离群点");
     PointCloud::Container out;
-    for (size_t z = 0; z < d.size(); ++z)
-        if (std::isfinite(d[z]) && d[z] <= th)
-            out.push_back(i.cloud->points()[z]);
-    r.inputPoints = i.cloud->activeCount();
+    out.reserve(r.inputPoints);
+    for (std::size_t id = 0; id < i.cloud->size(); ++id) {
+        const double d = meanDistance[id];
+        if (std::isfinite(d) && d <= threshold)
+            out.push_back(i.cloud->points()[id]);
+    }
     r.cloud = std::make_shared<PointCloud>(std::move(out));
     r.outputPoints = r.cloud->size();
     r.success = true;
     r.geometryChanged = r.topologyChanged = true;
+    r.message = "统计离群点去噪完成（KD-tree KNN）";
     prog(cb, 1, "完成");
     return r;
 }
@@ -672,7 +673,7 @@ ProcessResult SmallClusterOperation::run(const ProcessInput& i, const ParameterM
         r.message = "需要点云";
         return r;
     }
-    float rad = (float)(realParam(p, "radius_mm", 3) * .001);
+    float rad = std::max(1e-9f, millimetersToCloudUnits(*i.cloud, realParam(p, "radius_mm", 3)));
     size_t minp = (size_t)intParam(p, "min_points", 1000);
     auto g = grid(*i.cloud, rad);
     std::vector<int> comp(i.cloud->size(), -1);
@@ -919,7 +920,7 @@ ProcessResult MeshCleanupOperation::run(const ProcessInput& i, const ParameterMa
         out->setIndices(std::move(filtered));
     }
     if (boolParam(p, "merge_vertices", true) && out->vertices() && !out->vertices()->empty()) {
-        float tol = (float)(realParam(p, "merge_tolerance_mm", .001) * .001);
+        float tol = millimetersToCloudUnits(*out->vertices(), realParam(p, "merge_tolerance_mm", .001));
         if (tol > 0) {
             std::unordered_map<Key, uint32_t, KeyHash> first;
             std::vector<uint32_t> remap(out->vertices()->size());
@@ -956,6 +957,133 @@ ProcessResult MeshCleanupOperation::run(const ProcessInput& i, const ParameterMa
     r.topologyChanged = true;
     r.message = "网格清理完成";
     prog(cb, 1, "完成");
+    return r;
+}
+
+OperationDescriptor MeshDenoiseOperation::descriptor() const {
+    return {"mesh_denoise",
+            "网格去噪",
+            "网格",
+            ModelKind::TriangleMesh,
+            {{"remove_small_components", "删除小连通域", ParameterKind::Boolean, 1, 0, 1, 1, ""},
+             {"min_component_triangles", "最小连通域三角形数", ParameterKind::Integer, 100, 1, 10000000, 10, ""},
+             {"remove_spike_triangles", "删除异常尖刺/长边三角形", ParameterKind::Boolean, 1, 0, 1, 1, ""},
+             {"long_edge_factor", "异常长边倍数", ParameterKind::Real, 6.0, 2.0, 30.0, .5, "x中位边长"},
+             {"min_area_ratio", "最小形状面积比", ParameterKind::Real, .002, 0.0, .1, .001, ""},
+             {"recompute_normals", "重新计算法线", ParameterKind::Boolean, 1, 0, 1, 1, ""}}};
+}
+
+ProcessResult MeshDenoiseOperation::run(const ProcessInput& i, const ParameterMap& p, const ProgressCallback& cb,
+                                        const CancelToken& ct) const {
+    ProcessResult r;
+    if (!i.mesh || !i.mesh->vertices() || i.mesh->triangleCount() == 0) {
+        r.message = "需要网格";
+        return r;
+    }
+    auto out = cloneMesh(*i.mesh);
+    r.inputPoints = out->vertices()->activeCount();
+    r.inputTriangles = out->triangleCount();
+    const auto& pts = out->vertices()->points();
+
+    // 用采样中位边长作为鲁棒尺度；不会因少量飞点把阈值拉大。
+    std::vector<float> sampledEdges;
+    const std::size_t tc = out->triangleCount();
+    const std::size_t maxSamples = 60000;
+    const std::size_t step = std::max<std::size_t>(1, tc / std::max<std::size_t>(1, maxSamples));
+    sampledEdges.reserve(std::min(tc, maxSamples) * 3);
+    for (std::size_t t = 0; t < tc; t += step) {
+        const std::size_t b = t * 3;
+        const auto a = out->indices()[b], b0 = out->indices()[b + 1], c = out->indices()[b + 2];
+        if (a >= pts.size() || b0 >= pts.size() || c >= pts.size())
+            continue;
+        sampledEdges.push_back(std::sqrt(dist2(pts[a].position, pts[b0].position)));
+        sampledEdges.push_back(std::sqrt(dist2(pts[b0].position, pts[c].position)));
+        sampledEdges.push_back(std::sqrt(dist2(pts[c].position, pts[a].position)));
+    }
+    float medianEdge = 0.0f;
+    if (!sampledEdges.empty()) {
+        const auto mid = sampledEdges.begin() + static_cast<std::ptrdiff_t>(sampledEdges.size() / 2);
+        std::nth_element(sampledEdges.begin(), mid, sampledEdges.end());
+        medianEdge = *mid;
+    }
+    const float maxEdge = medianEdge * static_cast<float>(realParam(p, "long_edge_factor", 6.0));
+    const float minAreaRatio = static_cast<float>(realParam(p, "min_area_ratio", .002));
+    const bool removeSpike = boolParam(p, "remove_spike_triangles", true) && medianEdge > 0.0f;
+
+    prog(cb, .15f, "检测异常三角形");
+    std::vector<std::uint32_t> filtered;
+    filtered.reserve(out->indices().size());
+    for (std::size_t t = 0; t < tc; ++t) {
+        if (ct.cancelled()) { r.cancelled = true; return r; }
+        const std::size_t b = 3 * t;
+        const auto a = out->indices()[b], b0 = out->indices()[b + 1], c = out->indices()[b + 2];
+        if (a >= pts.size() || b0 >= pts.size() || c >= pts.size() || a == b0 || b0 == c || c == a)
+            continue;
+        const float e0 = std::sqrt(dist2(pts[a].position, pts[b0].position));
+        const float e1 = std::sqrt(dist2(pts[b0].position, pts[c].position));
+        const float e2 = std::sqrt(dist2(pts[c].position, pts[a].position));
+        const float longest = std::max({e0, e1, e2});
+        const Vec3f cr = cross(sub(pts[b0].position, pts[a].position), sub(pts[c].position, pts[a].position));
+        const float twiceArea = std::sqrt(std::max(0.0f, dot(cr, cr)));
+        const float edgeSqSum = e0 * e0 + e1 * e1 + e2 * e2;
+        const float shapeRatio = edgeSqSum > 1e-20f ? twiceArea / edgeSqSum : 0.0f;
+        if (removeSpike && (longest > maxEdge || shapeRatio < minAreaRatio))
+            continue;
+        filtered.insert(filtered.end(), {a, b0, c});
+    }
+    out->setIndices(std::move(filtered));
+
+    if (boolParam(p, "remove_small_components", true) && out->triangleCount()) {
+        prog(cb, .55f, "删除小连通域");
+        const std::size_t triCount = out->triangleCount();
+        std::vector<std::vector<std::uint32_t>> vertexTris(out->vertices()->size());
+        for (std::uint32_t t = 0; t < triCount; ++t)
+            for (int k = 0; k < 3; ++k)
+                vertexTris[out->indices()[3ull * t + k]].push_back(t);
+        std::vector<int> comp(triCount, -1);
+        std::vector<std::vector<std::uint32_t>> groups;
+        for (std::uint32_t seed = 0; seed < triCount; ++seed) {
+            if (comp[seed] >= 0) continue;
+            const int ci = static_cast<int>(groups.size());
+            groups.emplace_back();
+            std::queue<std::uint32_t> q;
+            q.push(seed); comp[seed] = ci;
+            while (!q.empty()) {
+                const auto t = q.front(); q.pop();
+                groups.back().push_back(t);
+                for (int k = 0; k < 3; ++k) {
+                    const auto v = out->indices()[3ull * t + k];
+                    for (const auto nt : vertexTris[v])
+                        if (comp[nt] < 0) { comp[nt] = ci; q.push(nt); }
+                }
+            }
+            if (ct.cancelled()) { r.cancelled = true; return r; }
+        }
+        const std::size_t minTri = static_cast<std::size_t>(std::max<std::int64_t>(1, intParam(p, "min_component_triangles", 100)));
+        std::vector<std::uint32_t> kept;
+        kept.reserve(out->indices().size());
+        for (const auto& group : groups) {
+            if (group.size() < minTri) continue;
+            for (const auto t : group) {
+                const std::size_t b = 3ull * t;
+                kept.insert(kept.end(), {out->indices()[b], out->indices()[b + 1], out->indices()[b + 2]});
+            }
+        }
+        out->setIndices(std::move(kept));
+    }
+
+    compactUnreferenced(*out);
+    if (boolParam(p, "recompute_normals", true))
+        JMEngine::recomputeVertexNormals(*out);
+    r.outputPoints = out->vertices()->activeCount();
+    r.outputTriangles = out->triangleCount();
+    r.mesh = out;
+    r.cloud = out->vertices();
+    r.success = true;
+    r.geometryChanged = true;
+    r.topologyChanged = true;
+    r.message = "网格去噪完成";
+    prog(cb, 1.0f, "完成");
     return r;
 }
 

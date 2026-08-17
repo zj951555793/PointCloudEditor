@@ -29,6 +29,35 @@ enum class ScanCameraRole {
     CameraB = 1
 };
 
+// Registration strategy selected from the scan operator UI.
+// Keep this independent from ScanSourceMode: source mode decides where frames come from,
+// registration mode decides how consecutive scans are aligned.
+enum class ScanRegistrationMode {
+    Geometry = 0,
+    Texture = 1,
+    Marker = 2
+};
+
+
+struct ScanMarkerPoint {
+    float x{0.0f};
+    float y{0.0f};
+    float width{0.0f};
+    float height{0.0f};
+    float angleDeg{0.0f};
+    int localId{-1};
+    bool hasDepth{false};
+    std::array<float, 3> point3d{0.0f, 0.0f, 0.0f};
+};
+
+struct ScanMarkerFrame {
+    int frameId{-1};
+    int imageWidth{0};
+    int imageHeight{0};
+    qint64 timestampUs{0};
+    std::vector<ScanMarkerPoint> markers;
+};
+
 struct LiveFramePoseUpdate {
     int frameId{-1};
     std::array<float, 16> pose{1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
@@ -45,6 +74,7 @@ struct ScanPoseState {
 
 struct ScanConfig {
     ScanSourceMode sourceMode{ScanSourceMode::Virtual};
+    ScanRegistrationMode registrationMode{ScanRegistrationMode::Texture};
 
     // Common algorithm configuration.
     QString calibrationPath; // Production camera mode should explicitly set this.
@@ -101,6 +131,7 @@ class ScanFlowController final : public QObject {
     using CameraListCallback = std::function<void(const QVector<CameraDeviceInfo>&, const QString&)>;
     using CameraPreviewCallback = std::function<void(const QImage&)>;
     using PoseCallback = std::function<void(const ScanPoseState&)>;
+    using MarkerFrameCallback = std::function<void(const ScanMarkerFrame&)>;
 #ifdef JMENGINE_HAS_TEXTURE_MAPPING
     using TextureFrames = std::vector<JMEngine::texture::CameraFrame>;
     using TextureFramesPtr = std::shared_ptr<TextureFrames>;
@@ -134,6 +165,7 @@ class ScanFlowController final : public QObject {
     void setCameraListCallback(CameraListCallback cb) { cameraListCallback_ = std::move(cb); }
     void setCameraPreviewCallback(CameraPreviewCallback cb) { cameraPreviewCallback_ = std::move(cb); }
     void setPoseCallback(PoseCallback cb) { poseCallback_ = std::move(cb); }
+    void setMarkerFrameCallback(MarkerFrameCallback cb) { markerFrameCallback_ = std::move(cb); }
 #ifdef JMENGINE_HAS_TEXTURE_MAPPING
     void setTextureFramesCallback(TextureFramesCallback cb) { textureFramesCallback_ = std::move(cb); }
 #endif
@@ -172,6 +204,7 @@ class ScanFlowController final : public QObject {
     CameraListCallback cameraListCallback_;
     CameraPreviewCallback cameraPreviewCallback_;
     PoseCallback poseCallback_;
+    MarkerFrameCallback markerFrameCallback_;
 #ifdef JMENGINE_HAS_TEXTURE_MAPPING
     TextureFramesCallback textureFramesCallback_;
 #endif

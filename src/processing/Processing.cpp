@@ -15,6 +15,8 @@ std::unique_ptr<IProcessingOperation> createOperation(const std::string& id) {
         return std::make_unique<NormalEstimationOperation>();
     if (id == "mesh_cleanup")
         return std::make_unique<MeshCleanupOperation>();
+    if (id == "mesh_denoise")
+        return std::make_unique<MeshDenoiseOperation>();
     if (id == "laplacian")
         return std::make_unique<LaplacianSmoothOperation>();
     if (id == "taubin")
@@ -30,7 +32,7 @@ std::unique_ptr<IProcessingOperation> createOperation(const std::string& id) {
 std::vector<OperationDescriptor> builtinOperations() {
     const char* ids[] = {
         "voxel",     "radius_outlier", "statistical_outlier", "small_cluster", "normal_estimation", "mesh_cleanup",
-        "laplacian", "taubin",         "qem_decimate",        "hole_fill",     "poisson_octree"};
+        "mesh_denoise", "laplacian", "taubin", "qem_decimate", "hole_fill", "poisson_octree"};
     std::vector<OperationDescriptor> out;
     for (auto* id : ids) {
         auto op = createOperation(id);
@@ -187,6 +189,10 @@ OperationDescriptor estimateOperationDescriptor(const IProcessingOperation& oper
     } else if (d.id == "mesh_cleanup") {
         setDefault(d, "merge_tolerance_mm", edgeMm * 0.02, edgeMm * 0.0001, edgeMm * 0.25, edgeMm * 0.005);
         setDefault(d, "min_triangles", std::clamp(double(s.triangles) * 0.0001, 10.0, 5000.0));
+    } else if (d.id == "mesh_denoise") {
+        setDefault(d, "min_component_triangles", std::clamp(double(s.triangles) * 0.0002, 20.0, 10000.0));
+        setDefault(d, "long_edge_factor", 6.0);
+        setDefault(d, "min_area_ratio", 0.002);
     } else if (d.id == "laplacian" || d.id == "taubin") {
         setDefault(d, "iterations", s.triangles > 3000000 ? 5 : 10);
     } else if (d.id == "qem_decimate") {

@@ -30,6 +30,7 @@
 #include "rulermvs/image.hpp"
 #include "rulermvs/oneshot.hpp"
 #include "rulermvs/rgbdslam.h"
+#include "rulermvs/MarkerExtractor.hpp"
 #endif
 
 namespace fs = std::filesystem;
@@ -700,6 +701,7 @@ class ScanFlowController::RulerMvsWorker final : public QObject {
     using PoseCallback = ScanFlowController::PoseCallback;
     using LiveFrameCallback = ScanFlowController::LiveFrameCallback;
     using LivePoseUpdatesCallback = ScanFlowController::LivePoseUpdatesCallback;
+    using MarkerFrameCallback = ScanFlowController::MarkerFrameCallback;
 #ifdef JMENGINE_HAS_TEXTURE_MAPPING
     using TextureFramesCallback = ScanFlowController::TextureFramesCallback;
 #endif
@@ -711,6 +713,7 @@ class ScanFlowController::RulerMvsWorker final : public QObject {
     ReconstructionCallback onReconstructed;
     LiveFrameCallback onLiveFrame;
     LivePoseUpdatesCallback onLivePoseUpdates;
+    MarkerFrameCallback onMarkers;
     ProgressCallback onReconstructProgress;
     MessageCallback onMessage;
     PoseCallback onPose;
@@ -782,7 +785,12 @@ class ScanFlowController::RulerMvsWorker final : public QObject {
                                                          maxDists.data(), maxIters.data(), int(maxDists.size()),
                                                          8, 8, true, true);
         auto& p = fusion_->para();
-        p.is_use_dbow = true;
+        // Registration-mode policy:
+        //  - Geometry: depth/geometric tracking only; do not add DBoW visual loop closures.
+        //  - Texture: enable the existing DBoW/image-feature assisted registration path.
+        //  - Marker: marker detector/constraints are not provided by the current SDK integration yet;
+        //            keep geometry tracking as a safe fallback while exposing the mode end-to-end.
+        p.is_use_dbow = (config.registrationMode == ScanRegistrationMode::Texture);
         p.colorTheta = 0.0001;
         p.minOverlap = 0.3;
         p.minMatchNum = 5;
@@ -800,8 +808,34 @@ class ScanFlowController::RulerMvsWorker final : public QObject {
         completed_.store(0);
         lastPublishedPoseByFrame_.clear();
         inflight_.store(0);
+        {
+            std::lock_guard<std::mutex> lock(markerMutex_);
+            markerFrames_.clear();
+        }
+        markerConfigs_ = rulermvs::CicrleConfigs();
+        // Marker detection runs only in Marker registration mode. The SDK detector is scale-aware;
+        // keep the original camera image coordinates so the UI can overlay results directly.
+        // Realtime preview only needs robust 2D marker extraction here.  Do not enter the
+        // SDK stereo/calib3d wrapper before CircleMarkerExtractor has a complete stereo
+        // calibration.  The full stereo marker path is used later by marker registration.
+        markerConfigs_.scale_ = 1;
+        markerConfigs_.multi_thread_ = false;
+        markerConfigs_.inputscaled_ = false;
+        // `gray` below is produced after our own undistort/remap, so the realtime detector
+        // must not try to perform another distortion-dependent preprocessing step.
+        markerConfigs_.has_distorted = true;
         fusion_->setTraceCallBack([this](const rgbdslam::IRGBDResult& result) { handleFusionResult(result); });
         fusion_->start();
+        if (onMessage) {
+            QString modeText;
+            switch (config.registrationMode) {
+            case ScanRegistrationMode::Texture: modeText = QString::fromUtf8("纹理拼接"); break;
+            case ScanRegistrationMode::Marker: modeText = QString::fromUtf8("标记点拼接（实时标记检测已开启）"); break;
+            case ScanRegistrationMode::Geometry:
+            default: modeText = QString::fromUtf8("几何拼接"); break;
+            }
+            onMessage(QString::fromUtf8("拼接模式：%1").arg(modeText));
+        }
         if (onInitialized) onInitialized(true, QString::fromUtf8("rulermvs 扫描流水线初始化完成"));
 #else
         Q_UNUSED(runEpoch);
@@ -888,6 +922,11 @@ class ScanFlowController::RulerMvsWorker final : public QObject {
             const qint64 tRemap = perf.nsecsElapsed();
             cv::cvtColor(color, gray, cv::COLOR_BGR2GRAY);
             const qint64 tGray = perf.nsecsElapsed();
+
+            if (config_.registrationMode == ScanRegistrationMode::Marker) {
+                detectAndPublishMarkers(frameIndex, gray, depth, nTime);
+            }
+
             cv::resize(color, color, depthSize_);
             const qint64 tResize = perf.nsecsElapsed();
 #ifdef JMENGINE_HAS_TEXTURE_MAPPING
@@ -1040,6 +1079,108 @@ class ScanFlowController::RulerMvsWorker final : public QObject {
 
   private:
 #ifdef JMENGINE_HAS_RULERMVS
+    void detectAndPublishMarkers(int frameId, const cv::Mat& grayFull, const cv::Mat& depthSmall, qint64 timestampUs) {
+        if (grayFull.empty()) return;
+
+        ScanMarkerFrame frame;
+        frame.frameId = frameId;
+        frame.imageWidth = grayFull.cols;
+        frame.imageHeight = grayFull.rows;
+        frame.timestampUs = timestampUs;
+
+        std::vector<rulermvs::Corner> corners;
+        std::vector<cv::RotatedRect> ellipses;
+        bool detected = false;
+        {
+            // CircleMarkerExtractor stores the last ellipses internally, therefore serialize only
+            // the small detector section. RGBDFusion decode callbacks themselves remain parallel.
+            std::lock_guard<std::mutex> lock(markerExtractorMutex_);
+            // IMPORTANT: ExtractCircleMarker() can enter the SDK calib3d correction path.
+            // During live scan we only need 2D marker locations for overlay/recording and
+            // the extractor does not yet own a complete stereo calibration, so using that
+            // wrapper can dereference empty calibration matrices inside rulermvs.
+            // CircleExtractSimple() is the SDK's 2D circle-marker detector and does not
+            // require the stereo reconstruction state.
+            cv::Mat markerImage;
+            if (grayFull.type() == CV_8UC1 && grayFull.isContinuous())
+                markerImage = grayFull.clone();
+            else {
+                cv::Mat tmp;
+                if (grayFull.channels() == 1) grayFull.convertTo(tmp, CV_8U);
+                else cv::cvtColor(grayFull, tmp, cv::COLOR_BGR2GRAY);
+                markerImage = tmp.clone();
+            }
+            detected = markerExtractor_.CircleExtractSimple(markerImage, corners, 0, markerConfigs_);
+            ellipses = markerExtractor_.ellipses_;
+        }
+
+        if (detected) {
+            frame.markers.reserve(corners.size());
+            const double sx = depthSmall.empty() ? 0.0 : double(depthSmall.cols) / double(grayFull.cols);
+            const double sy = depthSmall.empty() ? 0.0 : double(depthSmall.rows) / double(grayFull.rows);
+            for (std::size_t i = 0; i < corners.size(); ++i) {
+                const auto& c = corners[i];
+                ScanMarkerPoint marker;
+                marker.x = static_cast<float>(c.x_);
+                marker.y = static_cast<float>(c.y_);
+                marker.localId = static_cast<int>(i);
+                if (i < ellipses.size()) {
+                    marker.width = ellipses[i].size.width;
+                    marker.height = ellipses[i].size.height;
+                    marker.angleDeg = ellipses[i].angle;
+                } else {
+                    marker.width = marker.height = 12.0f;
+                }
+
+                // Bind the 2D marker to the decoded depth immediately. This gives the later
+                // marker-registration stage a per-frame 3D observation even before SLAM returns RT.
+                if (!depthSmall.empty() && depthSmall.type() == CV_32F && sx > 0.0 && sy > 0.0) {
+                    const int u = std::clamp(int(std::lround(c.x_ * sx)), 0, depthSmall.cols - 1);
+                    const int v = std::clamp(int(std::lround(c.y_ * sy)), 0, depthSmall.rows - 1);
+                    float z = 0.0f;
+                    std::vector<float> samples;
+                    samples.reserve(9);
+                    for (int yy = std::max(0, v - 1); yy <= std::min(depthSmall.rows - 1, v + 1); ++yy) {
+                        for (int xx = std::max(0, u - 1); xx <= std::min(depthSmall.cols - 1, u + 1); ++xx) {
+                            const float d = depthSmall.at<float>(yy, xx);
+                            if (std::isfinite(d) && d > 0.0f) samples.push_back(d);
+                        }
+                    }
+                    if (!samples.empty()) {
+                        const auto mid = samples.begin() + samples.size() / 2;
+                        std::nth_element(samples.begin(), mid, samples.end());
+                        z = *mid;
+                    }
+                    if (z > 0.0f && !depthK_.empty()) {
+                        const double fx = depthK_.at<double>(0, 0);
+                        const double fy = depthK_.at<double>(1, 1);
+                        const double cx = depthK_.at<double>(0, 2);
+                        const double cy = depthK_.at<double>(1, 2);
+                        marker.hasDepth = true;
+                        marker.point3d = {static_cast<float>((double(u) - cx) * double(z) / fx),
+                                          static_cast<float>((double(v) - cy) * double(z) / fy), z};
+                    }
+                }
+                frame.markers.push_back(marker);
+            }
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(markerMutex_);
+            markerFrames_.push_back(frame);
+            const std::size_t hardLimit = static_cast<std::size_t>(std::max(1, config_.maxFrames));
+            while (markerFrames_.size() > hardLimit) markerFrames_.pop_front();
+        }
+
+        if (onMarkers) onMarkers(frame);
+        if ((frameId % 30) == 0) {
+            int depthCount = 0;
+            for (const auto& m : frame.markers) if (m.hasDepth) ++depthCount;
+            qInfo().noquote() << QStringLiteral("[MARKER] frame=%1 detected=%2 depth=%3")
+                .arg(frameId).arg(frame.markers.size()).arg(depthCount);
+        }
+    }
+
     void handleFusionResult(const rgbdslam::IRGBDResult& result) {
         // Result callbacks are OUTPUT ONLY. They never release/enable input submission.
         // Some accepted frames may not produce a trace callback, especially while tracking is lost.
@@ -1191,6 +1332,10 @@ class ScanFlowController::RulerMvsWorker final : public QObject {
         submitted_.store(0);
         completed_.store(0);
         lastPublishedPoseByFrame_.clear();
+        {
+            std::lock_guard<std::mutex> lock(markerMutex_);
+            markerFrames_.clear();
+        }
 #ifdef JMENGINE_HAS_TEXTURE_MAPPING
         {
             std::lock_guard<std::mutex> lock(textureFrameMutex_);
@@ -1202,6 +1347,11 @@ class ScanFlowController::RulerMvsWorker final : public QObject {
     }
 
     ScanConfig config_;
+    rulermvs::CircleMarkerExtractor markerExtractor_;
+    rulermvs::CicrleConfigs markerConfigs_;
+    std::mutex markerExtractorMutex_;
+    std::mutex markerMutex_;
+    std::deque<ScanMarkerFrame> markerFrames_;
     rulermvs::CameraSkewPB cam_;
     rulermvs::Imagef mapX_, mapY_;
     cv::Size depthSize_, rgbSize_;
@@ -1308,6 +1458,13 @@ ScanFlowController::ScanFlowController(QObject* parent) : QObject(parent) {
             self->cameraPreviewDispatchPending_.store(false);
             if (self->cameraPreviewCallback_ && !latest.isNull())
                 self->cameraPreviewCallback_(latest);
+        }, Qt::QueuedConnection);
+    };
+
+    pipeline_->onMarkers = [self](const ScanMarkerFrame& frame) {
+        if (!self) return;
+        QMetaObject::invokeMethod(self, [self, frame] {
+            if (self && self->markerFrameCallback_) self->markerFrameCallback_(frame);
         }, Qt::QueuedConnection);
     };
 

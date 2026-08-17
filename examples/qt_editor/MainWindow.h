@@ -55,6 +55,7 @@ class MainWindow final : public QMainWindow {
     QDockWidget* modelDock_{nullptr};
     QDockWidget* scanDock_{nullptr};
     QComboBox* scanSourceModeCombo_{nullptr};
+    QComboBox* scanRegistrationModeCombo_{nullptr};
     QLineEdit* scanDataDirEdit_{nullptr};
     QLineEdit* scanCalibEdit_{nullptr};
     QLineEdit* scanVocabEdit_{nullptr};
@@ -78,6 +79,7 @@ class MainWindow final : public QMainWindow {
     QDoubleSpinBox* cameraBBacklightSpin_{nullptr};
     QDoubleSpinBox* cameraSyncToleranceSpin_{nullptr};
     QLabel* cameraPreviewLabel_{nullptr};
+    ScanMarkerFrame latestMarkerFrame_;
     std::vector<CameraDeviceInfo> cameraInfos_;
     QLabel* scanStateLabel_{nullptr};
     QLabel* scanRenderFpsLabel_{nullptr};

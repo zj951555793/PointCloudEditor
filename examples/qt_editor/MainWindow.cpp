@@ -41,6 +41,8 @@
 #include <QWidget>
 #include <QPointer>
 #include <QPixmap>
+#include <QPainter>
+#include <QPen>
 #include <QPushButton>
 #include <QResizeEvent>
 #include <QTimer>
@@ -352,10 +354,12 @@ void MainWindow::createMenus() {
     addProcessAction(pointNormal, QString::fromUtf8("估算法向..."), "normal_estimation");
 
     auto* meshProcessMenu = menuBar()->addMenu(QString::fromUtf8("网格"));
+    auto* meshDenoise = meshProcessMenu->addMenu(QString::fromUtf8("去噪"));
     auto* meshSmooth = meshProcessMenu->addMenu(QString::fromUtf8("平滑"));
     auto* meshRepair = meshProcessMenu->addMenu(QString::fromUtf8("修复"));
     auto* meshReconstruct = meshProcessMenu->addMenu(QString::fromUtf8("重建"));
     addProcessAction(meshProcessMenu, QString::fromUtf8("网格清理..."), "mesh_cleanup");
+    addProcessAction(meshDenoise, QString::fromUtf8("网格去噪..."), "mesh_denoise");
     addProcessAction(meshSmooth, QString::fromUtf8("Laplacian..."), "laplacian");
     addProcessAction(meshSmooth, QString::fromUtf8("Taubin..."), "taubin");
     addProcessAction(meshProcessMenu, QString::fromUtf8("QEM 简化..."), "qem_decimate");
@@ -484,7 +488,16 @@ void MainWindow::createScanControl() {
     scanSourceModeCombo_ = new QComboBox(panel);
     scanSourceModeCombo_->addItem(QString::fromUtf8("虚拟采集"), int(ScanSourceMode::Virtual));
     scanSourceModeCombo_->addItem(QString::fromUtf8("相机采集"), int(ScanSourceMode::Camera));
-    scanSourceModeCombo_->setMinimumWidth(120);
+    scanSourceModeCombo_->setMinimumWidth(108);
+
+    scanRegistrationModeCombo_ = new QComboBox(panel);
+    scanRegistrationModeCombo_->addItem(QString::fromUtf8("几何拼接"), int(ScanRegistrationMode::Geometry));
+    scanRegistrationModeCombo_->addItem(QString::fromUtf8("纹理拼接"), int(ScanRegistrationMode::Texture));
+    scanRegistrationModeCombo_->setCurrentIndex(scanRegistrationModeCombo_->findData(int(ScanRegistrationMode::Texture)));
+    scanRegistrationModeCombo_->addItem(QString::fromUtf8("标记点拼接"), int(ScanRegistrationMode::Marker));
+    scanRegistrationModeCombo_->setMinimumWidth(118);
+    scanRegistrationModeCombo_->setToolTip(QString::fromUtf8(
+        "几何拼接：使用几何/深度约束；纹理拼接：使用图像特征辅助；标记点拼接：预留标记点约束入口。"));
 
     scanDataDirEdit_ = new QLineEdit(panel);
     scanCalibEdit_ = new QLineEdit(panel);
@@ -593,38 +606,45 @@ void MainWindow::createScanControl() {
     scanTextureButton_->setMinimumWidth(86);
 #endif
 
-    // First row: scan mode, both devices, state and the complete workflow actions.
-    quickGrid->addWidget(new QLabel(QString::fromUtf8("模式"), panel), 0, 0);
+    // Row 0: keep acquisition/registration modes on their own compact row so they are
+    // always visible even on narrow scan panels.  Previously they were placed before
+    // the camera selectors in one very wide row and could be clipped completely.
+    quickGrid->addWidget(new QLabel(QString::fromUtf8("采集"), panel), 0, 0);
     quickGrid->addWidget(scanSourceModeCombo_, 0, 1);
-    quickGrid->addWidget(cameraRefreshButton_, 0, 2);
-    quickGrid->addWidget(new QLabel(QString::fromUtf8("A码图"), panel), 0, 3);
-    quickGrid->addWidget(cameraACombo_, 0, 4);
-    quickGrid->addWidget(new QLabel(QString::fromUtf8("B彩色"), panel), 0, 5);
-    quickGrid->addWidget(cameraBCombo_, 0, 6);
-    quickGrid->addWidget(scanStateLabel_, 0, 7);
-    quickGrid->addWidget(scanStartButton_, 0, 8);
-    quickGrid->addWidget(scanStopButton_, 0, 9);
-    quickGrid->addWidget(scanOfflineButton_, 0, 10);
+    quickGrid->addWidget(new QLabel(QString::fromUtf8("拼接模式"), panel), 0, 2);
+    quickGrid->addWidget(scanRegistrationModeCombo_, 0, 3);
+    quickGrid->addWidget(scanStateLabel_, 0, 4, 1, 2);
+    quickGrid->setColumnStretch(5, 1);
+
+    // Row 1: camera selection and workflow actions.
+    quickGrid->addWidget(cameraRefreshButton_, 1, 0);
+    quickGrid->addWidget(new QLabel(QString::fromUtf8("A码图"), panel), 1, 1);
+    quickGrid->addWidget(cameraACombo_, 1, 2, 1, 2);
+    quickGrid->addWidget(new QLabel(QString::fromUtf8("B彩色"), panel), 1, 4);
+    quickGrid->addWidget(cameraBCombo_, 1, 5, 1, 2);
+    quickGrid->addWidget(scanStartButton_, 1, 7);
+    quickGrid->addWidget(scanStopButton_, 1, 8);
+    quickGrid->addWidget(scanOfflineButton_, 1, 9);
 #ifdef JMENGINE_HAS_TEXTURE_MAPPING
-    quickGrid->addWidget(scanTextureButton_, 0, 11);
-    quickGrid->addWidget(scanResetButton_, 0, 12);
+    quickGrid->addWidget(scanTextureButton_, 1, 10);
+    quickGrid->addWidget(scanResetButton_, 1, 11);
 #else
-    quickGrid->addWidget(scanResetButton_, 0, 11);
+    quickGrid->addWidget(scanResetButton_, 1, 10);
 #endif
 
-    // Second row: only operator-facing controls. Backlight is applied from JSON and hidden.
-    quickGrid->addWidget(new QLabel(QString::fromUtf8("A曝光"), panel), 1, 0);
-    quickGrid->addWidget(cameraAExposureSlider_, 1, 1, 1, 3);
-    quickGrid->addWidget(cameraAExposureValueLabel_, 1, 4);
-    quickGrid->addWidget(new QLabel(QString::fromUtf8("B曝光"), panel), 1, 5);
-    quickGrid->addWidget(cameraBExposureSlider_, 1, 6, 1, 3);
-    quickGrid->addWidget(cameraBExposureValueLabel_, 1, 9);
-    quickGrid->addWidget(liveOptimizationCheck_, 1, 10, 1, 2);
+    // Row 2: operator-facing exposure and live optimization controls.
+    quickGrid->addWidget(new QLabel(QString::fromUtf8("A曝光"), panel), 2, 0);
+    quickGrid->addWidget(cameraAExposureSlider_, 2, 1, 1, 3);
+    quickGrid->addWidget(cameraAExposureValueLabel_, 2, 4);
+    quickGrid->addWidget(new QLabel(QString::fromUtf8("B曝光"), panel), 2, 5);
+    quickGrid->addWidget(cameraBExposureSlider_, 2, 6, 1, 3);
+    quickGrid->addWidget(cameraBExposureValueLabel_, 2, 9);
+    quickGrid->addWidget(liveOptimizationCheck_, 2, 10, 1, 2);
 
     // Runtime rendering cadence: this is the actual paintGL rate, not camera/SLAM FPS.
-    quickGrid->addWidget(scanRenderFpsLabel_, 2, 0, 1, 2);
+    quickGrid->addWidget(scanRenderFpsLabel_, 3, 0, 1, 2);
 #ifdef JMENGINE_HAS_TEXTURE_MAPPING
-    quickGrid->addWidget(scanTextureFramesLabel_, 2, 2, 1, 2);
+    quickGrid->addWidget(scanTextureFramesLabel_, 3, 2, 1, 2);
 #endif
     auto* renderFpsTimer = new QTimer(panel);
     renderFpsTimer->setInterval(500);
@@ -854,6 +874,7 @@ void MainWindow::createScanControl() {
                 statusBar()->showMessage(saveError);
         }
         removeScanModelListEntry();
+        latestMarkerFrame_ = ScanMarkerFrame{};
         view_->clearScanPreview();
 #ifdef JMENGINE_HAS_TEXTURE_MAPPING
         view_->setTextureFrames(nullptr);
@@ -898,6 +919,7 @@ void MainWindow::createScanControl() {
     connect(scanResetButton_, &QPushButton::clicked, this, [this] {
         scanController_->reset();
         removeScanModelListEntry();
+        latestMarkerFrame_ = ScanMarkerFrame{};
         view_->clearScanPreview();
 #ifdef JMENGINE_HAS_TEXTURE_MAPPING
         view_->setTextureFrames(nullptr);
@@ -973,6 +995,15 @@ void MainWindow::createScanControl() {
         if (!error.isEmpty()) statusBar()->showMessage(error);
         else statusBar()->showMessage(QString::fromUtf8("已枚举 %1 个相机").arg(list.size()));
     });
+    scanController_->setMarkerFrameCallback([this](const ScanMarkerFrame& frame) {
+        latestMarkerFrame_ = frame;
+        if (scanRegistrationModeCombo_ &&
+            scanRegistrationModeCombo_->currentData().toInt() == int(ScanRegistrationMode::Marker)) {
+            statusBar()->showMessage(QString::fromUtf8("标记点 frame=%1：检测 %2 个")
+                                         .arg(frame.frameId).arg(frame.markers.size()), 1000);
+        }
+    });
+
     scanController_->setCameraPreviewCallback([this](const QImage& image) {
         if (!cameraPreviewLabel_ || image.isNull() || !scanController_) return;
         const bool cameraScanning = scanController_->state() == ScanFlowController::State::Scanning &&
@@ -983,8 +1014,39 @@ void MainWindow::createScanControl() {
             cameraPreviewLabel_->hide();
             return;
         }
+        QImage display = image.convertToFormat(QImage::Format_RGB888);
+        const bool markerMode = scanRegistrationModeCombo_ &&
+                                scanRegistrationModeCombo_->currentData().toInt() == int(ScanRegistrationMode::Marker);
+        if (markerMode && latestMarkerFrame_.imageWidth > 0 && latestMarkerFrame_.imageHeight > 0) {
+            QPainter painter(&display);
+            painter.setRenderHint(QPainter::Antialiasing, true);
+            QPen pen(QColor(0, 255, 0));
+            pen.setWidth(3);
+            painter.setPen(pen);
+            const float sx = float(display.width()) / float(latestMarkerFrame_.imageWidth);
+            const float sy = float(display.height()) / float(latestMarkerFrame_.imageHeight);
+            for (const auto& m : latestMarkerFrame_.markers) {
+                const QPointF center(m.x * sx, m.y * sy);
+                const float ew = std::max(10.0f, m.width * sx);
+                const float eh = std::max(10.0f, m.height * sy);
+                painter.save();
+                painter.translate(center);
+                painter.rotate(m.angleDeg);
+                painter.drawEllipse(QRectF(-ew * 0.5f, -eh * 0.5f, ew, eh));
+                painter.restore();
+                painter.drawLine(QPointF(center.x() - 6.0, center.y()), QPointF(center.x() + 6.0, center.y()));
+                painter.drawLine(QPointF(center.x(), center.y() - 6.0), QPointF(center.x(), center.y() + 6.0));
+                painter.drawText(QPointF(center.x() + 7.0, center.y() - 7.0),
+                                 QStringLiteral("M%1%2").arg(m.localId + 1)
+                                     .arg(m.hasDepth ? QStringLiteral(" 3D") : QString()));
+            }
+            painter.setPen(QColor(255, 255, 0));
+            painter.drawText(QPointF(12.0, 24.0),
+                             QString::fromUtf8("标记点: %1  frame: %2")
+                                 .arg(latestMarkerFrame_.markers.size()).arg(latestMarkerFrame_.frameId));
+        }
         const QSize box = cameraPreviewLabel_->size();
-        cameraPreviewLabel_->setPixmap(QPixmap::fromImage(image).scaled(box, Qt::KeepAspectRatio, Qt::FastTransformation));
+        cameraPreviewLabel_->setPixmap(QPixmap::fromImage(display).scaled(box, Qt::KeepAspectRatio, Qt::FastTransformation));
         cameraPreviewLabel_->show();
         cameraPreviewLabel_->raise();
         updateCameraPreviewGeometry();
@@ -1005,6 +1067,12 @@ ScanConfig MainWindow::scanConfigFromUi() const {
     ScanConfig cfg;
     cfg.sourceMode = scanSourceModeCombo_ && scanSourceModeCombo_->currentData().toInt() == int(ScanSourceMode::Camera)
                          ? ScanSourceMode::Camera : ScanSourceMode::Virtual;
+    if (scanRegistrationModeCombo_) {
+        const int mode = scanRegistrationModeCombo_->currentData().toInt();
+        if (mode == int(ScanRegistrationMode::Texture)) cfg.registrationMode = ScanRegistrationMode::Texture;
+        else if (mode == int(ScanRegistrationMode::Marker)) cfg.registrationMode = ScanRegistrationMode::Marker;
+        else cfg.registrationMode = ScanRegistrationMode::Geometry;
+    }
     cfg.dataDir = scanDataDirEdit_ ? scanDataDirEdit_->text().trimmed() : QString{};
     cfg.calibrationPath = scanCalibEdit_ ? scanCalibEdit_->text().trimmed() : QString{};
     cfg.vocabularyPath = scanVocabEdit_ ? scanVocabEdit_->text().trimmed() : QString{};
@@ -1148,6 +1216,7 @@ void MainWindow::applyScanState(ScanFlowController::State state) {
 
     const bool editable = idleLike;
     if (scanSourceModeCombo_) scanSourceModeCombo_->setEnabled(editable);
+    if (scanRegistrationModeCombo_) scanRegistrationModeCombo_->setEnabled(editable);
     if (scanCalibEdit_) scanCalibEdit_->setEnabled(editable);
     if (scanVocabEdit_) scanVocabEdit_->setEnabled(editable);
     if (scanMaxFramesSpin_) scanMaxFramesSpin_->setEnabled(editable);
