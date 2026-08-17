@@ -861,6 +861,7 @@ void MainWindow::createScanControl() {
         if (scanTextureFramesLabel_) scanTextureFramesLabel_->setText(QString::fromUtf8("纹理帧：0"));
         if (scanTextureButton_) scanTextureButton_->setEnabled(false);
 #endif
+        view_->setScanRenderDrivenByCamera(cfg.sourceMode == ScanSourceMode::Camera);
         view_->beginScanPreview(static_cast<std::size_t>(cfg.previewPointLimit));
         scanController_->setConfig(cfg);
         scanController_->startScan();
@@ -987,6 +988,9 @@ void MainWindow::createScanControl() {
         cameraPreviewLabel_->show();
         cameraPreviewLabel_->raise();
         updateCameraPreviewGeometry();
+        // One physical camera input frame == one 3D render tick. Scan/SLAM callbacks never
+        // drive the render cadence, so 30 FPS camera + 10 FPS scan remains ~30 FPS render.
+        if (view_) view_->requestScanRenderFrame();
     });
 
     applyScanSourceUi();
@@ -1008,7 +1012,7 @@ ScanConfig MainWindow::scanConfigFromUi() const {
     cfg.maxInflightFrames = 2;
     // Live preview is bounded but must represent the whole scan. PointCloudWidget compacts
     // old preview samples when this budget is reached instead of dropping all later frames.
-    cfg.previewPointsPerFrame = 15000;
+    cfg.previewPointsPerFrame = 300;
     cfg.previewPointLimit = 20000000;
     cfg.offlineVoxel = 3.0;
     cfg.offlineIterations = 30; // Preserve the user's current ScanFlowController parameter.

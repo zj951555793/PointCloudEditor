@@ -593,6 +593,19 @@ if(JMENGINE_BUILD_QT_EDITOR)
         endif()
         target_compile_features(JMEngine_qt_editor PRIVATE cxx_std_17)
 
+        # Application-layer debugging policy:
+        # RelWithDebInfo keeps debug symbols, but disable optimization for the
+        # Qt editor/application target only. JMEngine algorithm libraries keep
+        # their normal RelWithDebInfo optimization settings.
+        if(MSVC)
+            target_compile_options(JMEngine_qt_editor PRIVATE
+                $<$<CONFIG:RelWithDebInfo>:/Od>
+                $<$<CONFIG:RelWithDebInfo>:/Ob0>)
+        else()
+            target_compile_options(JMEngine_qt_editor PRIVATE
+                $<$<CONFIG:RelWithDebInfo>:-O0>)
+        endif()
+
         # -------------------------------------------------------------
         # Windows bundled third_party integration
         #

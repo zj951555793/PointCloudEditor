@@ -85,6 +85,10 @@ class PointCloudWidget final : public QOpenGLWidget, protected QOpenGLExtraFunct
     void updateOptimizedScanPreview(const std::shared_ptr<JMEngine::PointCloud>& cloud);
     void clearScanPreview();
     QString scanPreviewPath() const { return scanPreviewPath_; }
+    // Camera mode: the physical camera input cadence owns the 3D render cadence.
+    // SLAM/scan callbacks only publish data; they must not create extra render ticks.
+    void setScanRenderDrivenByCamera(bool enabled) { cameraDrivenScanRender_ = enabled; }
+    void requestScanRenderFrame() { if (cameraDrivenScanRender_) update(); }
     double renderFps() const noexcept { return double(renderFpsTenths_.load(std::memory_order_relaxed)) / 10.0; }
 
     struct ScanCameraViewPose {
@@ -245,6 +249,7 @@ class PointCloudWidget final : public QOpenGLWidget, protected QOpenGLExtraFunct
         bool meshFiltered{false};
         bool meshUploadComplete{false};
         bool glCreated{false};
+        bool gpuRecreatePending{false};
         bool meshIndexUploadPending{false};
         // 实时扫描模型可预留固定 GPU 容量，避免每帧增长时重新创建 VBO。
         std::size_t gpuReservedPointCapacity{0};
@@ -363,6 +368,7 @@ class PointCloudWidget final : public QOpenGLWidget, protected QOpenGLExtraFunct
     std::vector<std::unique_ptr<Model>> models_;
     std::vector<QString> loadingPaths_;
     QString scanPreviewPath_;
+    bool cameraDrivenScanRender_{false};
     QString currentScanFramePath_;
     std::shared_ptr<std::vector<JMEngine::Point>> currentScanFrameSource_;
     bool currentScanFrameTrackingOk_{false};

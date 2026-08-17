@@ -8,6 +8,7 @@
 #include <QTimer>
 #include <QMetaObject>
 #include <QPointer>
+#include <QDebug>
 
 #include <algorithm>
 #include <cctype>
@@ -17,6 +18,7 @@
 #include <condition_variable>
 #include <deque>
 #include <filesystem>
+#include <limits>
 #include <unordered_map>
 #include <mutex>
 #include <thread>
@@ -340,7 +342,11 @@ class DualCameraCapture {
         if (!opened) return;
 
         double appliedExposure = isA ? desiredExposureA_.load() : desiredExposureB_.load();
-        double appliedBacklight = isA ? desiredBacklightA_.load() : desiredBacklightB_.load();
+        // Important: desiredBacklight* is only the requested/configured value.
+        // It does NOT mean the camera has already received that value.
+        // Start with an unknown applied value so the first capture-loop iteration
+        // always writes CAP_PROP_BACKLIGHT once after the camera has opened.
+        double appliedBacklight = std::numeric_limits<double>::quiet_NaN();
         quint64 sequence = 0;
         while (!stopping_.load()) {
             const double wanted = isA ? desiredExposureA_.load() : desiredExposureB_.load();
@@ -353,9 +359,14 @@ class DualCameraCapture {
             }
             {
                 const double wantedBacklight = isA ? desiredBacklightA_.load() : desiredBacklightB_.load();
-                if (std::abs(wantedBacklight - appliedBacklight) > 1e-9) {
-                    cap.set(cv::CAP_PROP_BACKLIGHT, wantedBacklight);
-                    appliedBacklight = wantedBacklight;
+                if (!std::isfinite(appliedBacklight) ||
+                    std::abs(wantedBacklight - appliedBacklight) > 1e-9) {
+                    // Only mark the requested value as applied when the backend
+                    // accepted the write. This also guarantees the JSON/default
+                    // value is written once immediately after open().
+                    if (cap.set(cv::CAP_PROP_BACKLIGHT, wantedBacklight)) {
+                        appliedBacklight = wantedBacklight;
+                    }
                 }
             }
 
@@ -597,6 +608,12 @@ class ScanFlowController::ScanSourceWorker final : public QObject {
         frame->index = index_++;
         frame->timestampAUs = a.timestampUs;
         frame->timestampBUs = b.timestampUs;
+        if ((frame->index % 30) == 0) {
+            qInfo().noquote() << QStringLiteral("[CAM PERF] frame=%1 syncDeltaMs=%2 droppedUnsynced=%3")
+                .arg(frame->index)
+                .arg(double(std::llabs(frame->timestampAUs - frame->timestampBUs)) / 1000.0, 0, 'f', 3)
+                .arg(qulonglong(dropped));
+        }
 
         // Production wiring: Camera A = structured-light code image, Camera B = color image.
         // Keep the algorithm-facing RawScanFrame identical to virtual mode: code=img/p, rgb=img/c.
@@ -850,20 +867,29 @@ class ScanFlowController::RulerMvsWorker final : public QObject {
         auto decodeFunc = [this, rgb, code, frameIndex, decode](int& userID, int64_t& nTime, cv::Mat& depth,
                                                                 cv::Mat& color, cv::Mat& mask, cv::Mat& gray) mutable {
             Q_UNUSED(mask);
+            QElapsedTimer perf;
+            perf.start();
             userID = frameIndex;
             nTime = fusion_->getCurrentTime();
             rulermvs::Image8u codeImage;
             rulermvs::convertTo(code, codeImage);
+            const qint64 tConvert = perf.nsecsElapsed();
             rulermvs::Imagef depthImage;
             rulermvs::SimpleTriMesh mesh;
             oneshot_->decode(codeImage, mesh, decode);
+            const qint64 tDecode = perf.nsecsElapsed();
             rulermvs::rasterDepth(mesh, cam_.nodistor().noskew() / scaleValue_, depthImage);
+            const qint64 tRaster = perf.nsecsElapsed();
             depth = depthImage.to<cv::Mat>().clone();
+            const qint64 tDepthClone = perf.nsecsElapsed();
             cv::Mat mapX = mapX_.to<cv::Mat>();
             cv::Mat mapY = mapY_.to<cv::Mat>();
             cv::remap(rgb, color, mapX, mapY, cv::INTER_LINEAR);
+            const qint64 tRemap = perf.nsecsElapsed();
             cv::cvtColor(color, gray, cv::COLOR_BGR2GRAY);
+            const qint64 tGray = perf.nsecsElapsed();
             cv::resize(color, color, depthSize_);
+            const qint64 tResize = perf.nsecsElapsed();
 #ifdef JMENGINE_HAS_TEXTURE_MAPPING
             const int textureStride = std::max(1, config_.textureKeyframeStride);
             if ((frameIndex % textureStride) == 0) {
@@ -877,6 +903,23 @@ class ScanFlowController::RulerMvsWorker final : public QObject {
                     textureImagesByFrame_[frameIndex] = std::move(textureColor);
             }
 #endif
+
+            const double nsToMs = 1.0 / 1000000.0;
+            const double totalMs = double(tResize) * nsToMs;
+            if ((frameIndex % 30) == 0 || totalMs > 50.0) {
+                qInfo().noquote() << QStringLiteral(
+                    "[DECODE PERF] frame=%1 total=%2ms convert=%3 decode=%4 raster=%5 depthClone=%6 remap=%7 gray=%8 resize=%9 inflight=%10")
+                    .arg(frameIndex)
+                    .arg(totalMs, 0, 'f', 2)
+                    .arg(double(tConvert) * nsToMs, 0, 'f', 2)
+                    .arg(double(tDecode - tConvert) * nsToMs, 0, 'f', 2)
+                    .arg(double(tRaster - tDecode) * nsToMs, 0, 'f', 2)
+                    .arg(double(tDepthClone - tRaster) * nsToMs, 0, 'f', 2)
+                    .arg(double(tRemap - tDepthClone) * nsToMs, 0, 'f', 2)
+                    .arg(double(tGray - tRemap) * nsToMs, 0, 'f', 2)
+                    .arg(double(tResize - tGray) * nsToMs, 0, 'f', 2)
+                    .arg(inflight_.load(std::memory_order_relaxed));
+            }
 
             // Release one input credit as soon as this expensive decode callback finishes.
             // Schedule admission on pipelineThread_ so pendingFrame_ remains single-thread owned.
@@ -1000,7 +1043,16 @@ class ScanFlowController::RulerMvsWorker final : public QObject {
     void handleFusionResult(const rgbdslam::IRGBDResult& result) {
         // Result callbacks are OUTPUT ONLY. They never release/enable input submission.
         // Some accepted frames may not produce a trace callback, especially while tracking is lost.
-        completed_.fetch_add(1);
+        const int completedNow = completed_.fetch_add(1) + 1;
+        if ((completedNow % 30) == 0) {
+            qInfo().noquote() << QStringLiteral("[SLAM PERF] results=%1 submitted=%2 inflight=%3 pendingReplaced=%4 frameId=%5 flag=%6")
+                .arg(completedNow)
+                .arg(submitted_.load(std::memory_order_relaxed))
+                .arg(inflight_.load(std::memory_order_relaxed))
+                .arg(qulonglong(pendingReplaced_.load(std::memory_order_relaxed)))
+                .arg(result.getFrameID())
+                .arg(result.getFlag());
+        }
 
         // 保持与当前项目/用户提供的 SlameProducer 实时回调语义一致：
         // result.getFlag() == 0 表示当前帧可用于实时累计显示。

@@ -10,6 +10,7 @@
 #include <QDebug>
 #include <QDir>
 #include <QEvent>
+#include <QElapsedTimer>
 #include <QFileInfo>
 #include <QImage>
 #include <QLineF>
@@ -2007,6 +2008,8 @@ void PointCloudWidget::uploadModelIncremental(Model& m, std::size_t& budget) {
 }
 
 void PointCloudWidget::paintGL() {
+    QElapsedTimer paintPerf;
+    paintPerf.start();
     if (!renderReady_) {
         QPainter painter(this);
         painter.fillRect(rect(), QColor(12, 12, 14));
@@ -2054,6 +2057,17 @@ void PointCloudWidget::paintGL() {
         p.setPen(Qt::white);
         p.drawText(12, 24, statusText_);
     }
+    static quint64 perfPaintFrames = 0;
+    ++perfPaintFrames;
+    const double paintMs = double(paintPerf.nsecsElapsed()) / 1000000.0;
+    if ((perfPaintFrames % 60u) == 0u || paintMs > 20.0) {
+        qInfo().noquote() << QStringLiteral("[RENDER PERF] frame=%1 paint=%2ms models=%3 cameraDriven=%4")
+            .arg(qulonglong(perfPaintFrames))
+            .arg(paintMs, 0, 'f', 2)
+            .arg(models_.size())
+            .arg(cameraDrivenScanRender_ ? 1 : 0);
+    }
+
     bool uploading = false;
     for (const auto& m : models_) {
         if (!m->cloud)
