@@ -49,7 +49,16 @@ public final class JMEngineGlesView extends GLSurfaceView implements GLSurfaceVi
 
     @Override public void onSurfaceCreated(GL10 gl, EGLConfig config) { engine.glSurfaceCreated(); }
     @Override public void onSurfaceChanged(GL10 gl, int width, int height) { engine.glResize(width, height); }
-    @Override public void onDrawFrame(GL10 gl) { engine.glRender(); }
+    @Override
+    public void onDrawFrame(GL10 gl) {
+        engine.glRender();
+        // Camera submission and SLAM publication are asynchronous. Keep drawing
+        // while scanning so a cloud published after the last camera callback is
+        // uploaded without waiting for another UI event.
+        if (engine.scanState() == JMEngineNative.SCAN_SCANNING) {
+            requestRender();
+        }
+    }
 
     @Override public boolean onTouchEvent(MotionEvent event) {
         scaleDetector.onTouchEvent(event);

@@ -1,10 +1,12 @@
 #pragma once
 
 #include <QMainWindow>
+#include <QString>
 #include <string>
 #include <memory>
+#include <thread>
 #include <vector>
-#include "ScanFlowController.h"
+#include <JMEngine/JMScanner.h>
 
 class QAction;
 class QActionGroup;
@@ -25,21 +27,42 @@ class QResizeEvent;
 class MainWindow final : public QMainWindow {
   public:
     explicit MainWindow(const QString& initialFile = {}, QWidget* parent = nullptr);
+    ~MainWindow() override;
 
   protected:
     void resizeEvent(QResizeEvent* event) override;
 
   private:
+    enum class ScanSourceMode { Virtual = 0, Camera = 1 };
+    struct CameraRange { double minimum{-13.0}, maximum{0.0}, step{1.0}, defaultValue{-6.0}; };
+    struct CameraDeviceInfo {
+        int cvIndex{-1};
+        QString deviceId, friendlyName, vid, pid, modelName, fourcc{QStringLiteral("MJPG")};
+        int width{1920}, height{1200};
+        double fps{10.0};
+        CameraRange exposure;
+        CameraRange backlight{0.0, 10.0, 1.0, 10.0};
+        QString displayText() const;
+    };
+    struct ScanUiConfig {
+        ScanSourceMode sourceMode{ScanSourceMode::Virtual};
+        JMEngine::ScanConfig engine;
+        JMEngine::DualCameraConfig cameras;
+        QString dataDir, cameraModelJsonPath, cameraADeviceId, cameraBDeviceId;
+        int previewPointLimit{20000000};
+        bool liveOptimizationEnabled{true};
+    };
     void createActions();
     void createMenus();
     void createModelManager();
     void createScanControl();
-    void applyScanState(ScanFlowController::State state);
+    void applyScanState(JMEngine::ScanState state);
     void applyScanSourceUi();
+    void refreshCameras();
     void updateCameraSelectionUi();
     void removeScanModelListEntry();
     void updateCameraPreviewGeometry();
-    ScanConfig scanConfigFromUi() const;
+    ScanUiConfig scanConfigFromUi() const;
     void openModels();
     void exportModel();
     void addModelPath(const QString& path);
@@ -79,7 +102,7 @@ class MainWindow final : public QMainWindow {
     QDoubleSpinBox* cameraBBacklightSpin_{nullptr};
     QDoubleSpinBox* cameraSyncToleranceSpin_{nullptr};
     QLabel* cameraPreviewLabel_{nullptr};
-    ScanMarkerFrame latestMarkerFrame_;
+    JMEngine::ScanMarkerFrame latestMarkerFrame_;
     std::vector<CameraDeviceInfo> cameraInfos_;
     QLabel* scanStateLabel_{nullptr};
     QLabel* scanRenderFpsLabel_{nullptr};
@@ -92,7 +115,9 @@ class MainWindow final : public QMainWindow {
     bool scanTextureFramesReady_{false};
 #endif
     QPushButton* scanResetButton_{nullptr};
-    std::unique_ptr<ScanFlowController> scanController_;
+    std::unique_ptr<JMEngine::JMScanner> scanner_;
+    std::thread reconstructionThread_;
+    ScanUiConfig activeScanConfig_;
 
     QAction* openAction_{nullptr};
     QAction* saveAction_{nullptr};

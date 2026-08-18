@@ -2,6 +2,7 @@
 
 #include "PointCloud.h"
 #include "Selection.h"
+#include "JMScanner.h"
 
 #include <memory>
 #include <vector>
@@ -40,6 +41,8 @@ class ICommand {
 class Engine {
   public:
     Engine();
+
+    JMScanner* scanner() noexcept { if (!scanner_) scanner_=std::make_unique<JMScanner>(); return scanner_.get(); }
     explicit Engine(std::shared_ptr<PointCloud> cloud);
 
     void setPointCloud(std::shared_ptr<PointCloud> cloud);
@@ -103,6 +106,7 @@ class Engine {
     std::vector<std::unique_ptr<ICommand>> redo_;
     std::vector<PointId> lastChangedIds_;
     ChangeKind lastChangeKind_{ChangeKind::None};
+    std::unique_ptr<JMScanner> scanner_;
 };
 
 } // namespace JMEngine

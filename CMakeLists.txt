@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(JMEngine VERSION 2.3.6 LANGUAGES CXX)
+project(JMEngine VERSION 2.4.0 LANGUAGES CXX)
 
 # Visual Studio / Xcode 等 IDE 中启用目录分组。
 set_property(GLOBAL PROPERTY USE_FOLDERS ON)
@@ -68,6 +68,12 @@ set(JMENGINE_PUBLIC_HEADERS
     include/JMEngine/PointCloud.h
     include/JMEngine/Selection.h
     include/JMEngine/JMEngine.h
+    include/JMEngine/ScanTypes.h
+    include/JMEngine/ISlam.h
+    include/JMEngine/FrameQueue.h
+    include/JMEngine/JMScanner.h
+    include/JMEngine/RulerMvsSlam.h
+    include/JMEngine/CameraSource.h
     include/JMEngine/TriangleMesh.h
     include/JMEngine/edit/DirtyRange.h
     include/JMEngine/edit/EditResult.h
@@ -98,6 +104,10 @@ set(JMENGINE_SOURCES
     src/Alignment.cpp
     src/Measurement.cpp
     src/JMEngine.cpp
+    src/scanner/JMScanner.cpp
+    src/scanner/RulerMvsSlam.cpp
+    src/scanner/CameraSource.cpp
+    src/scanner/FrameQueue.cpp
     src/TriangleMesh.cpp
     src/edit/DirtyRange.cpp
     src/edit/MeshEditSession.cpp
@@ -556,10 +566,6 @@ if(JMENGINE_BUILD_QT_EDITOR)
             examples/qt_editor/PointCloudWidget.h
             examples/qt_editor/ProcessingDialog.cpp
             examples/qt_editor/ProcessingDialog.h
-            examples/qt_editor/ScanFlowController.cpp
-            examples/qt_editor/ScanFlowController.h
-            examples/qt_editor/CameraDeviceManager.cpp
-            examples/qt_editor/CameraDeviceManager.h
             ${JMENGINE_EXAMPLE_COMMON}
         )
         if(ANDROID)
@@ -582,11 +588,6 @@ if(JMENGINE_BUILD_QT_EDITOR)
         endif()
         target_link_libraries(JMEngine_qt_editor PRIVATE
             JMEngine JMEngine_render Qt6::Widgets Qt6::OpenGL Qt6::OpenGLWidgets)
-        if(WIN32)
-            # CameraDeviceManager uses COM + DirectShow device enumeration.
-            target_link_libraries(JMEngine_qt_editor PRIVATE
-                ole32 oleaut32 uuid strmiids)
-        endif()
         if(JMENGINE_ENABLE_TEXTURE_MAPPING)
             target_link_libraries(JMEngine_qt_editor PRIVATE JMEngine_texture)
             target_compile_definitions(JMEngine_qt_editor PRIVATE JMENGINE_HAS_TEXTURE_MAPPING=1)
@@ -810,20 +811,20 @@ if(JMENGINE_BUILD_QT_EDITOR)
                     "No rulermvs .lib files were found in ${JMENGINE_RULERMVS_LIB_DIR}")
             endif()
 
-            target_include_directories(JMEngine_qt_editor PRIVATE
+            target_include_directories(JMEngine PUBLIC
                 "${JMENGINE_RULERMVS_INCLUDE_DIR}"
                 "${JMENGINE_DBOW3_INCLUDE_DIR}"
                 "${JMENGINE_EIGEN3_INCLUDE_DIR}"
                 ${OpenCV_INCLUDE_DIRS}
             )
 
-            target_link_libraries(JMEngine_qt_editor PRIVATE
+            target_link_libraries(JMEngine PUBLIC
                 ${_JMENGINE_RULERMVS_LIBS}
                 ${OpenCV_LIBS}
                 strmiids ole32 oleaut32
             )
 
-            target_compile_definitions(JMEngine_qt_editor PRIVATE JMENGINE_HAS_RULERMVS=1)
+            target_compile_definitions(JMEngine PUBLIC JMENGINE_HAS_RULERMVS=1)
             set(_JMENGINE_RULERMVS_ENABLED TRUE)
 
             message(STATUS "JMEngine rulermvs scan integration: enabled")
@@ -899,10 +900,6 @@ if(JMENGINE_BUILD_QT_EDITOR)
             examples/qt_editor/PointCloudWidget.h
             examples/qt_editor/ProcessingDialog.cpp
             examples/qt_editor/ProcessingDialog.h
-            examples/qt_editor/ScanFlowController.cpp
-            examples/qt_editor/ScanFlowController.h
-            examples/qt_editor/CameraDeviceManager.cpp
-            examples/qt_editor/CameraDeviceManager.h
             examples/qt_editor/config/camera_models.json
             ${JMENGINE_EXAMPLE_COMMON})
         set_target_properties(JMEngine_qt_editor PROPERTIES FOLDER "Examples/Qt")

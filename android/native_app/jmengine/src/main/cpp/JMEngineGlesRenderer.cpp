@@ -272,6 +272,11 @@ void GlesPointCloudRenderer::updateCameraFromCloud(const JMEngine::PointCloud& c
     bool any=false;
     for(const auto& p:cloud.points()){
         if((p.flags&JMEngine::PointDeleted)!=0) continue;
+        if (!std::isfinite(p.position.x) ||
+            !std::isfinite(p.position.y) ||
+            !std::isfinite(p.position.z)) {
+            continue;
+        }
         any=true;
         minx=std::min(minx,p.position.x); miny=std::min(miny,p.position.y); minz=std::min(minz,p.position.z);
         maxx=std::max(maxx,p.position.x); maxy=std::max(maxy,p.position.y); maxz=std::max(maxz,p.position.z);
@@ -304,8 +309,16 @@ void GlesPointCloudRenderer::uploadCloud(const JMEngine::PointCloud& cloud, std:
     std::vector<std::uint32_t> color(n),flags(n),selected(n,0u);
     for(std::size_t i=0;i<n;++i){
         const auto& p=cloud.points()[i];
-        pos[i*4+0]=p.position.x; pos[i*4+1]=p.position.y; pos[i*4+2]=p.position.z; pos[i*4+3]=1.0f;
-        color[i]=p.rgba; flags[i]=p.flags;
+        const bool finite =
+            std::isfinite(p.position.x) &&
+            std::isfinite(p.position.y) &&
+            std::isfinite(p.position.z);
+        pos[i*4+0]=finite?p.position.x:0.0f;
+        pos[i*4+1]=finite?p.position.y:0.0f;
+        pos[i*4+2]=finite?p.position.z:0.0f;
+        pos[i*4+3]=1.0f;
+        color[i]=p.rgba;
+        flags[i]=finite?p.flags:(p.flags|JMEngine::PointDeleted);
     }
     if(!vao_) glGenVertexArrays(1,&vao_);
     glBindVertexArray(vao_);

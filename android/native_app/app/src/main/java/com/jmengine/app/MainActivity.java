@@ -2,12 +2,15 @@ package com.jmengine.app;
 
 import com.jmengine.sdk.JMEngineGlesView;
 import com.jmengine.sdk.JMEngineNative;
+import com.jmengine.sdk.JMEngineCameraScanner;
 
 import android.app.Activity;
 import android.content.Intent;
 import android.database.Cursor;
 import android.net.Uri;
 import android.os.Bundle;
+import android.Manifest;
+import android.content.pm.PackageManager;
 import android.provider.OpenableColumns;
 import android.view.Gravity;
 import android.view.View;
@@ -27,6 +30,7 @@ public final class MainActivity extends Activity {
     private JMEngineNative engine;
     private JMEngineGlesView glView;
     private TextView status;
+    private JMEngineCameraScanner cameraScanner;
 
     @Override protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -95,8 +99,35 @@ public final class MainActivity extends Activity {
         root.addView(actionRow2, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
 
+        LinearLayout scanRow = new LinearLayout(this);
+        addButton(scanRow, "开始扫描", v -> startEngineScan());
+        addButton(scanRow, "停止", v -> { stopEngineScan(); updateScanStatus("scan stopped"); });
+        addButton(scanRow, "离线重建", v -> { boolean ok=engine.reconstructScan(); glView.notifyModelChanged(); updateScanStatus(ok?"reconstructed":"reconstruct failed: "+engine.lastError()); });
+        root.addView(scanRow, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
+
         return root;
     }
+
+    private void startEngineScan() {
+        if (checkSelfPermission(Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) { requestPermissions(new String[]{Manifest.permission.CAMERA}, 2001); return; }
+        stopEngineScan();
+        try {
+            File dir=getExternalFilesDir(null); if(dir==null)dir=getFilesDir();
+            File calibration=new File(dir,"calib.txt"), vocabulary=new File(dir,"vocab.yml.gz");
+            if(!engine.initializeScan(calibration.getAbsolutePath(),vocabulary.getAbsolutePath(),1,6)){updateScanStatus("init failed: "+engine.lastError());return;}
+            cameraScanner=new JMEngineCameraScanner(this,engine,new JMEngineCameraScanner.Listener(){public void onStatus(String s){runOnUiThread(()->updateScanStatus(s));}public void onFrame(int id){if((id%10)==0)runOnUiThread(()->{glView.notifyModelChanged();updateScanStatus("frame="+id);});}});
+            String[] ids=cameraScanner.cameraIds();if(ids.length<2){updateScanStatus("need two Camera2 devices");cameraScanner.close();cameraScanner=null;return;}
+            if(!engine.startScan()){updateScanStatus("start failed");cameraScanner.close();cameraScanner=null;return;}
+            cameraScanner.start(ids[0],ids[1],1920,1200,50000);
+        } catch(Exception e){stopEngineScan();updateScanStatus("scan exception: "+e.getMessage());}
+    }
+
+    private void stopEngineScan() {
+        if (cameraScanner != null) { cameraScanner.close(); cameraScanner = null; }
+        if (engine != null && engine.scanState() == JMEngineNative.SCAN_SCANNING) engine.stopScan();
+    }
+
+    private void updateScanStatus(String action){long[]s=engine.scanStatistics();status.setText(action+"\nstate="+engine.scanState()+" submitted="+s[0]+" processed="+s[1]+" replaced="+s[2]+" points="+s[4]);}
 
     private void addButton(LinearLayout row, String text, View.OnClickListener listener) {
         Button button = new Button(this);
@@ -168,5 +199,5 @@ public final class MainActivity extends Activity {
 
     @Override protected void onResume() { super.onResume(); if (glView != null) glView.onResume(); }
     @Override protected void onPause() { if (glView != null) glView.onPause(); super.onPause(); }
-    @Override protected void onDestroy() { if (engine != null) engine.close(); super.onDestroy(); }
+    @Override protected void onDestroy() { stopEngineScan(); if (engine != null) engine.close(); super.onDestroy(); }
 }

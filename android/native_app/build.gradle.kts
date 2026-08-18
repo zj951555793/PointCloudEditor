@@ -1,31 +1,13 @@
 plugins {
-    id("com.android.application")
+    id("com.android.application") version "8.13.0" apply false
+    id("com.android.library") version "8.13.0" apply false
 }
 
-android {
-    namespace = "com.jmengine.app"
-    compileSdk = 35
-
-    defaultConfig {
-        applicationId = "com.jmengine.app"
-        minSdk = 24
-        targetSdk = 35
-        versionCode = 1
-        versionName = "14.0"
-    }
-
-    buildTypes {
-        release {
-            isMinifyEnabled = false
+allprojects {
+    if (tasks.findByName("prepareKotlinBuildScriptModel") == null) {
+        tasks.register("prepareKotlinBuildScriptModel") {
+            group = "help"
+            description = "Compatibility task for Android Studio Kotlin DSL model import."
         }
     }
-
-    compileOptions {
-        sourceCompatibility = JavaVersion.VERSION_17
-        targetCompatibility = JavaVersion.VERSION_17
-    }
-}
-
-dependencies {
-    implementation(project(":jmengine"))
 }

@@ -15,6 +15,7 @@
 #include <QFileInfo>
 #include <QKeySequence>
 #include <QIcon>
+#include <QImage>
 #include <QListWidget>
 #include <QLabel>
 #include <QLineEdit>
@@ -25,6 +26,7 @@
 #include <QCheckBox>
 #include <QCoreApplication>
 #include <QDir>
+#include <QElapsedTimer>
 #include <QFormLayout>
 #include <QGridLayout>
 #include <QToolButton>
@@ -32,6 +34,10 @@
 #include <QSettings>
 #include <QStandardPaths>
 #include <QFile>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QMetaObject>
 #include <QMenuBar>
 #include <QMenu>
 #include <QMessageBox>
@@ -46,6 +52,8 @@
 #include <QPushButton>
 #include <QResizeEvent>
 #include <QTimer>
+#include <thread>
+#include <chrono>
 
 namespace {
 constexpr int kPathRole = Qt::UserRole + 1;
@@ -69,6 +77,70 @@ QString defaultCameraModelJsonPath() {
     return QDir(QCoreApplication::applicationDirPath()).filePath(QStringLiteral("config/camera_models.json"));
 #endif
 }
+
+QString loadCalibrationPath(const QString& path, QString* error = nullptr) {
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly)) {
+        if (error) *error = QString::fromUtf8("无法打开相机型号 JSON: %1").arg(path);
+        return {};
+    }
+    QJsonParseError parseError{};
+    const auto doc = QJsonDocument::fromJson(file.readAll(), &parseError);
+    if (parseError.error != QJsonParseError::NoError || !doc.isObject()) {
+        if (error) *error = QString::fromUtf8("相机型号 JSON 格式错误: %1").arg(parseError.errorString());
+        return {};
+    }
+    return doc.object().value(QStringLiteral("scan")).toObject()
+        .value(QStringLiteral("lastCalibrationPath")).toString();
+}
+
+bool saveCalibrationPath(const QString& path, const QString& calibration, QString* error = nullptr) {
+    QFile file(path);
+    QJsonObject root;
+    if (file.exists()) {
+        if (!file.open(QIODevice::ReadOnly)) {
+            if (error) *error = QString::fromUtf8("无法读取相机型号 JSON: %1").arg(path);
+            return false;
+        }
+        QJsonParseError parseError{};
+        const auto doc = QJsonDocument::fromJson(file.readAll(), &parseError);
+        file.close();
+        if (parseError.error != QJsonParseError::NoError || !doc.isObject()) {
+            if (error) *error = QString::fromUtf8("相机型号 JSON 格式错误: %1").arg(parseError.errorString());
+            return false;
+        }
+        root = doc.object();
+    }
+    auto scan = root.value(QStringLiteral("scan")).toObject();
+    scan.insert(QStringLiteral("lastCalibrationPath"), calibration);
+    root.insert(QStringLiteral("scan"), scan);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        if (error) *error = QString::fromUtf8("无法写入相机型号 JSON: %1").arg(path);
+        return false;
+    }
+    return file.write(QJsonDocument(root).toJson(QJsonDocument::Indented)) >= 0;
+}
+
+QString scanStateText(JMEngine::ScanState state) {
+    switch (state) {
+    case JMEngine::ScanState::Idle: return QString::fromUtf8("空闲");
+    case JMEngine::ScanState::Initializing: return QString::fromUtf8("初始化");
+    case JMEngine::ScanState::Scanning: return QString::fromUtf8("扫描中");
+    case JMEngine::ScanState::Stopping: return QString::fromUtf8("停止中");
+    case JMEngine::ScanState::ReadyForReconstruction: return QString::fromUtf8("可离线重建");
+    case JMEngine::ScanState::Reconstructing: return QString::fromUtf8("离线重建中");
+    case JMEngine::ScanState::Error: return QString::fromUtf8("错误");
+    }
+    return QString::fromUtf8("未知");
+}
+}
+
+QString MainWindow::CameraDeviceInfo::displayText() const {
+    return QStringLiteral("%1 | %2 | %3:%4")
+        .arg(modelName.isEmpty() ? QString::fromUtf8("未配置型号") : modelName,
+             friendlyName.isEmpty() ? QString::fromUtf8("Camera") : friendlyName,
+             vid.isEmpty() ? QStringLiteral("????") : vid,
+             pid.isEmpty() ? QStringLiteral("????") : pid);
 }
 
 MainWindow::MainWindow(const QString& initialFile, QWidget* parent) : QMainWindow(parent) {
@@ -112,6 +184,13 @@ MainWindow::MainWindow(const QString& initialFile, QWidget* parent) : QMainWindo
 
     if (!initialFile.isEmpty())
         addModelPath(initialFile);
+}
+
+MainWindow::~MainWindow() {
+    if (scanner_ && scanner_->state() == JMEngine::ScanState::Scanning)
+        scanner_->stop();
+    if (reconstructionThread_.joinable())
+        reconstructionThread_.join();
 }
 
 
@@ -471,7 +550,7 @@ void MainWindow::createModelManager() {
 }
 
 void MainWindow::createScanControl() {
-    scanController_ = std::make_unique<ScanFlowController>(this);
+    scanner_ = std::make_unique<JMEngine::JMScanner>();
     scanDock_ = new QDockWidget(QString::fromUtf8("扫描控制"), this);
     auto* panel = new QWidget(scanDock_);
     auto* root = new QVBoxLayout(panel);
@@ -491,10 +570,10 @@ void MainWindow::createScanControl() {
     scanSourceModeCombo_->setMinimumWidth(108);
 
     scanRegistrationModeCombo_ = new QComboBox(panel);
-    scanRegistrationModeCombo_->addItem(QString::fromUtf8("几何拼接"), int(ScanRegistrationMode::Geometry));
-    scanRegistrationModeCombo_->addItem(QString::fromUtf8("纹理拼接"), int(ScanRegistrationMode::Texture));
-    scanRegistrationModeCombo_->setCurrentIndex(scanRegistrationModeCombo_->findData(int(ScanRegistrationMode::Texture)));
-    scanRegistrationModeCombo_->addItem(QString::fromUtf8("标记点拼接"), int(ScanRegistrationMode::Marker));
+    scanRegistrationModeCombo_->addItem(QString::fromUtf8("几何拼接"), int(JMEngine::ScanRegistrationMode::Geometry));
+    scanRegistrationModeCombo_->addItem(QString::fromUtf8("纹理拼接"), int(JMEngine::ScanRegistrationMode::Texture));
+    scanRegistrationModeCombo_->setCurrentIndex(scanRegistrationModeCombo_->findData(int(JMEngine::ScanRegistrationMode::Texture)));
+    scanRegistrationModeCombo_->addItem(QString::fromUtf8("标记点拼接"), int(JMEngine::ScanRegistrationMode::Marker));
     scanRegistrationModeCombo_->setMinimumWidth(118);
     scanRegistrationModeCombo_->setToolTip(QString::fromUtf8(
         "几何拼接：使用几何/深度约束；纹理拼接：使用图像特征辅助；标记点拼接：预留标记点约束入口。"));
@@ -749,9 +828,8 @@ void MainWindow::createScanControl() {
     cameraModelJsonEdit_->setText(settings.value(QStringLiteral("scan/cameraModelJson"), defaultJson).toString());
     {
         QString jsonError;
-        const auto savedScan = CameraDeviceManager::loadScanSettings(cameraModelJsonEdit_->text().trimmed(), &jsonError);
-        if (!savedScan.lastCalibrationPath.isEmpty())
-            scanCalibEdit_->setText(savedScan.lastCalibrationPath);
+        const auto calibration = loadCalibrationPath(cameraModelJsonEdit_->text().trimmed(), &jsonError);
+        if (!calibration.isEmpty()) scanCalibEdit_->setText(calibration);
     }
     cameraAExposureSpin_->setValue(settings.value(QStringLiteral("scan/cameraAExposure"), -6.0).toDouble());
     cameraBExposureSpin_->setValue(settings.value(QStringLiteral("scan/cameraBExposure"), -6.0).toDouble());
@@ -785,96 +863,89 @@ void MainWindow::createScanControl() {
         if (scanSourceModeCombo_->currentData().toInt() == int(ScanSourceMode::Camera)) {
             if (cameraModelJsonEdit_ && scanCalibEdit_) {
                 QString jsonError;
-                const auto savedScan = CameraDeviceManager::loadScanSettings(cameraModelJsonEdit_->text().trimmed(), &jsonError);
-                if (!savedScan.lastCalibrationPath.isEmpty())
-                    scanCalibEdit_->setText(savedScan.lastCalibrationPath);
+                const auto calibration = loadCalibrationPath(cameraModelJsonEdit_->text().trimmed(), &jsonError);
+                if (!calibration.isEmpty()) scanCalibEdit_->setText(calibration);
             }
-            ScanConfig cfg = scanConfigFromUi();
-            scanController_->setConfig(cfg);
-            scanController_->refreshCameras();
+            refreshCameras();
         }
     });
     connect(cameraModelJsonEdit_, &QLineEdit::editingFinished, this, [this] {
         if (!scanSourceModeCombo_ || !scanCalibEdit_ || !cameraModelJsonEdit_) return;
         if (scanSourceModeCombo_->currentData().toInt() != int(ScanSourceMode::Camera)) return;
         QString jsonError;
-        const auto savedScan = CameraDeviceManager::loadScanSettings(cameraModelJsonEdit_->text().trimmed(), &jsonError);
-        if (!savedScan.lastCalibrationPath.isEmpty()) scanCalibEdit_->setText(savedScan.lastCalibrationPath);
+        const auto calibration = loadCalibrationPath(cameraModelJsonEdit_->text().trimmed(), &jsonError);
+        if (!calibration.isEmpty()) scanCalibEdit_->setText(calibration);
     });
 
     connect(cameraRefreshButton_, &QPushButton::clicked, this, [this] {
-        ScanConfig cfg = scanConfigFromUi();
-        scanController_->setConfig(cfg);
         statusBar()->showMessage(QString::fromUtf8("正在后台枚举相机..."));
-        scanController_->refreshCameras();
+        refreshCameras();
     });
     connect(cameraACombo_, qOverload<int>(&QComboBox::currentIndexChanged), this, [this] { updateCameraSelectionUi(); });
     connect(cameraBCombo_, qOverload<int>(&QComboBox::currentIndexChanged), this, [this] { updateCameraSelectionUi(); });
     connect(cameraAExposureSlider_, &QSlider::valueChanged, this, [this](int value) {
         if (cameraAExposureValueLabel_) cameraAExposureValueLabel_->setText(QString::number(value));
         if (cameraAExposureSpin_) { QSignalBlocker b(cameraAExposureSpin_); cameraAExposureSpin_->setValue(double(value)); }
-        if (scanController_) scanController_->setCameraExposure(ScanCameraRole::CameraA, double(value));
+        if (scanner_) scanner_->setCameraExposure(0, double(value));
     });
     connect(cameraBExposureSlider_, &QSlider::valueChanged, this, [this](int value) {
         if (cameraBExposureValueLabel_) cameraBExposureValueLabel_->setText(QString::number(value));
         if (cameraBExposureSpin_) { QSignalBlocker b(cameraBExposureSpin_); cameraBExposureSpin_->setValue(double(value)); }
-        if (scanController_) scanController_->setCameraExposure(ScanCameraRole::CameraB, double(value));
+        if (scanner_) scanner_->setCameraExposure(1, double(value));
     });
     connect(cameraABacklightSlider_, &QSlider::valueChanged, this, [this](int value) {
         if (!cameraABacklightSpin_) return;
         const QSignalBlocker blocker(cameraABacklightSpin_);
         cameraABacklightSpin_->setValue(double(value));
-        if (scanController_) scanController_->setCameraBacklight(ScanCameraRole::CameraA, double(value));
+        if (scanner_) scanner_->setCameraBacklight(0, double(value));
     });
     connect(cameraABacklightSpin_, qOverload<double>(&QDoubleSpinBox::valueChanged), this, [this](double value) {
         if (cameraABacklightSlider_) {
             const QSignalBlocker blocker(cameraABacklightSlider_);
             cameraABacklightSlider_->setValue(int(std::lround(value)));
         }
-        if (scanController_) scanController_->setCameraBacklight(ScanCameraRole::CameraA, value);
+        if (scanner_) scanner_->setCameraBacklight(0, value);
     });
 
     connect(cameraBBacklightSlider_, &QSlider::valueChanged, this, [this](int value) {
         if (!cameraBBacklightSpin_) return;
         const QSignalBlocker blocker(cameraBBacklightSpin_);
         cameraBBacklightSpin_->setValue(double(value));
-        if (scanController_) scanController_->setCameraBacklight(ScanCameraRole::CameraB, double(value));
+        if (scanner_) scanner_->setCameraBacklight(1, double(value));
     });
     connect(cameraBBacklightSpin_, qOverload<double>(&QDoubleSpinBox::valueChanged), this, [this](double value) {
         if (cameraBBacklightSlider_) {
             const QSignalBlocker blocker(cameraBBacklightSlider_);
             cameraBBacklightSlider_->setValue(int(std::lround(value)));
         }
-        if (scanController_) scanController_->setCameraBacklight(ScanCameraRole::CameraB, value);
+        if (scanner_) scanner_->setCameraBacklight(1, value);
     });
 
     connect(scanStartButton_, &QPushButton::clicked, this, [this] {
-        const ScanConfig cfg = scanConfigFromUi();
+        const ScanUiConfig cfg = scanConfigFromUi();
         QSettings settings;
         settings.setValue(QStringLiteral("scan/sourceMode"), int(cfg.sourceMode));
         settings.setValue(QStringLiteral("scan/virtualDataDir"), cfg.dataDir);
-        settings.setValue(QStringLiteral("scan/vocabularyPath"), cfg.vocabularyPath);
-        settings.setValue(QStringLiteral("scan/maxFrames"), cfg.maxFrames);
+        settings.setValue(QStringLiteral("scan/vocabularyPath"), QString::fromStdString(cfg.engine.vocabularyPath));
+        settings.setValue(QStringLiteral("scan/maxFrames"), cfg.engine.maxFrames);
         settings.setValue(QStringLiteral("scan/liveOptimizationEnabled"), cfg.liveOptimizationEnabled);
         settings.setValue(QStringLiteral("scan/cameraModelJson"), cfg.cameraModelJsonPath);
         settings.setValue(QStringLiteral("scan/cameraADeviceId"), cfg.cameraADeviceId);
         settings.setValue(QStringLiteral("scan/cameraBDeviceId"), cfg.cameraBDeviceId);
-        settings.setValue(QStringLiteral("scan/cameraAExposure"), cfg.cameraAExposure);
-        settings.setValue(QStringLiteral("scan/cameraBExposure"), cfg.cameraBExposure);
-        settings.setValue(QStringLiteral("scan/cameraABacklight"), cfg.cameraABacklight);
-        settings.setValue(QStringLiteral("scan/cameraBBacklight"), cfg.cameraBBacklight);
-        settings.setValue(QStringLiteral("scan/cameraSyncToleranceMs"), cfg.cameraSyncToleranceMs);
+        settings.setValue(QStringLiteral("scan/cameraAExposure"), cfg.cameras.cameraA.exposure);
+        settings.setValue(QStringLiteral("scan/cameraBExposure"), cfg.cameras.cameraB.exposure);
+        settings.setValue(QStringLiteral("scan/cameraABacklight"), cfg.cameras.cameraA.backlight);
+        settings.setValue(QStringLiteral("scan/cameraBBacklight"), cfg.cameras.cameraB.backlight);
+        settings.setValue(QStringLiteral("scan/cameraSyncToleranceMs"), cfg.cameras.syncToleranceMs);
         // Production-camera calibration is persisted in camera_models.json, not QSettings.
         // Virtual mode always derives <dataDir>/calib.txt and must never overwrite this path.
         if (cfg.sourceMode == ScanSourceMode::Camera && !cfg.cameraModelJsonPath.isEmpty()) {
-            CameraScanSettings persisted;
-            persisted.lastCalibrationPath = cfg.calibrationPath;
             QString saveError;
-            if (!CameraDeviceManager::saveScanSettings(cfg.cameraModelJsonPath, persisted, &saveError) && !saveError.isEmpty())
+            if (!saveCalibrationPath(cfg.cameraModelJsonPath, QString::fromStdString(cfg.engine.calibrationPath), &saveError) && !saveError.isEmpty())
                 statusBar()->showMessage(saveError);
         }
         removeScanModelListEntry();
-        latestMarkerFrame_ = ScanMarkerFrame{};
+        latestMarkerFrame_ = JMEngine::ScanMarkerFrame{};
         view_->clearScanPreview();
 #ifdef JMENGINE_HAS_TEXTURE_MAPPING
         view_->setTextureFrames(nullptr);
@@ -882,13 +953,60 @@ void MainWindow::createScanControl() {
         if (scanTextureFramesLabel_) scanTextureFramesLabel_->setText(QString::fromUtf8("纹理帧：0"));
         if (scanTextureButton_) scanTextureButton_->setEnabled(false);
 #endif
-        view_->setScanRenderDrivenByCamera(cfg.sourceMode == ScanSourceMode::Camera);
         view_->beginScanPreview(static_cast<std::size_t>(cfg.previewPointLimit));
-        scanController_->setConfig(cfg);
-        scanController_->startScan();
+        activeScanConfig_ = cfg;
+        if (!scanner_->initialize(cfg.engine)) {
+            statusBar()->showMessage(QString::fromStdString(scanner_->lastError()), 12000);
+            return;
+        }
+        const bool started = cfg.sourceMode == ScanSourceMode::Camera
+            ? scanner_->startCameras(cfg.cameras)
+            : scanner_->startDataset(cfg.dataDir.toStdString());
+        if (!started) statusBar()->showMessage(QString::fromStdString(scanner_->lastError()), 12000);
     });
-    connect(scanStopButton_, &QPushButton::clicked, this, [this] { scanController_->stopScan(); });
-    connect(scanOfflineButton_, &QPushButton::clicked, this, [this] { scanController_->offlineReconstruct(); });
+    connect(scanStopButton_, &QPushButton::clicked, this, [this] { if (scanner_) scanner_->stop(); });
+    connect(scanOfflineButton_, &QPushButton::clicked, this, [this] {
+        if (!scanner_) return;
+        if (reconstructionThread_.joinable()) reconstructionThread_.join();
+        reconstructionThread_ = std::thread([this] {
+            const bool ok = scanner_->reconstruct();
+            const auto cloud = scanner_->resultCloud();
+            const auto error = scanner_->lastError();
+#ifdef JMENGINE_HAS_TEXTURE_MAPPING
+            PointCloudWidget::TextureFramesPtr textureFrames;
+            const auto keyframes = scanner_->takeTextureKeyframes();
+            textureFrames = std::make_shared<std::vector<JMEngine::texture::CameraFrame>>();
+            textureFrames->reserve(keyframes.size());
+            for (const auto& keyframe : keyframes) {
+                if (!keyframe.rgb) continue;
+                JMEngine::texture::CameraFrame frame;
+                frame.frameId = keyframe.frameId;
+                frame.image.width = keyframe.width;
+                frame.image.height = keyframe.height;
+                frame.image.pixels = *keyframe.rgb;
+                frame.fx = keyframe.fx; frame.fy = keyframe.fy;
+                frame.cx = keyframe.cx; frame.cy = keyframe.cy;
+                frame.worldToCamera.m = keyframe.worldToCamera.matrix;
+                textureFrames->push_back(std::move(frame));
+            }
+            QMetaObject::invokeMethod(this, [this, ok, cloud, error, textureFrames = std::move(textureFrames)] {
+                if (ok && cloud) view_->replaceScanPreview(cloud);
+                else if (!error.empty()) statusBar()->showMessage(QString::fromStdString(error), 12000);
+                const std::size_t count = textureFrames ? textureFrames->size() : 0u;
+                scanTextureFramesReady_ = count > 0u;
+                if (scanTextureFramesLabel_)
+                    scanTextureFramesLabel_->setText(QString::fromUtf8("纹理帧：%1").arg(static_cast<qulonglong>(count)));
+                if (view_) view_->setTextureFrames(textureFrames);
+                if (scanTextureButton_) scanTextureButton_->setEnabled(scanTextureFramesReady_ && ok);
+            }, Qt::QueuedConnection);
+#else
+            QMetaObject::invokeMethod(this, [this, ok, cloud, error] {
+                if (ok && cloud) view_->replaceScanPreview(cloud);
+                else if (!error.empty()) statusBar()->showMessage(QString::fromStdString(error), 12000);
+            }, Qt::QueuedConnection);
+#endif
+        });
+    });
 #ifdef JMENGINE_HAS_TEXTURE_MAPPING
     connect(scanTextureButton_, &QPushButton::clicked, this, [this] {
         if (!view_) return;
@@ -902,24 +1020,24 @@ void MainWindow::createScanControl() {
                                              .arg(stage));
             },
             [this](bool ok, const QString& message) {
-                const auto state = scanController_ ? scanController_->state() : ScanFlowController::State::Idle;
+                const auto state = scanner_ ? scanner_->state() : JMEngine::ScanState::Idle;
                 if (scanTextureButton_)
                     scanTextureButton_->setEnabled(scanTextureFramesReady_ &&
-                        state == ScanFlowController::State::ReadyForReconstruction);
+                        state == JMEngine::ScanState::ReadyForReconstruction);
                 statusBar()->showMessage(message, 12000);
                 if (!ok) QMessageBox::warning(this, QString::fromUtf8("扫描纹理映射"), message);
             });
         if (!started) {
-            const auto state = scanController_ ? scanController_->state() : ScanFlowController::State::Idle;
+            const auto state = scanner_ ? scanner_->state() : JMEngine::ScanState::Idle;
             scanTextureButton_->setEnabled(scanTextureFramesReady_ &&
-                state == ScanFlowController::State::ReadyForReconstruction);
+                state == JMEngine::ScanState::ReadyForReconstruction);
         }
     });
 #endif
     connect(scanResetButton_, &QPushButton::clicked, this, [this] {
-        scanController_->reset();
+        if (scanner_) scanner_->reset();
         removeScanModelListEntry();
-        latestMarkerFrame_ = ScanMarkerFrame{};
+        latestMarkerFrame_ = JMEngine::ScanMarkerFrame{};
         view_->clearScanPreview();
 #ifdef JMENGINE_HAS_TEXTURE_MAPPING
         view_->setTextureFrames(nullptr);
@@ -929,84 +1047,76 @@ void MainWindow::createScanControl() {
 #endif
     });
 
-    scanController_->setStateCallback([this](ScanFlowController::State state) { applyScanState(state); });
-    scanController_->setMessageCallback([this](const QString& message) { statusBar()->showMessage(message); });
-    scanController_->setPreviewCallback([this](ScanFlowController::PointChunkPtr chunk) {
-        const ScanConfig cfg = scanController_->config();
-        view_->appendScanPreview(chunk, static_cast<std::size_t>(cfg.previewPointLimit));
+    scanner_->setStateCallback([this](JMEngine::ScanState state) {
+        QMetaObject::invokeMethod(this, [this, state] { applyScanState(state); }, Qt::QueuedConnection);
     });
-    scanController_->setLiveFrameCallback([this](ScanFlowController::PointChunkPtr localPoints,
-                                                   const std::array<float,16>& pose, int frameId) {
-        if (view_ && localPoints) view_->appendScanLocalFrame(frameId, localPoints, pose);
+    scanner_->setMessageCallback([this](const std::string& message) {
+        QMetaObject::invokeMethod(this, [this, message] { statusBar()->showMessage(QString::fromStdString(message)); }, Qt::QueuedConnection);
     });
-    scanController_->setLivePoseUpdatesCallback([this](std::shared_ptr<std::vector<LiveFramePoseUpdate>> updates) {
-        if (!view_ || !updates) return;
-        auto converted = std::make_shared<std::vector<PointCloudWidget::LiveFramePoseUpdate>>();
-        converted->reserve(updates->size());
-        for (const auto& u : *updates) converted->push_back({u.frameId, u.pose});
-        view_->updateScanFramePoses(converted);
+    scanner_->setProgressCallback([this](int progress) {
+        QMetaObject::invokeMethod(this, [this, progress] {
+            statusBar()->showMessage(QString::fromUtf8("离线重建 %1%").arg(progress));
+        }, Qt::QueuedConnection);
     });
-    scanController_->setCurrentFrameCallback([this](ScanFlowController::PointChunkPtr chunk, bool trackingOk, int) {
-        view_->setCurrentScanFrame(chunk, trackingOk);
+    scanner_->setFrameCallback([this](int frameId, const JMEngine::Pose& pose,
+                                      std::shared_ptr<JMEngine::PointCloud> cloud) {
+        const auto queuedAt = std::chrono::steady_clock::now();
+        QMetaObject::invokeMethod(this, [this, frameId, pose, cloud = std::move(cloud), queuedAt]() mutable {
+            const double queueMs = std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - queuedAt).count();
+            QElapsedTimer dispatchPerf; dispatchPerf.start();
+            if (view_ && cloud && !cloud->empty()) {
+                // Restore the pre-refactor incremental path: keep each SLAM frame in
+                // local coordinates, upload only this new range once, and keep its RT
+                // separately for rendering/optimization.
+                auto points = std::make_shared<std::vector<JMEngine::Point>>(
+                    std::move(cloud->points()));
+                view_->appendScanLocalFrame(frameId, points, pose.matrix);
+            }
+            PointCloudWidget::ScanCameraViewPose viewPose;
+            viewPose.position = {pose.matrix[12], pose.matrix[13], pose.matrix[14]};
+            viewPose.right = {pose.matrix[0], pose.matrix[1], pose.matrix[2]};
+            // Restore the pre-refactor scan-camera convention: OpenCV +Y points down,
+            // while the viewer's camera up vector must point toward -Y.
+            viewPose.up = {-pose.matrix[4], -pose.matrix[5], -pose.matrix[6]};
+            viewPose.forward = {pose.matrix[8], pose.matrix[9], pose.matrix[10]};
+            viewPose.trackingOk = true;
+            viewPose.frameId = frameId;
+            if (view_) {
+                view_->updateScanCameraPose(viewPose);
+                // Exactly one 3D render request per accepted SLAM result, regardless
+                // of whether the source is a dataset or a physical camera.
+                view_->requestScanRenderFrame();
+            }
+            const double dispatchMs = double(dispatchPerf.nsecsElapsed()) / 1000000.0;
+            if (queueMs > 20.0 || dispatchMs > 10.0) {
+                qInfo().noquote() << QStringLiteral("[SCAN STALL][QT] frame=%1 queued=%2ms dispatch=%3ms")
+                    .arg(frameId).arg(queueMs, 0, 'f', 2).arg(dispatchMs, 0, 'f', 2);
+            }
+        }, Qt::QueuedConnection);
     });
-    scanController_->setPoseCallback([this](const ScanPoseState& pose) {
-        PointCloudWidget::ScanCameraViewPose viewPose;
-        viewPose.position = {pose.position[0], pose.position[1], pose.position[2]};
-        viewPose.right = {pose.right[0], pose.right[1], pose.right[2]};
-        viewPose.up = {pose.up[0], pose.up[1], pose.up[2]};
-        viewPose.forward = {pose.forward[0], pose.forward[1], pose.forward[2]};
-        viewPose.trackingOk = pose.trackingOk;
-        viewPose.frameId = pose.frameId;
-        view_->updateScanCameraPose(viewPose);
-    });
-    scanController_->setReconstructionCallback([this](ScanFlowController::CloudPtr cloud) { view_->replaceScanPreview(cloud); });
-#ifdef JMENGINE_HAS_TEXTURE_MAPPING
-    scanController_->setTextureFramesCallback([this](ScanFlowController::TextureFramesPtr frames) {
-        const std::size_t count = frames ? frames->size() : 0u;
-        scanTextureFramesReady_ = count > 0u;
-        if (scanTextureFramesLabel_)
-            scanTextureFramesLabel_->setText(QString::fromUtf8("纹理帧：%1").arg(static_cast<qulonglong>(count)));
-        if (view_) view_->setTextureFrames(std::move(frames));
-        if (scanTextureButton_ && scanController_)
-            scanTextureButton_->setEnabled(scanTextureFramesReady_ &&
-                scanController_->state() == ScanFlowController::State::ReadyForReconstruction);
-    });
-#endif
-    scanController_->setCameraListCallback([this](const QVector<CameraDeviceInfo>& list, const QString& error) {
-        QSettings cameraSettings;
-        const QString previousA = cameraSettings.value(QStringLiteral("scan/cameraADeviceId")).toString();
-        const QString previousB = cameraSettings.value(QStringLiteral("scan/cameraBDeviceId")).toString();
-        cameraInfos_.assign(list.begin(), list.end());
-        cameraACombo_->clear();
-        cameraBCombo_->clear();
-        int indexA = -1, indexB = -1;
-        for (int i = 0; i < list.size(); ++i) {
-            const auto& d = list[i];
-            cameraACombo_->addItem(d.displayText(), d.deviceId);
-            cameraBCombo_->addItem(d.displayText(), d.deviceId);
-            if (d.deviceId == previousA) indexA = i;
-            if (d.deviceId == previousB) indexB = i;
-        }
-        if (indexA >= 0) cameraACombo_->setCurrentIndex(indexA);
-        else if (!list.isEmpty()) cameraACombo_->setCurrentIndex(0);
-        if (indexB >= 0) cameraBCombo_->setCurrentIndex(indexB);
-        else if (list.size() > 1) cameraBCombo_->setCurrentIndex(1);
-        updateCameraSelectionUi();
-        if (!error.isEmpty()) statusBar()->showMessage(error);
-        else statusBar()->showMessage(QString::fromUtf8("已枚举 %1 个相机").arg(list.size()));
-    });
-    scanController_->setMarkerFrameCallback([this](const ScanMarkerFrame& frame) {
+    scanner_->setMarkerCallback([this](const JMEngine::ScanMarkerFrame& frame) {
+        QMetaObject::invokeMethod(this, [this, frame] {
         latestMarkerFrame_ = frame;
         if (scanRegistrationModeCombo_ &&
-            scanRegistrationModeCombo_->currentData().toInt() == int(ScanRegistrationMode::Marker)) {
-            statusBar()->showMessage(QString::fromUtf8("标记点 frame=%1：检测 %2 个")
-                                         .arg(frame.frameId).arg(frame.markers.size()), 1000);
+            scanRegistrationModeCombo_->currentData().toInt() == int(JMEngine::ScanRegistrationMode::Marker)) {
+            std::vector<std::array<float,3>> markers3d;
+            markers3d.reserve(frame.markers.size());
+            for (const auto& m : frame.markers) if (m.hasDepth) markers3d.push_back(m.point3d);
+            if (view_ && !markers3d.empty()) view_->setScanFrameMarkers(frame.frameId, markers3d);
+            statusBar()->showMessage(QString::fromUtf8("标记点 frame=%1：3D标记 %2 个")
+                                         .arg(frame.frameId).arg(markers3d.size()), 1000);
         }
+        }, Qt::QueuedConnection);
     });
 
-    scanController_->setCameraPreviewCallback([this](const QImage& image) {
-        if (!cameraPreviewLabel_ || image.isNull() || !scanController_) return;
-        const bool cameraScanning = scanController_->state() == ScanFlowController::State::Scanning &&
+    scanner_->setCameraPreviewCallback([this](std::shared_ptr<std::vector<std::uint8_t>> pixels, int width, int height) {
+        if (!pixels || width <= 0 || height <= 0) return;
+        QImage image(pixels->data(), width, height, width * 3, QImage::Format_RGB888);
+        const QImage owned = image.copy();
+        QMetaObject::invokeMethod(this, [this, owned] {
+        if (!cameraPreviewLabel_ || owned.isNull() || !scanner_) return;
+        const bool cameraScanning = scanner_->state() == JMEngine::ScanState::Scanning &&
                                     scanSourceModeCombo_ &&
                                     scanSourceModeCombo_->currentData().toInt() == int(ScanSourceMode::Camera);
         if (!cameraScanning) {
@@ -1014,82 +1124,52 @@ void MainWindow::createScanControl() {
             cameraPreviewLabel_->hide();
             return;
         }
-        QImage display = image.convertToFormat(QImage::Format_RGB888);
-        const bool markerMode = scanRegistrationModeCombo_ &&
-                                scanRegistrationModeCombo_->currentData().toInt() == int(ScanRegistrationMode::Marker);
-        if (markerMode && latestMarkerFrame_.imageWidth > 0 && latestMarkerFrame_.imageHeight > 0) {
-            QPainter painter(&display);
-            painter.setRenderHint(QPainter::Antialiasing, true);
-            QPen pen(QColor(0, 255, 0));
-            pen.setWidth(3);
-            painter.setPen(pen);
-            const float sx = float(display.width()) / float(latestMarkerFrame_.imageWidth);
-            const float sy = float(display.height()) / float(latestMarkerFrame_.imageHeight);
-            for (const auto& m : latestMarkerFrame_.markers) {
-                const QPointF center(m.x * sx, m.y * sy);
-                const float ew = std::max(10.0f, m.width * sx);
-                const float eh = std::max(10.0f, m.height * sy);
-                painter.save();
-                painter.translate(center);
-                painter.rotate(m.angleDeg);
-                painter.drawEllipse(QRectF(-ew * 0.5f, -eh * 0.5f, ew, eh));
-                painter.restore();
-                painter.drawLine(QPointF(center.x() - 6.0, center.y()), QPointF(center.x() + 6.0, center.y()));
-                painter.drawLine(QPointF(center.x(), center.y() - 6.0), QPointF(center.x(), center.y() + 6.0));
-                painter.drawText(QPointF(center.x() + 7.0, center.y() - 7.0),
-                                 QStringLiteral("M%1%2").arg(m.localId + 1)
-                                     .arg(m.hasDepth ? QStringLiteral(" 3D") : QString()));
-            }
-            painter.setPen(QColor(255, 255, 0));
-            painter.drawText(QPointF(12.0, 24.0),
-                             QString::fromUtf8("标记点: %1  frame: %2")
-                                 .arg(latestMarkerFrame_.markers.size()).arg(latestMarkerFrame_.frameId));
-        }
+        QImage display = owned.convertToFormat(QImage::Format_RGB888);
         const QSize box = cameraPreviewLabel_->size();
         cameraPreviewLabel_->setPixmap(QPixmap::fromImage(display).scaled(box, Qt::KeepAspectRatio, Qt::FastTransformation));
         cameraPreviewLabel_->show();
         cameraPreviewLabel_->raise();
         updateCameraPreviewGeometry();
-        // One physical camera input frame == one 3D render tick. Scan/SLAM callbacks never
-        // drive the render cadence, so 30 FPS camera + 10 FPS scan remains ~30 FPS render.
-        if (view_) view_->requestScanRenderFrame();
+        // Preview is UI-only. 3D rendering is driven by the same SLAM-frame
+        // dispatch used by virtual scanning, so source type cannot change render behavior.
+        }, Qt::QueuedConnection);
     });
 
     applyScanSourceUi();
-    applyScanState(ScanFlowController::State::Idle);
+    applyScanState(JMEngine::ScanState::Idle);
     if (scanSourceModeCombo_->currentData().toInt() == int(ScanSourceMode::Camera)) {
-        scanController_->setConfig(scanConfigFromUi());
-        scanController_->refreshCameras();
+        refreshCameras();
     }
 }
 
-ScanConfig MainWindow::scanConfigFromUi() const {
-    ScanConfig cfg;
+MainWindow::ScanUiConfig MainWindow::scanConfigFromUi() const {
+    ScanUiConfig cfg;
     cfg.sourceMode = scanSourceModeCombo_ && scanSourceModeCombo_->currentData().toInt() == int(ScanSourceMode::Camera)
                          ? ScanSourceMode::Camera : ScanSourceMode::Virtual;
     if (scanRegistrationModeCombo_) {
         const int mode = scanRegistrationModeCombo_->currentData().toInt();
-        if (mode == int(ScanRegistrationMode::Texture)) cfg.registrationMode = ScanRegistrationMode::Texture;
-        else if (mode == int(ScanRegistrationMode::Marker)) cfg.registrationMode = ScanRegistrationMode::Marker;
-        else cfg.registrationMode = ScanRegistrationMode::Geometry;
+        if (mode == int(JMEngine::ScanRegistrationMode::Texture)) cfg.engine.registrationMode = JMEngine::ScanRegistrationMode::Texture;
+        else if (mode == int(JMEngine::ScanRegistrationMode::Marker)) cfg.engine.registrationMode = JMEngine::ScanRegistrationMode::Marker;
+        else cfg.engine.registrationMode = JMEngine::ScanRegistrationMode::Geometry;
     }
     cfg.dataDir = scanDataDirEdit_ ? scanDataDirEdit_->text().trimmed() : QString{};
-    cfg.calibrationPath = scanCalibEdit_ ? scanCalibEdit_->text().trimmed() : QString{};
-    cfg.vocabularyPath = scanVocabEdit_ ? scanVocabEdit_->text().trimmed() : QString{};
-    cfg.maxFrames = scanMaxFramesSpin_ ? scanMaxFramesSpin_->value() : 2000;
-    cfg.maxInflightFrames = 2;
+    cfg.engine.calibrationPath = scanCalibEdit_ ? scanCalibEdit_->text().trimmed().toStdString() : std::string{};
+    cfg.engine.vocabularyPath = scanVocabEdit_ ? scanVocabEdit_->text().trimmed().toStdString() : std::string{};
+    cfg.engine.maxFrames = scanMaxFramesSpin_ ? scanMaxFramesSpin_->value() : 2000;
+    cfg.engine.maxInflightFrames = 2;
     // Live preview is bounded but must represent the whole scan. PointCloudWidget compacts
     // old preview samples when this budget is reached instead of dropping all later frames.
-    cfg.previewPointsPerFrame = 300;
+    cfg.engine.previewPointsPerFrame = 300;
     cfg.previewPointLimit = 20000000;
-    cfg.offlineVoxel = 3.0;
-    cfg.offlineIterations = 30; // Preserve the user's current ScanFlowController parameter.
+    cfg.engine.previewPointLimit = cfg.previewPointLimit;
+    cfg.engine.offlineVoxel = 3.0;
+    cfg.engine.offlineIterations = 30;
     cfg.liveOptimizationEnabled = liveOptimizationCheck_ ? liveOptimizationCheck_->isChecked() : true;
     cfg.cameraModelJsonPath = cameraModelJsonEdit_ ? cameraModelJsonEdit_->text().trimmed() : QString{};
     cfg.cameraADeviceId = cameraACombo_ ? cameraACombo_->currentData().toString() : QString{};
     cfg.cameraBDeviceId = cameraBCombo_ ? cameraBCombo_->currentData().toString() : QString{};
-    cfg.cameraAExposure = cameraAExposureSpin_ ? cameraAExposureSpin_->value() : -6.0;
-    cfg.cameraBExposure = cameraBExposureSpin_ ? cameraBExposureSpin_->value() : -6.0;
+    cfg.cameras.cameraA.exposure = cameraAExposureSpin_ ? cameraAExposureSpin_->value() : -6.0;
+    cfg.cameras.cameraB.exposure = cameraBExposureSpin_ ? cameraBExposureSpin_->value() : -6.0;
     // Backlight UI is hidden.  The first camera open must use the model default from
     // camera_models.json, not a stale QSettings value (for example 10 while JSON says 25).
     auto modelBacklightDefault = [this](QComboBox* combo, double fallback) {
@@ -1100,11 +1180,103 @@ ScanConfig MainWindow::scanConfigFromUi() const {
         }
         return fallback;
     };
-    cfg.cameraABacklight = modelBacklightDefault(cameraACombo_, 10.0);
-    cfg.cameraBBacklight = modelBacklightDefault(cameraBCombo_, 10.0);
-    cfg.cameraSyncToleranceMs = cameraSyncToleranceSpin_ ? cameraSyncToleranceSpin_->value() : 50.0;
-    cfg.cameraQueueDepth = 3;
+    cfg.cameras.cameraA.backlight = modelBacklightDefault(cameraACombo_, 10.0);
+    cfg.cameras.cameraB.backlight = modelBacklightDefault(cameraBCombo_, 10.0);
+    cfg.cameras.syncToleranceMs = cameraSyncToleranceSpin_ ? cameraSyncToleranceSpin_->value() : 50.0;
+    cfg.cameras.queueDepth = 3;
+    auto applyCamera = [this](const QString& id, JMEngine::CameraDeviceConfig& out) {
+        for (const auto& d : cameraInfos_) if (d.deviceId == id) {
+            out.index = d.cvIndex; out.width = d.width; out.height = d.height; out.fps = int(std::lround(d.fps)); return;
+        }
+    };
+    applyCamera(cfg.cameraADeviceId, cfg.cameras.cameraA);
+    applyCamera(cfg.cameraBDeviceId, cfg.cameras.cameraB);
     return cfg;
+}
+
+void MainWindow::refreshCameras() {
+    const QString jsonPath = cameraModelJsonEdit_ ? cameraModelJsonEdit_->text().trimmed() : QString{};
+    QPointer<MainWindow> self(this);
+    std::thread([self, jsonPath] {
+        std::string nativeError;
+        const auto nativeDevices = JMEngine::enumerateCameraDevices(&nativeError);
+        QJsonArray profiles;
+        QFile file(jsonPath);
+        QString jsonError;
+        if (file.open(QIODevice::ReadOnly)) {
+            QJsonParseError parseError{};
+            const auto doc = QJsonDocument::fromJson(file.readAll(), &parseError);
+            if (parseError.error == QJsonParseError::NoError && doc.isObject())
+                profiles = doc.object().value(QStringLiteral("cameras")).toArray();
+            else
+                jsonError = QString::fromUtf8("相机型号 JSON 格式错误: %1").arg(parseError.errorString());
+        } else if (!jsonPath.isEmpty()) {
+            jsonError = QString::fromUtf8("无法打开相机型号 JSON: %1").arg(jsonPath);
+        }
+
+        std::vector<CameraDeviceInfo> devices;
+        devices.reserve(nativeDevices.size());
+        for (const auto& native : nativeDevices) {
+            CameraDeviceInfo info;
+            info.cvIndex = native.index;
+            info.deviceId = QString::fromStdString(native.id);
+            info.friendlyName = QString::fromStdString(native.name);
+            info.vid = QString::fromStdString(native.vid).toUpper();
+            info.pid = QString::fromStdString(native.pid).toUpper();
+            info.modelName = QString::fromUtf8("未配置型号");
+            for (const auto& value : profiles) {
+                const auto profile = value.toObject();
+                QString vid = profile.value(QStringLiteral("vid")).toString().toUpper();
+                QString pid = profile.value(QStringLiteral("pid")).toString().toUpper();
+                if (vid.startsWith(QStringLiteral("0X"))) vid.remove(0, 2);
+                if (pid.startsWith(QStringLiteral("0X"))) pid.remove(0, 2);
+                if (vid.rightJustified(4, QLatin1Char('0')).right(4) != info.vid ||
+                    pid.rightJustified(4, QLatin1Char('0')).right(4) != info.pid) continue;
+                info.modelName = profile.value(QStringLiteral("model")).toString(info.modelName);
+                info.width = profile.value(QStringLiteral("width")).toInt(info.width);
+                info.height = profile.value(QStringLiteral("height")).toInt(info.height);
+                info.fps = profile.value(QStringLiteral("fps")).toDouble(info.fps);
+                info.fourcc = profile.value(QStringLiteral("fourcc")).toString(info.fourcc);
+                const auto exposure = profile.value(QStringLiteral("exposure")).toObject();
+                info.exposure = {exposure.value(QStringLiteral("min")).toDouble(-13.0),
+                                 exposure.value(QStringLiteral("max")).toDouble(0.0),
+                                 exposure.value(QStringLiteral("step")).toDouble(1.0),
+                                 exposure.value(QStringLiteral("default")).toDouble(-6.0)};
+                const auto backlight = profile.value(QStringLiteral("backlight")).toObject();
+                info.backlight = {backlight.value(QStringLiteral("min")).toDouble(0.0),
+                                  backlight.value(QStringLiteral("max")).toDouble(10.0),
+                                  backlight.value(QStringLiteral("step")).toDouble(1.0),
+                                  backlight.value(QStringLiteral("default")).toDouble(10.0)};
+                break;
+            }
+            devices.push_back(std::move(info));
+        }
+        const QString error = !jsonError.isEmpty() ? jsonError : QString::fromStdString(nativeError);
+        if (!self) return;
+        QMetaObject::invokeMethod(self, [self, devices = std::move(devices), error] {
+            if (!self) return;
+            QSettings settings;
+            const QString previousA = settings.value(QStringLiteral("scan/cameraADeviceId")).toString();
+            const QString previousB = settings.value(QStringLiteral("scan/cameraBDeviceId")).toString();
+            self->cameraInfos_ = devices;
+            self->cameraACombo_->clear(); self->cameraBCombo_->clear();
+            int indexA = -1, indexB = -1;
+            for (int i = 0; i < int(devices.size()); ++i) {
+                const auto& d = devices[std::size_t(i)];
+                self->cameraACombo_->addItem(d.displayText(), d.deviceId);
+                self->cameraBCombo_->addItem(d.displayText(), d.deviceId);
+                if (d.deviceId == previousA) indexA = i;
+                if (d.deviceId == previousB) indexB = i;
+            }
+            if (indexA >= 0) self->cameraACombo_->setCurrentIndex(indexA);
+            else if (!devices.empty()) self->cameraACombo_->setCurrentIndex(0);
+            if (indexB >= 0) self->cameraBCombo_->setCurrentIndex(indexB);
+            else if (devices.size() > 1) self->cameraBCombo_->setCurrentIndex(1);
+            self->updateCameraSelectionUi();
+            self->statusBar()->showMessage(error.isEmpty()
+                ? QString::fromUtf8("已枚举 %1 个相机").arg(devices.size()) : error);
+        }, Qt::QueuedConnection);
+    }).detach();
 }
 
 void MainWindow::updateCameraSelectionUi() {
@@ -1177,8 +1349,8 @@ void MainWindow::applyScanSourceUi() {
     if (cameraSyncToleranceSpin_) cameraSyncToleranceSpin_->setEnabled(cameraMode);
 }
 
-void MainWindow::applyScanState(ScanFlowController::State state) {
-    if (cameraPreviewLabel_ && state != ScanFlowController::State::Scanning) {
+void MainWindow::applyScanState(JMEngine::ScanState state) {
+    if (cameraPreviewLabel_ && state != JMEngine::ScanState::Scanning) {
         cameraPreviewLabel_->clear();
         cameraPreviewLabel_->hide();
     }
@@ -1186,23 +1358,23 @@ void MainWindow::applyScanState(ScanFlowController::State state) {
     // The 3D camera/frustum is only a live scanning aid.  As soon as scanning leaves the
     // Scanning state (Stopping / ReadyForReconstruction / Error / Idle), remove it and stop
     // forcing the 3D observer to follow the last SLAM pose.  The completed cloud remains.
-    if (view_ && state != ScanFlowController::State::Scanning) {
+    if (view_ && state != JMEngine::ScanState::Scanning) {
         view_->clearScanCameraPose();
         // On a normal scan finish, preserve the last valid current frame by promoting it to
         // the RGB history before removing the green/yellow temporary layer. Reset clears the
         // whole preview immediately in its button handler, so there is nothing to preserve.
-        if (state == ScanFlowController::State::Stopping ||
-            state == ScanFlowController::State::ReadyForReconstruction ||
-            state == ScanFlowController::State::Reconstructing)
+        if (state == JMEngine::ScanState::Stopping ||
+            state == JMEngine::ScanState::ReadyForReconstruction ||
+            state == JMEngine::ScanState::Reconstructing)
             view_->finalizeCurrentScanFrame();
         else
             view_->clearCurrentScanFrame();
     }
     if (scanStateLabel_)
-        scanStateLabel_->setText(QString::fromUtf8("状态：") + ScanFlowController::stateText(state));
-    const bool idleLike = state == ScanFlowController::State::Idle || state == ScanFlowController::State::Error;
-    const bool scanning = state == ScanFlowController::State::Scanning;
-    const bool ready = state == ScanFlowController::State::ReadyForReconstruction;
+        scanStateLabel_->setText(QString::fromUtf8("状态：") + scanStateText(state));
+    const bool idleLike = state == JMEngine::ScanState::Idle || state == JMEngine::ScanState::Error;
+    const bool scanning = state == JMEngine::ScanState::Scanning;
+    const bool ready = state == JMEngine::ScanState::ReadyForReconstruction;
     if (scanStartButton_) scanStartButton_->setEnabled(idleLike);
     if (scanStopButton_) scanStopButton_->setEnabled(scanning);
     if (scanOfflineButton_) scanOfflineButton_->setEnabled(ready);
@@ -1210,9 +1382,9 @@ void MainWindow::applyScanState(ScanFlowController::State state) {
     if (scanTextureButton_) scanTextureButton_->setEnabled(ready && scanTextureFramesReady_);
 #endif
     if (scanResetButton_)
-        scanResetButton_->setEnabled(state != ScanFlowController::State::Stopping &&
-                                     state != ScanFlowController::State::Reconstructing &&
-                                     state != ScanFlowController::State::Initializing);
+        scanResetButton_->setEnabled(state != JMEngine::ScanState::Stopping &&
+                                     state != JMEngine::ScanState::Reconstructing &&
+                                     state != JMEngine::ScanState::Initializing);
 
     const bool editable = idleLike;
     if (scanSourceModeCombo_) scanSourceModeCombo_->setEnabled(editable);

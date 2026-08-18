@@ -14,6 +14,7 @@
 #include <JMEngine/ObjModelLoader.h>
 #include <JMEngine/TriangleMesh.h>
 #include <JMEngine/edit/MeshEditSession.h>
+#include <JMEngine/JMScanner.h>
 
 #include <cassert>
 #include <cstdint>
@@ -23,6 +24,8 @@
 #include <memory>
 #include <string>
 #include <vector>
+#include <chrono>
+#include <thread>
 
 using namespace JMEngine;
 
@@ -86,6 +89,17 @@ void testTransform() {
 
     assert(editor.undo());
     assert(cloud->at(0).position.x == -0.5f);
+}
+
+void testReplaceCloudClearsEditState() {
+    Engine editor(makeCloud());
+    editor.select({1});
+    assert(editor.deleteSelection());
+    assert(editor.canUndo());
+    editor.setPointCloud(makeCloud());
+    assert(editor.selection().empty());
+    assert(!editor.canUndo());
+    assert(!editor.canRedo());
 }
 
 void testCpuSelector() {
@@ -562,7 +576,35 @@ static void testProcessingOperations() {
     assert(processingThreadCount() >= 1);
 }
 
+class TestScanBackend final : public JMEngine::ISlam {
+  public:
+    bool process(const JMEngine::CameraFrame& frame) override {
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        JMEngine::Point p; p.position={float(frame.frameId),0,0};
+        cloud_=std::make_shared<JMEngine::PointCloud>(JMEngine::PointCloud::Container{p});
+        if(update_)update_(frame.frameId,{},cloud_);
+        return true;
+    }
+    JMEngine::Pose pose()const override{return{};}
+    std::shared_ptr<JMEngine::PointCloud>cloud()override{return cloud_;}
+    void setUpdateCallback(UpdateCallback cb)override{update_=std::move(cb);}
+  private:
+    UpdateCallback update_;std::shared_ptr<JMEngine::PointCloud>cloud_{new JMEngine::PointCloud};
+};
+
+void testScannerStateAndBackpressure(){
+    JMEngine::JMScanner scanner(std::unique_ptr<JMEngine::ISlam>(new TestScanBackend));
+    JMEngine::ScanConfig cfg;cfg.maxFrames=100;cfg.maxInflightFrames=1;
+    assert(scanner.initialize(cfg));assert(scanner.state()==JMEngine::ScanState::Idle);assert(scanner.start());
+    auto rgb=std::make_shared<std::vector<std::uint8_t>>(12,127);auto code=std::make_shared<std::vector<std::uint8_t>>(4,64);
+    for(int i=0;i<30;++i){JMEngine::CameraFrame f;f.rgb=rgb;f.code=code;f.width=2;f.height=2;f.frameId=i;assert(scanner.submit(std::move(f)));}
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));scanner.stop();auto stats=scanner.statistics();
+    assert(scanner.state()==JMEngine::ScanState::ReadyForReconstruction);assert(stats.submittedFrames==30);assert(stats.replacedFrames>0);assert(stats.processedFrames>0);
+    assert(scanner.reconstruct());assert(scanner.resultCloud());scanner.reset();assert(scanner.state()==JMEngine::ScanState::Idle);
+}
+
 int main() {
+    testScannerStateAndBackpressure();
     testColorPicking24();
     testBlockPicking24();
     testMeshEditSession();
@@ -572,6 +614,7 @@ int main() {
     testSelectionDeleteUndoRedo();
     testCrop();
     testTransform();
+    testReplaceCloudClearsEditState();
     testCpuSelector();
     testPixelIdPicker();
     testPointCloudIo();

@@ -165,6 +165,11 @@ inline CloudBounds calculateBounds(const PointCloud& cloud) {
     for (const auto& p : cloud.points()) {
         if ((p.flags & PointDeleted) != 0)
             continue;
+        if (!std::isfinite(p.position.x) ||
+            !std::isfinite(p.position.y) ||
+            !std::isfinite(p.position.z)) {
+            continue;
+        }
         if (first) {
             out.min = out.max = p.position;
             first = false;

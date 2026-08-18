@@ -67,7 +67,7 @@ class PointCloudWidget final : public QOpenGLWidget, protected QOpenGLExtraFunct
 
     void loadModelAsync(const QString& path);
 
-    // 扫描预览专用接口：只在 UI 线程改场景对象，重活均由 ScanFlowController 工作线程完成。
+    // 扫描预览专用接口：只在 UI 线程改场景对象，采集与扫描工作由 JMEngine::JMScanner 完成。
     // reservePoints 同时用于 CPU vector 与 GPU VBO 预留，避免实时扫描期间反复 realloc/glBufferData。
     QString beginScanPreview(std::size_t reservePoints = 2000000);
     void appendScanPreview(const std::shared_ptr<std::vector<JMEngine::Point>>& points, std::size_t pointLimit = 2000000);
@@ -75,6 +75,7 @@ class PointCloudWidget final : public QOpenGLWidget, protected QOpenGLExtraFunct
     // Live SLAM history: local points are uploaded exactly once; later optimization only updates frame poses.
     void appendScanLocalFrame(int frameId, const std::shared_ptr<std::vector<JMEngine::Point>>& localPoints,
                               const std::array<float,16>& pose);
+    void setScanFrameMarkers(int frameId, const std::vector<std::array<float,3>>& localMarkers);
     void updateScanFramePoses(const std::shared_ptr<std::vector<LiveFramePoseUpdate>>& updates);
     // Normal: current frame = green. Lost: last valid frame = yellow reference, current lost frame = green.
     void setCurrentScanFrame(const std::shared_ptr<std::vector<JMEngine::Point>>& points, bool trackingOk);
@@ -85,10 +86,11 @@ class PointCloudWidget final : public QOpenGLWidget, protected QOpenGLExtraFunct
     void updateOptimizedScanPreview(const std::shared_ptr<JMEngine::PointCloud>& cloud);
     void clearScanPreview();
     QString scanPreviewPath() const { return scanPreviewPath_; }
-    // Camera mode: the physical camera input cadence owns the 3D render cadence.
-    // SLAM/scan callbacks only publish data; they must not create extra render ticks.
-    void setScanRenderDrivenByCamera(bool enabled) { cameraDrivenScanRender_ = enabled; }
-    void requestScanRenderFrame() { if (cameraDrivenScanRender_) update(); }
+    // Unified scan renderer: real-camera and virtual scan use the exact same
+    // SLAM-frame render clock and the same incremental VBO uploader. Source type
+    // must never change the rendering policy. Kept as a no-op for source compatibility.
+    void setScanRenderDrivenByCamera(bool enabled) { Q_UNUSED(enabled); }
+    void requestScanRenderFrame() { update(); }
     double renderFps() const noexcept { return double(renderFpsTenths_.load(std::memory_order_relaxed)) / 10.0; }
 
     struct ScanCameraViewPose {
@@ -275,6 +277,10 @@ class PointCloudWidget final : public QOpenGLWidget, protected QOpenGLExtraFunct
         bool liveFramePoseMode{false};
         std::vector<LiveFrameRange> liveFrames;
         std::unordered_map<int, std::size_t> liveFrameIndex;
+        struct LiveMarkerRange { int frameId{-1}; std::size_t first{0}; std::size_t count{0}; };
+        std::vector<LiveMarkerRange> liveMarkerRanges;
+        std::unordered_map<int, std::size_t> liveMarkerIndex;
+        std::unordered_map<int, std::vector<std::array<float,3>>> pendingLiveMarkers;
 
         // 场景级非破坏变换。当前交互器只修改平移，不重写点/三角形数据。
         JMEngine::Mat4f modelTransform{JMEngine::Mat4f::identity()};
@@ -363,12 +369,12 @@ class PointCloudWidget final : public QOpenGLWidget, protected QOpenGLExtraFunct
                                const std::shared_ptr<std::vector<JMEngine::Point>>& points,
                                std::uint32_t rgba);
     void clearScanStatusLayer(QString& path);
+    void advanceScanCameraFollow();
 
   private:
     std::vector<std::unique_ptr<Model>> models_;
     std::vector<QString> loadingPaths_;
     QString scanPreviewPath_;
-    bool cameraDrivenScanRender_{false};
     QString currentScanFramePath_;
     std::shared_ptr<std::vector<JMEngine::Point>> currentScanFrameSource_;
     bool currentScanFrameTrackingOk_{false};
@@ -382,6 +388,10 @@ class PointCloudWidget final : public QOpenGLWidget, protected QOpenGLExtraFunct
     std::optional<ScanCameraViewPose> scanCameraPose_;
     std::optional<ScanCameraViewPose> lastValidScanCameraPose_;
     bool scanCameraFollowEnabled_{true};
+    bool scanCameraFollowInitialized_{false};
+    JMEngine::Vec3f scanFollowTarget_{};
+    JMEngine::example::OrbitCamera::Quat scanFollowOrientation_{};
+    float scanFollowDistance_{0.0f};
     struct BasePlaneInteractor {
         bool active{false};
         bool dragging{false};

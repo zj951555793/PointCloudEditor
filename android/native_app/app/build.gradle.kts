@@ -4,19 +4,31 @@ plugins {
 
 android {
     namespace = "com.jmengine.app"
-    compileSdk = 35
+    compileSdk {
+        version = release(37)
+    }
+
+    signingConfigs {
+        create("releaseDebugKey") {
+            storeFile = file("${System.getProperty("user.home")}/.android/debug.keystore")
+            storePassword = "android"
+            keyAlias = "androiddebugkey"
+            keyPassword = "android"
+        }
+    }
 
     defaultConfig {
         applicationId = "com.jmengine.app"
         minSdk = 24
-        targetSdk = 35
+        targetSdk = 37
         versionCode = 1
-        versionName = "14.0"
+        versionName = "20.1"
     }
 
     buildTypes {
         release {
             isMinifyEnabled = false
+            signingConfig = signingConfigs.getByName("releaseDebugKey")
         }
     }
 
