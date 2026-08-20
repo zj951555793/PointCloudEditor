@@ -13,6 +13,8 @@
 #include <condition_variable>
 #include <deque>
 #include <filesystem>
+#include <iomanip>
+#include <sstream>
 #include <limits>
 #include <mutex>
 #include <thread>
@@ -51,6 +53,8 @@ class OpenCvDualCamera final : public ICameraSource {
                std::string* error) override {
         stop();
         config_ = config;
+        if (!prepareRawRecorder(error))
+            return false;
         desiredExposure_[0].store(config.cameraA.exposure);
         desiredExposure_[1].store(config.cameraB.exposure);
         desiredBacklight_[0].store(config.cameraA.backlight);
@@ -60,6 +64,10 @@ class OpenCvDualCamera final : public ICameraSource {
         stopping_.store(false);
         openedCameraCount_ = 0;
         openError_.clear();
+        if (config_.recordRawData) {
+            recordStopping_.store(false);
+            recordThread_ = std::thread([this] { rawRecordLoop(); });
+        }
 
         cameraAThread_ = std::thread([this] {
             captureLoop(config_.cameraA, true);
@@ -95,6 +103,15 @@ class OpenCvDualCamera final : public ICameraSource {
         if (pairingThread_.joinable())
             pairingThread_.join();
 
+        recordStopping_.store(true);
+        recordCondition_.notify_all();
+        if (recordThread_.joinable())
+            recordThread_.join();
+
+        {
+            std::lock_guard<std::mutex> recordLock(recordMutex_);
+            recordQueue_.clear();
+        }
         std::lock_guard<std::mutex> lock(mutex_);
         cameraAQueue_.clear();
         cameraBQueue_.clear();
@@ -136,14 +153,17 @@ class OpenCvDualCamera final : public ICameraSource {
 
         const int role = cameraA ? 0 : 1;
         double exposure = desiredExposure_[std::size_t(role)].load();
-        double backlight = std::numeric_limits<double>::quiet_NaN();
+        double backlight = desiredBacklight_[std::size_t(role)].load();
         if (opened) {
-            capture.set(cv::CAP_PROP_FOURCC,
-                        cv::VideoWriter::fourcc('M', 'J', 'P', 'G'));
+            std::string fourcc = cameraConfig.fourcc.empty() ? "MJPG" : cameraConfig.fourcc;
+            while (fourcc.size() < 4) fourcc.push_back(' ');
+            capture.set(cv::CAP_PROP_FOURCC, cv::VideoWriter::fourcc(
+                fourcc[0], fourcc[1], fourcc[2], fourcc[3]));
             capture.set(cv::CAP_PROP_FRAME_WIDTH, cameraConfig.width);
             capture.set(cv::CAP_PROP_FRAME_HEIGHT, cameraConfig.height);
             capture.set(cv::CAP_PROP_FPS, cameraConfig.fps);
             capture.set(cv::CAP_PROP_EXPOSURE, exposure);
+            capture.set(cv::CAP_PROP_BACKLIGHT, backlight);
         }
 
         {
@@ -274,8 +294,100 @@ class OpenCvDualCamera final : public ICameraSource {
             frame.code = std::make_shared<std::vector<std::uint8_t>>(
                 code.data, code.data + pixelCount);
 
+            enqueueRawRecord(frame);
             if (frameCallback_)
                 frameCallback_(std::move(frame));
+        }
+    }
+
+    bool prepareRawRecorder(std::string* error) {
+        if (!config_.recordRawData)
+            return true;
+        if (config_.rawDataDirectory.empty()) {
+            if (error) *error = "rawDataDirectory is empty";
+            return false;
+        }
+        std::error_code ec;
+        rawRoot_ = std::filesystem::path(config_.rawDataDirectory);
+        rawColorDir_ = rawRoot_ / "img" / "c";
+        rawCodeDir_ = rawRoot_ / "img" / "p";
+        std::filesystem::create_directories(rawColorDir_, ec);
+        if (ec) {
+            if (error) *error = "failed to create raw color directory: " + ec.message();
+            return false;
+        }
+        std::filesystem::create_directories(rawCodeDir_, ec);
+        if (ec) {
+            if (error) *error = "failed to create raw code directory: " + ec.message();
+            return false;
+        }
+        if (!config_.calibrationPath.empty()) {
+            const auto source = std::filesystem::path(config_.calibrationPath);
+            const auto target = rawRoot_ / "calib.txt";
+            ec.clear();
+            std::filesystem::copy_file(source, target,
+                                       std::filesystem::copy_options::overwrite_existing, ec);
+            if (ec) {
+                if (error) *error = "failed to copy calibration file: " + ec.message();
+                return false;
+            }
+        }
+        return true;
+    }
+
+    static std::string rawFrameName(int frameId) {
+        std::ostringstream stream;
+        stream << std::setw(6) << std::setfill('0') << frameId << ".png";
+        return stream.str();
+    }
+
+    void enqueueRawRecord(const CameraFrame& frame) {
+        if (!config_.recordRawData || recordStopping_.load() ||
+            !frame.rgb || !frame.code)
+            return;
+        {
+            std::lock_guard<std::mutex> lock(recordMutex_);
+            constexpr std::size_t kMaxQueuedFrames = 256;
+            if (recordQueue_.size() >= kMaxQueuedFrames) {
+                recordQueue_.pop_front();
+                ++droppedRawFrames_;
+            }
+            recordQueue_.push_back(frame);
+        }
+        recordCondition_.notify_one();
+    }
+
+    void rawRecordLoop() {
+        for (;;) {
+            CameraFrame frame;
+            {
+                std::unique_lock<std::mutex> lock(recordMutex_);
+                recordCondition_.wait(lock, [this] {
+                    return recordStopping_.load() || !recordQueue_.empty();
+                });
+                if (recordQueue_.empty()) {
+                    if (recordStopping_.load())
+                        break;
+                    continue;
+                }
+                frame = std::move(recordQueue_.front());
+                recordQueue_.pop_front();
+            }
+
+            if (!frame.rgb || !frame.code || frame.width <= 0 || frame.height <= 0)
+                continue;
+            const int codeWidth = frame.codeWidth > 0 ? frame.codeWidth : frame.width;
+            const int codeHeight = frame.codeHeight > 0 ? frame.codeHeight : frame.height;
+            cv::Mat color(frame.height, frame.width, CV_8UC3, frame.rgb->data());
+            cv::Mat code(codeHeight, codeWidth, CV_8UC1, frame.code->data());
+            const auto name = rawFrameName(frame.frameId);
+            try {
+                cv::imwrite((rawColorDir_ / name).string(), color);
+                cv::imwrite((rawCodeDir_ / name).string(), code);
+            } catch (const cv::Exception& e) {
+                if (errorCallback_)
+                    errorCallback_(std::string("failed to save raw scan frame: ") + e.what());
+            }
         }
     }
 
@@ -314,6 +426,15 @@ class OpenCvDualCamera final : public ICameraSource {
     ErrorCallback errorCallback_;
     PreviewCallback previewCallback_;
     std::mutex previewMutex_;
+    std::filesystem::path rawRoot_;
+    std::filesystem::path rawColorDir_;
+    std::filesystem::path rawCodeDir_;
+    std::thread recordThread_;
+    std::mutex recordMutex_;
+    std::condition_variable recordCondition_;
+    std::deque<CameraFrame> recordQueue_;
+    std::atomic<bool> recordStopping_{true};
+    std::uint64_t droppedRawFrames_{0};
     std::atomic<bool> stopping_{true};
     std::array<std::atomic<double>, 2> desiredExposure_{};
     std::array<std::atomic<double>, 2> desiredBacklight_{};

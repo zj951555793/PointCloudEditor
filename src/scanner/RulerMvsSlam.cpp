@@ -606,6 +606,8 @@ class RulerMvsBackend final : public ISlam {
         std::vector<cv::Vec3b> colors;
         result.toCloud(points, normals, colors);
 
+        // Current and lost-frame overlays use every point returned by the SLAM result.
+        // previewPointsPerFrame applies only to accumulated history, never to status frames.
         PointCloud::Container statusPoints;
         statusPoints.reserve(points.size());
         for (std::size_t index = 0; index < points.size(); ++index) {

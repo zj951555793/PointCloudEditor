@@ -41,7 +41,7 @@ class MainWindow final : public QMainWindow {
         int width{1920}, height{1200};
         double fps{10.0};
         CameraRange exposure;
-        CameraRange backlight{0.0, 10.0, 1.0, 10.0};
+        CameraRange backlight{5.0, 25.0, 1.0, 25.0};
         QString displayText() const;
     };
     struct ScanUiConfig {
@@ -49,8 +49,10 @@ class MainWindow final : public QMainWindow {
         JMEngine::ScanConfig engine;
         JMEngine::DualCameraConfig cameras;
         QString dataDir, cameraModelJsonPath, cameraADeviceId, cameraBDeviceId;
+        QString rawDataDir;
         int previewPointLimit{20000000};
         bool liveOptimizationEnabled{true};
+        bool recordRawData{false};
     };
     void createActions();
     void createMenus();
@@ -84,6 +86,8 @@ class MainWindow final : public QMainWindow {
     QLineEdit* scanVocabEdit_{nullptr};
     QSpinBox* scanMaxFramesSpin_{nullptr};
     QLineEdit* cameraModelJsonEdit_{nullptr};
+    QCheckBox* recordRawDataCheck_{nullptr};
+    QLineEdit* rawDataDirEdit_{nullptr};
     QPushButton* cameraRefreshButton_{nullptr};
     QComboBox* cameraACombo_{nullptr};
     QComboBox* cameraBCombo_{nullptr};

@@ -26,12 +26,12 @@
 #include <QCheckBox>
 #include <QCoreApplication>
 #include <QDir>
+#include <QDateTime>
 #include <QElapsedTimer>
 #include <QFormLayout>
 #include <QGridLayout>
 #include <QToolButton>
 #include <QHBoxLayout>
-#include <QSettings>
 #include <QStandardPaths>
 #include <QFile>
 #include <QJsonArray>
@@ -582,6 +582,10 @@ void MainWindow::createScanControl() {
     scanCalibEdit_ = new QLineEdit(panel);
     scanVocabEdit_ = new QLineEdit(panel);
     cameraModelJsonEdit_ = new QLineEdit(panel);
+    recordRawDataCheck_ = new QCheckBox(QString::fromUtf8("保存原始数据"), panel);
+    recordRawDataCheck_->setChecked(false);
+    rawDataDirEdit_ = new QLineEdit(panel);
+    rawDataDirEdit_->setPlaceholderText(QString::fromUtf8("相机原始扫描保存目录"));
     scanMaxFramesSpin_ = new QSpinBox(panel);
     scanMaxFramesSpin_->setRange(1, 100000);
     scanMaxFramesSpin_->setValue(2000);
@@ -627,14 +631,14 @@ void MainWindow::createScanControl() {
 
     for (auto* spin : {cameraABacklightSpin_, cameraBBacklightSpin_}) {
         spin->setDecimals(0);
-        spin->setRange(0.0, 10.0);
+        spin->setRange(5.0, 25.0);
         spin->setSingleStep(1.0);
-        spin->setValue(10.0);
+        spin->setValue(25.0);
         spin->setFixedWidth(54);
     }
     for (auto* slider : {cameraABacklightSlider_, cameraBBacklightSlider_}) {
-        slider->setRange(0, 10);
-        slider->setValue(10);
+        slider->setRange(5, 25);
+        slider->setValue(25);
         slider->setMinimumWidth(100);
     }
     for (auto* spin : {cameraAExposureSpin_, cameraBExposureSpin_}) {
@@ -654,12 +658,6 @@ void MainWindow::createScanControl() {
         label->setFixedWidth(34);
     cameraAExposureSpin_->hide();
     cameraBExposureSpin_->hide();
-    // Backlight remains configured/applied from camera_models.json but is intentionally
-    // removed from the compact operator UI.
-    cameraABacklightSlider_->hide();
-    cameraABacklightSpin_->hide();
-    cameraBBacklightSlider_->hide();
-    cameraBBacklightSpin_->hide();
 
     scanStateLabel_ = new QLabel(QString::fromUtf8("状态：空闲"), panel);
     scanStateLabel_->setMinimumWidth(115);
@@ -720,10 +718,16 @@ void MainWindow::createScanControl() {
     quickGrid->addWidget(cameraBExposureValueLabel_, 2, 9);
     quickGrid->addWidget(liveOptimizationCheck_, 2, 10, 1, 2);
 
-    // Runtime rendering cadence: this is the actual paintGL rate, not camera/SLAM FPS.
-    quickGrid->addWidget(scanRenderFpsLabel_, 3, 0, 1, 2);
+    quickGrid->addWidget(new QLabel(QString::fromUtf8("A逆光"), panel), 3, 0);
+    quickGrid->addWidget(cameraABacklightSlider_, 3, 1, 1, 3);
+    quickGrid->addWidget(cameraABacklightSpin_, 3, 4);
+    quickGrid->addWidget(new QLabel(QString::fromUtf8("B逆光"), panel), 3, 5);
+    quickGrid->addWidget(cameraBBacklightSlider_, 3, 6, 1, 3);
+    quickGrid->addWidget(cameraBBacklightSpin_, 3, 9);
+
+    quickGrid->addWidget(scanRenderFpsLabel_, 4, 0, 1, 2);
 #ifdef JMENGINE_HAS_TEXTURE_MAPPING
-    quickGrid->addWidget(scanTextureFramesLabel_, 3, 2, 1, 2);
+    quickGrid->addWidget(scanTextureFramesLabel_, 4, 2, 1, 2);
 #endif
     auto* renderFpsTimer = new QTimer(panel);
     renderFpsTimer->setInterval(500);
@@ -777,19 +781,26 @@ void MainWindow::createScanControl() {
         if (!file.isEmpty()) cameraModelJsonEdit_->setText(file);
     }), 1, 3);
 
+    advancedGrid->addWidget(recordRawDataCheck_, 2, 0);
+    advancedGrid->addWidget(makePathRow(rawDataDirEdit_, QString::fromUtf8("浏览"), [this] {
+        const QString dir = QFileDialog::getExistingDirectory(this, QString::fromUtf8("选择原始扫描保存目录"),
+                                                              rawDataDirEdit_->text());
+        if (!dir.isEmpty()) rawDataDirEdit_->setText(dir);
+    }), 2, 1, 1, 3);
+
     cameraSyncToleranceSpin_ = new QDoubleSpinBox(panel);
     cameraSyncToleranceSpin_->setRange(0.1, 100.0);
     cameraSyncToleranceSpin_->setDecimals(1);
     cameraSyncToleranceSpin_->setSingleStep(1.0);
     cameraSyncToleranceSpin_->setValue(50.0);
-    advancedGrid->addWidget(new QLabel(QString::fromUtf8("最大帧"), advancedWidget), 2, 0);
-    advancedGrid->addWidget(scanMaxFramesSpin_, 2, 1);
-    advancedGrid->addWidget(new QLabel(QString::fromUtf8("同步(ms)"), advancedWidget), 2, 2);
-    advancedGrid->addWidget(cameraSyncToleranceSpin_, 2, 3);
-    advancedGrid->addWidget(new QLabel(QString::fromUtf8("A型号"), advancedWidget), 3, 0);
-    advancedGrid->addWidget(cameraAModelLabel_, 3, 1);
-    advancedGrid->addWidget(new QLabel(QString::fromUtf8("B型号"), advancedWidget), 3, 2);
-    advancedGrid->addWidget(cameraBModelLabel_, 3, 3);
+    advancedGrid->addWidget(new QLabel(QString::fromUtf8("最大帧"), advancedWidget), 3, 0);
+    advancedGrid->addWidget(scanMaxFramesSpin_, 3, 1);
+    advancedGrid->addWidget(new QLabel(QString::fromUtf8("同步(ms)"), advancedWidget), 3, 2);
+    advancedGrid->addWidget(cameraSyncToleranceSpin_, 3, 3);
+    advancedGrid->addWidget(new QLabel(QString::fromUtf8("A型号"), advancedWidget), 4, 0);
+    advancedGrid->addWidget(cameraAModelLabel_, 4, 1);
+    advancedGrid->addWidget(new QLabel(QString::fromUtf8("B型号"), advancedWidget), 4, 2);
+    advancedGrid->addWidget(cameraBModelLabel_, 4, 3);
     advancedGrid->setColumnStretch(1, 1);
     advancedGrid->setColumnStretch(3, 1);
     advancedWidget->setVisible(false);
@@ -810,9 +821,8 @@ void MainWindow::createScanControl() {
     setCorner(Qt::BottomRightCorner, Qt::BottomDockWidgetArea);
     addDockWidget(Qt::BottomDockWidgetArea, scanDock_);
 
-    QSettings settings;
-    scanSourceModeCombo_->setCurrentIndex(settings.value(QStringLiteral("scan/sourceMode"), 0).toInt());
-    scanDataDirEdit_->setText(settings.value(QStringLiteral("scan/virtualDataDir")).toString());
+    scanSourceModeCombo_->setCurrentIndex(0);
+    scanDataDirEdit_->clear();
     scanCalibEdit_->clear();
     QString defaultVocabulary;
     {
@@ -820,26 +830,24 @@ void MainWindow::createScanControl() {
         const QStringList vocabFiles = appDir.entryList(QStringList() << QStringLiteral("*.yml.gz"), QDir::Files, QDir::Name);
         if (!vocabFiles.isEmpty()) defaultVocabulary = appDir.filePath(vocabFiles.first());
     }
-    scanVocabEdit_->setText(settings.value(QStringLiteral("scan/vocabularyPath"), defaultVocabulary).toString());
-    scanMaxFramesSpin_->setValue(settings.value(QStringLiteral("scan/maxFrames"), 2000).toInt());
-    if (liveOptimizationCheck_)
-        liveOptimizationCheck_->setChecked(settings.value(QStringLiteral("scan/liveOptimizationEnabled"), true).toBool());
-    const QString defaultJson = defaultCameraModelJsonPath();
-    cameraModelJsonEdit_->setText(settings.value(QStringLiteral("scan/cameraModelJson"), defaultJson).toString());
+    scanVocabEdit_->setText(defaultVocabulary);
+    scanMaxFramesSpin_->setValue(2000);
+    if (liveOptimizationCheck_) liveOptimizationCheck_->setChecked(true);
+    cameraModelJsonEdit_->setText(defaultCameraModelJsonPath());
     {
         QString jsonError;
         const auto calibration = loadCalibrationPath(cameraModelJsonEdit_->text().trimmed(), &jsonError);
         if (!calibration.isEmpty()) scanCalibEdit_->setText(calibration);
     }
-    cameraAExposureSpin_->setValue(settings.value(QStringLiteral("scan/cameraAExposure"), -6.0).toDouble());
-    cameraBExposureSpin_->setValue(settings.value(QStringLiteral("scan/cameraBExposure"), -6.0).toDouble());
-    const double savedBacklightA = settings.value(QStringLiteral("scan/cameraABacklight"), 10.0).toDouble();
-    const double savedBacklightB = settings.value(QStringLiteral("scan/cameraBBacklight"), 10.0).toDouble();
-    cameraABacklightSpin_->setValue(savedBacklightA);
-    cameraABacklightSlider_->setValue(int(std::lround(savedBacklightA)));
-    cameraBBacklightSpin_->setValue(savedBacklightB);
-    cameraBBacklightSlider_->setValue(int(std::lround(savedBacklightB)));
-    cameraSyncToleranceSpin_->setValue(settings.value(QStringLiteral("scan/cameraSyncToleranceMs"), 50.0).toDouble());
+    cameraAExposureSpin_->setValue(-6.0);
+    cameraBExposureSpin_->setValue(-6.0);
+    cameraABacklightSpin_->setValue(25.0);
+    cameraABacklightSlider_->setValue(25);
+    cameraBBacklightSpin_->setValue(25.0);
+    cameraBBacklightSlider_->setValue(25);
+    cameraSyncToleranceSpin_->setValue(50.0);
+    if (rawDataDirEdit_)
+        rawDataDirEdit_->setText(QDir(QCoreApplication::applicationDirPath()).filePath(QStringLiteral("scan_raw")));
     if (scanSourceModeCombo_->currentData().toInt() == int(ScanSourceMode::Virtual) &&
         !scanDataDirEdit_->text().trimmed().isEmpty()) {
         scanCalibEdit_->setText(QDir(scanDataDirEdit_->text().trimmed()).filePath(QStringLiteral("calib.txt")));
@@ -868,6 +876,11 @@ void MainWindow::createScanControl() {
             }
             refreshCameras();
         }
+    });
+    connect(recordRawDataCheck_, &QCheckBox::toggled, this, [this](bool enabled) {
+        if (rawDataDirEdit_)
+            rawDataDirEdit_->setEnabled(enabled && scanSourceModeCombo_ &&
+                scanSourceModeCombo_->currentData().toInt() == int(ScanSourceMode::Camera));
     });
     connect(cameraModelJsonEdit_, &QLineEdit::editingFinished, this, [this] {
         if (!scanSourceModeCombo_ || !scanCalibEdit_ || !cameraModelJsonEdit_) return;
@@ -922,27 +935,24 @@ void MainWindow::createScanControl() {
     });
 
     connect(scanStartButton_, &QPushButton::clicked, this, [this] {
-        const ScanUiConfig cfg = scanConfigFromUi();
-        QSettings settings;
-        settings.setValue(QStringLiteral("scan/sourceMode"), int(cfg.sourceMode));
-        settings.setValue(QStringLiteral("scan/virtualDataDir"), cfg.dataDir);
-        settings.setValue(QStringLiteral("scan/vocabularyPath"), QString::fromStdString(cfg.engine.vocabularyPath));
-        settings.setValue(QStringLiteral("scan/maxFrames"), cfg.engine.maxFrames);
-        settings.setValue(QStringLiteral("scan/liveOptimizationEnabled"), cfg.liveOptimizationEnabled);
-        settings.setValue(QStringLiteral("scan/cameraModelJson"), cfg.cameraModelJsonPath);
-        settings.setValue(QStringLiteral("scan/cameraADeviceId"), cfg.cameraADeviceId);
-        settings.setValue(QStringLiteral("scan/cameraBDeviceId"), cfg.cameraBDeviceId);
-        settings.setValue(QStringLiteral("scan/cameraAExposure"), cfg.cameras.cameraA.exposure);
-        settings.setValue(QStringLiteral("scan/cameraBExposure"), cfg.cameras.cameraB.exposure);
-        settings.setValue(QStringLiteral("scan/cameraABacklight"), cfg.cameras.cameraA.backlight);
-        settings.setValue(QStringLiteral("scan/cameraBBacklight"), cfg.cameras.cameraB.backlight);
-        settings.setValue(QStringLiteral("scan/cameraSyncToleranceMs"), cfg.cameras.syncToleranceMs);
-        // Production-camera calibration is persisted in camera_models.json, not QSettings.
-        // Virtual mode always derives <dataDir>/calib.txt and must never overwrite this path.
+        ScanUiConfig cfg = scanConfigFromUi();
+        // Virtual mode always derives <dataDir>/calib.txt. Camera mode keeps the
+        // last calibration path in camera_models.json.
         if (cfg.sourceMode == ScanSourceMode::Camera && !cfg.cameraModelJsonPath.isEmpty()) {
             QString saveError;
             if (!saveCalibrationPath(cfg.cameraModelJsonPath, QString::fromStdString(cfg.engine.calibrationPath), &saveError) && !saveError.isEmpty())
                 statusBar()->showMessage(saveError);
+        }
+        if (cfg.sourceMode == ScanSourceMode::Camera && cfg.recordRawData && cfg.rawDataDir.isEmpty()) {
+            statusBar()->showMessage(QString::fromUtf8("请选择原始扫描保存目录"), 8000);
+            return;
+        }
+        if (cfg.sourceMode == ScanSourceMode::Camera && cfg.recordRawData) {
+            const QString sessionName = QStringLiteral("scan_%1").arg(
+                QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd_HHmmss_zzz")));
+            cfg.rawDataDir = QDir(cfg.rawDataDir).filePath(sessionName);
+            cfg.cameras.rawDataDirectory = cfg.rawDataDir.toStdString();
+            statusBar()->showMessage(QString::fromUtf8("原始数据保存到：%1").arg(cfg.rawDataDir), 8000);
         }
         removeScanModelListEntry();
         latestMarkerFrame_ = JMEngine::ScanMarkerFrame{};
@@ -1185,34 +1195,29 @@ MainWindow::ScanUiConfig MainWindow::scanConfigFromUi() const {
     cfg.engine.maxInflightFrames = 2;
     // Live preview is bounded but must represent the whole scan. PointCloudWidget compacts
     // old preview samples when this budget is reached instead of dropping all later frames.
-    cfg.engine.previewPointsPerFrame = 5000;
+    cfg.engine.previewPointsPerFrame = 300;
     cfg.previewPointLimit = 20000000;
     cfg.engine.previewPointLimit = cfg.previewPointLimit;
     cfg.engine.offlineVoxel = 3.0;
     cfg.engine.offlineIterations = 30;
     cfg.liveOptimizationEnabled = liveOptimizationCheck_ ? liveOptimizationCheck_->isChecked() : true;
     cfg.cameraModelJsonPath = cameraModelJsonEdit_ ? cameraModelJsonEdit_->text().trimmed() : QString{};
+    cfg.recordRawData = recordRawDataCheck_ && recordRawDataCheck_->isChecked();
+    cfg.rawDataDir = rawDataDirEdit_ ? rawDataDirEdit_->text().trimmed() : QString{};
     cfg.cameraADeviceId = cameraACombo_ ? cameraACombo_->currentData().toString() : QString{};
     cfg.cameraBDeviceId = cameraBCombo_ ? cameraBCombo_->currentData().toString() : QString{};
     cfg.cameras.cameraA.exposure = cameraAExposureSpin_ ? cameraAExposureSpin_->value() : -6.0;
     cfg.cameras.cameraB.exposure = cameraBExposureSpin_ ? cameraBExposureSpin_->value() : -6.0;
-    // Backlight UI is hidden.  The first camera open must use the model default from
-    // camera_models.json, not a stale QSettings value (for example 10 while JSON says 25).
-    auto modelBacklightDefault = [this](QComboBox* combo, double fallback) {
-        if (!combo) return fallback;
-        const QString id = combo->currentData().toString();
-        for (const auto& d : cameraInfos_) {
-            if (d.deviceId == id) return d.backlight.defaultValue;
-        }
-        return fallback;
-    };
-    cfg.cameras.cameraA.backlight = modelBacklightDefault(cameraACombo_, 10.0);
-    cfg.cameras.cameraB.backlight = modelBacklightDefault(cameraBCombo_, 10.0);
+    cfg.cameras.cameraA.backlight = cameraABacklightSpin_ ? cameraABacklightSpin_->value() : 25.0;
+    cfg.cameras.cameraB.backlight = cameraBBacklightSpin_ ? cameraBBacklightSpin_->value() : 25.0;
     cfg.cameras.syncToleranceMs = cameraSyncToleranceSpin_ ? cameraSyncToleranceSpin_->value() : 50.0;
     cfg.cameras.queueDepth = 3;
+    cfg.cameras.recordRawData = cfg.sourceMode == ScanSourceMode::Camera && cfg.recordRawData;
+    cfg.cameras.rawDataDirectory = cfg.rawDataDir.toStdString();
+    cfg.cameras.calibrationPath = cfg.engine.calibrationPath;
     auto applyCamera = [this](const QString& id, JMEngine::CameraDeviceConfig& out) {
         for (const auto& d : cameraInfos_) if (d.deviceId == id) {
-            out.index = d.cvIndex; out.width = d.width; out.height = d.height; out.fps = int(std::lround(d.fps)); return;
+            out.index = d.cvIndex; out.width = d.width; out.height = d.height; out.fps = int(std::lround(d.fps)); out.fourcc = d.fourcc.toStdString(); return;
         }
     };
     applyCamera(cfg.cameraADeviceId, cfg.cameras.cameraA);
@@ -1270,9 +1275,9 @@ void MainWindow::refreshCameras() {
                                  exposure.value(QStringLiteral("default")).toDouble(-6.0)};
                 const auto backlight = profile.value(QStringLiteral("backlight")).toObject();
                 info.backlight = {backlight.value(QStringLiteral("min")).toDouble(0.0),
-                                  backlight.value(QStringLiteral("max")).toDouble(10.0),
+                                  backlight.value(QStringLiteral("max")).toDouble(25.0),
                                   backlight.value(QStringLiteral("step")).toDouble(1.0),
-                                  backlight.value(QStringLiteral("default")).toDouble(10.0)};
+                                  backlight.value(QStringLiteral("default")).toDouble(25.0)};
                 break;
             }
             devices.push_back(std::move(info));
@@ -1281,9 +1286,8 @@ void MainWindow::refreshCameras() {
         if (!self) return;
         QMetaObject::invokeMethod(self, [self, devices = std::move(devices), error] {
             if (!self) return;
-            QSettings settings;
-            const QString previousA = settings.value(QStringLiteral("scan/cameraADeviceId")).toString();
-            const QString previousB = settings.value(QStringLiteral("scan/cameraBDeviceId")).toString();
+            const QString previousA = self->cameraACombo_ ? self->cameraACombo_->currentData().toString() : QString{};
+            const QString previousB = self->cameraBCombo_ ? self->cameraBCombo_->currentData().toString() : QString{};
             self->cameraInfos_ = devices;
             self->cameraACombo_->clear(); self->cameraBCombo_->clear();
             int indexA = -1, indexB = -1;
@@ -1316,8 +1320,7 @@ void MainWindow::updateCameraSelectionUi() {
             const QSignalBlocker blocker(exposure);
             exposure->setRange(d.exposure.minimum, d.exposure.maximum);
             exposure->setSingleStep(d.exposure.step);
-            if (exposure->value() < d.exposure.minimum || exposure->value() > d.exposure.maximum)
-                exposure->setValue(d.exposure.defaultValue);
+            exposure->setValue(d.exposure.defaultValue);
             const QSignalBlocker sliderBlock(slider);
             slider->setRange(int(std::lround(d.exposure.minimum)), int(std::lround(d.exposure.maximum)));
             slider->setSingleStep(std::max(1, int(std::lround(d.exposure.step))));
@@ -1340,8 +1343,6 @@ void MainWindow::updateCameraSelectionUi() {
             spin->setRange(d.backlight.minimum, d.backlight.maximum);
             spin->setSingleStep(d.backlight.step);
             slider->setRange(int(std::lround(d.backlight.minimum)), int(std::lround(d.backlight.maximum)));
-            // Backlight is not exposed in the normal UI.  When a model is selected,
-            // synchronize the hidden control state with the VID/PID JSON default.
             spin->setValue(d.backlight.defaultValue);
             slider->setValue(int(std::lround(d.backlight.defaultValue)));
             return;
@@ -1373,6 +1374,8 @@ void MainWindow::applyScanSourceUi() {
     if (cameraBBacklightSlider_) cameraBBacklightSlider_->setEnabled(cameraMode);
     if (cameraBBacklightSpin_) cameraBBacklightSpin_->setEnabled(cameraMode);
     if (cameraSyncToleranceSpin_) cameraSyncToleranceSpin_->setEnabled(cameraMode);
+    if (recordRawDataCheck_) recordRawDataCheck_->setEnabled(cameraMode);
+    if (rawDataDirEdit_) rawDataDirEdit_->setEnabled(cameraMode && recordRawDataCheck_ && recordRawDataCheck_->isChecked());
 }
 
 void MainWindow::applyScanState(JMEngine::ScanState state) {
@@ -1425,6 +1428,8 @@ void MainWindow::applyScanState(JMEngine::ScanState state) {
         if (cameraACombo_) cameraACombo_->setEnabled(false);
         if (cameraBCombo_) cameraBCombo_->setEnabled(false);
         if (cameraSyncToleranceSpin_) cameraSyncToleranceSpin_->setEnabled(false);
+        if (recordRawDataCheck_) recordRawDataCheck_->setEnabled(false);
+        if (rawDataDirEdit_) rawDataDirEdit_->setEnabled(false);
         // Exposure remains editable during camera scanning; setter is posted to camera worker threads.
         const bool cameraScanning = scanning && scanSourceModeCombo_ &&
                                     scanSourceModeCombo_->currentData().toInt() == int(ScanSourceMode::Camera);

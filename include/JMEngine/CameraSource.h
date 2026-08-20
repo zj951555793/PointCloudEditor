@@ -22,6 +22,7 @@ struct CameraDeviceConfig {
     int width{1920};
     int height{1200};
     int fps{10};
+    std::string fourcc{"MJPG"};
     double exposure{-6.0};
     double backlight{25.0};
 };
@@ -31,6 +32,9 @@ struct DualCameraConfig {
     CameraDeviceConfig cameraB;
     double syncToleranceMs{50.0};
     int queueDepth{3};
+    bool recordRawData{false};
+    std::string rawDataDirectory;
+    std::string calibrationPath;
 };
 
 class ICameraSource {
