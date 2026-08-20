@@ -1101,8 +1101,7 @@ void MainWindow::createScanControl() {
             viewPose.trackingOk = trackingOk;
             viewPose.frameId = frameId;
             if (view_) {
-                view_->updateScanCameraPose(viewPose);
-                if (activeScanConfig_.sourceMode == ScanSourceMode::Virtual)
+                view_->updateScanCameraPose(viewPose);                 
                     view_->requestScanRenderFrame();
             }
 
@@ -1167,7 +1166,7 @@ void MainWindow::createScanControl() {
         cameraPreviewLabel_->show();
         cameraPreviewLabel_->raise();
         updateCameraPreviewGeometry();
-        if (view_) view_->requestScanRenderFrame();
+ 
         }, Qt::QueuedConnection);
     });
 
