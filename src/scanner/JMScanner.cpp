@@ -71,6 +71,18 @@ class JMScanner::Impl {
             callback(frame);
     }
 
+    void publishPoseUpdates(std::vector<FramePoseUpdate> updates) {
+        if (updates.empty())
+            return;
+        PoseUpdateCallback callback;
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            callback = poseUpdateCallback;
+        }
+        if (callback)
+            callback(std::move(updates));
+    }
+
     void run() {
         using Clock = std::chrono::steady_clock;
         CameraFrame frame;
@@ -114,6 +126,7 @@ class JMScanner::Impl {
     MessageCallback messageCallback;
     ProgressCallback progressCallback;
     MarkerCallback markerCallback;
+    PoseUpdateCallback poseUpdateCallback;
     std::function<void(std::shared_ptr<std::vector<std::uint8_t>>, int, int)>
         previewCallback;
     std::unique_ptr<ICameraSource> source;
@@ -144,6 +157,10 @@ bool JMScanner::initialize(const ScanConfig& config) {
     impl_->backend->setMarkerCallback(
         [implementation = impl_.get()](const ScanMarkerFrame& frame) {
             implementation->publishMarkers(frame);
+        });
+    impl_->backend->setPoseUpdateCallback(
+        [implementation = impl_.get()](std::vector<FramePoseUpdate> updates) {
+            implementation->publishPoseUpdates(std::move(updates));
         });
 
     std::string error;
@@ -428,6 +445,11 @@ void JMScanner::setProgressCallback(ProgressCallback callback) {
 void JMScanner::setMarkerCallback(MarkerCallback callback) {
     std::lock_guard<std::mutex> lock(impl_->mutex);
     impl_->markerCallback = std::move(callback);
+}
+
+void JMScanner::setPoseUpdateCallback(PoseUpdateCallback callback) {
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    impl_->poseUpdateCallback = std::move(callback);
 }
 
 } // namespace JMEngine

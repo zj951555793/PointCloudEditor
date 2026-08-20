@@ -364,21 +364,30 @@ class PointCloudWidget final : public QOpenGLWidget, protected QOpenGLExtraFunct
     std::optional<JMEngine::Vec3f> pickActiveWorldPoint(const QPoint& pos);
     void handleUtilityClick(const QPoint& pos);
     QPoint toPhysical(const QPointF& p) const;
-    void upsertScanStatusLayer(QString& path, const QString& fileName,
-                               const std::shared_ptr<std::vector<JMEngine::Point>>& points,
-                               std::uint32_t rgba);
-    void clearScanStatusLayer(QString& path);
+    struct ScanStatusGpu {
+        GLuint vbo[2]{0, 0};
+        std::size_t capacity[2]{0, 0};
+        int front{0};
+        GLsizei count{0};
+        bool visible{false};
+        bool dirty{false};
+        std::shared_ptr<std::vector<JMEngine::Point>> pending;
+        std::vector<JMEngine::Vec3f> staging;
+    };
+    void uploadScanStatusFrame(ScanStatusGpu& layer);
+    void drawScanStatusOverlays();
+    void destroyScanStatusGpu();
     void advanceScanCameraFollow();
 
   private:
     std::vector<std::unique_ptr<Model>> models_;
     std::vector<QString> loadingPaths_;
     QString scanPreviewPath_;
-    QString currentScanFramePath_;
     std::shared_ptr<std::vector<JMEngine::Point>> currentScanFrameSource_;
     bool currentScanFrameTrackingOk_{false};
-    QString recoveryScanFramePath_;
     std::shared_ptr<std::vector<JMEngine::Point>> recoveryScanFrameSource_;
+    ScanStatusGpu currentScanGpu_;
+    ScanStatusGpu recoveryScanGpu_;
     std::size_t scanPreviewPointLimit_{2000000};
     // 实时扫描默认跟随最新一帧扫描区域。第一帧自动 fit，后续只平滑移动
     // camera target，不扫描整个累计点云，也不改变用户当前观察方向。
@@ -407,6 +416,7 @@ class PointCloudWidget final : public QOpenGLWidget, protected QOpenGLExtraFunct
 
     QOpenGLShaderProgram pointProgram_;
     QOpenGLShaderProgram meshProgram_;
+    QOpenGLShaderProgram scanStatusProgram_;
     QOpenGLShaderProgram pointPickProgram_;
     QOpenGLShaderProgram meshPickProgram_;
 

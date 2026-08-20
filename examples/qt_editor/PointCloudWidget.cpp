@@ -829,6 +829,7 @@ PointCloudWidget::~PointCloudWidget() {
     makeCurrent();
     for (auto& m : models_)
         destroyModelGl(*m);
+    destroyScanStatusGpu();
     destroyPickingFramebuffer();
     doneCurrent();
 }
@@ -1226,123 +1227,132 @@ void PointCloudWidget::updateScanFramePoses(const std::shared_ptr<std::vector<Li
     // Repaint is requested once by the unified SLAM-frame dispatch in MainWindow.
 }
 
-void PointCloudWidget::upsertScanStatusLayer(
-    QString& path,
-    const QString& fileName,
-    const std::shared_ptr<std::vector<JMEngine::Point>>& points,
-    std::uint32_t rgba) {
+void PointCloudWidget::uploadScanStatusFrame(ScanStatusGpu& layer) {
+    if (!layer.dirty)
+        return;
+
+    auto points = std::move(layer.pending);
+    layer.pending.reset();
+    layer.dirty = false;
+
     if (!points || points->empty()) {
-        clearScanStatusLayer(path);
-        return;
-    }
-    if (path.isEmpty())
-        path = QDir(QDir::tempPath()).absoluteFilePath(fileName);
-
-    JMEngine::PointCloud::Container colored;
-    colored.reserve(points->size());
-    for (const auto& src : *points) {
-        auto p = src;
-        p.rgba = rgba;
-        colored.push_back(p);
-    }
-    auto cloud = std::make_shared<JMEngine::PointCloud>(std::move(colored));
-
-    int index = findModel(path);
-    if (index < 0) {
-        JMEngine::ObjMeshData emptyMesh;
-        auto model = std::make_unique<Model>(path, cloud, std::move(emptyMesh), false);
-        model->displayMode = DisplayMode::Points;
-        model->gpuReservedPointCapacity = cloud->size();
-        model->selectionMask.assign(cloud->size(), 0u);
-        models_.push_back(std::move(model));
+        layer.count = 0;
+        layer.visible = false;
         return;
     }
 
-    auto& model = *models_[static_cast<std::size_t>(index)];
-    if (model.glCreated && cloud->size() > model.gpuReservedPointCapacity) {
-        makeCurrent();
-        destroyModelGl(model);
-        doneCurrent();
+    const int back = 1 - layer.front;
+    if (!layer.vbo[back])
+        glGenBuffers(1, &layer.vbo[back]);
+
+    const std::size_t count = points->size();
+    const std::size_t bytes = count * sizeof(JMEngine::Vec3f);
+    layer.staging.resize(count);
+    for (std::size_t i = 0; i < count; ++i)
+        layer.staging[i] = (*points)[i].position;
+
+    glBindBuffer(GL_ARRAY_BUFFER, layer.vbo[back]);
+    if (layer.capacity[back] < count) {
+        layer.capacity[back] = std::max(count, std::max<std::size_t>(1024, layer.capacity[back] * 2u));
+        glBufferData(GL_ARRAY_BUFFER,
+                     static_cast<GLsizeiptr>(layer.capacity[back] * sizeof(JMEngine::Vec3f)),
+                     nullptr, GL_STREAM_DRAW);
+    } else {
+        glBufferData(GL_ARRAY_BUFFER,
+                     static_cast<GLsizeiptr>(layer.capacity[back] * sizeof(JMEngine::Vec3f)),
+                     nullptr, GL_STREAM_DRAW);
     }
-    model.cloud = cloud;
-    model.editor.setPointCloud(cloud);
-    model.mesh.reset();
-    model.meshMode = false;
-    model.displayMode = DisplayMode::Points;
-    model.selectionMask.assign(cloud->size(), 0u);
-    model.selectedIds.clear();
-    model.selectedTriangleIds.clear();
-    model.uploadPointCursor = 0;
-    model.uploadIndexCursor = 0;
-    model.drawPointCount = 0;
-    model.gpuReservedPointCapacity = std::max(model.gpuReservedPointCapacity, cloud->size());
-    model.pickBlocks.clear();
-    model.pickGridIds.clear();
-    model.pickIndexedCloud = nullptr;
-    model.pickIndexedPointCount = 0;
+    glBufferSubData(GL_ARRAY_BUFFER, 0, static_cast<GLsizeiptr>(bytes), layer.staging.data());
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+
+    layer.front = back;
+    layer.count = static_cast<GLsizei>(count);
+    layer.visible = true;
 }
 
-void PointCloudWidget::clearScanStatusLayer(QString& path) {
-    if (path.isEmpty()) return;
-    const int index = findModel(path);
-    if (index >= 0) {
-        makeCurrent();
-        destroyModelGl(*models_[static_cast<std::size_t>(index)]);
-        doneCurrent();
-        models_.erase(models_.begin() + index);
-        if (activeModelIndex_ > index) --activeModelIndex_;
-        if (models_.empty()) activeModelIndex_ = -1;
-        else if (activeModelIndex_ >= int(models_.size())) activeModelIndex_ = int(models_.size()) - 1;
+void PointCloudWidget::drawScanStatusOverlays() {
+    if (!scanStatusProgram_.isLinked())
+        return;
+
+    auto drawLayer = [this](const ScanStatusGpu& layer, const QVector4D& color) {
+        if (!layer.visible || layer.count <= 0 || !layer.vbo[layer.front])
+            return;
+        scanStatusProgram_.setUniformValue("uColor", color);
+        glBindBuffer(GL_ARRAY_BUFFER, layer.vbo[layer.front]);
+        glEnableVertexAttribArray(0);
+        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(JMEngine::Vec3f), nullptr);
+        glDrawArrays(GL_POINTS, 0, layer.count);
+        glDisableVertexAttribArray(0);
+    };
+
+    scanStatusProgram_.bind();
+    const auto mvp = currentMvp();
+    scanStatusProgram_.setUniformValue("uMVP", QMatrix4x4(mvp.m.data()).transposed());
+    scanStatusProgram_.setUniformValue("uPointSize", 3.0f * float(devicePixelRatioF()));
+    glDepthFunc(GL_LEQUAL);
+    drawLayer(recoveryScanGpu_, QVector4D(1.0f, 1.0f, 0.0f, 1.0f));
+    drawLayer(currentScanGpu_, QVector4D(0.0f, 1.0f, 0.0f, 1.0f));
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    glDepthFunc(GL_LESS);
+    scanStatusProgram_.release();
+}
+
+void PointCloudWidget::destroyScanStatusGpu() {
+    for (auto* layer : {&currentScanGpu_, &recoveryScanGpu_}) {
+        glDeleteBuffers(2, layer->vbo);
+        layer->vbo[0] = layer->vbo[1] = 0;
+        layer->capacity[0] = layer->capacity[1] = 0;
+        layer->count = 0;
+        layer->visible = false;
+        layer->dirty = false;
+        layer->pending.reset();
+        layer->staging.clear();
+        layer->staging.shrink_to_fit();
     }
-    path.clear();
 }
 
 void PointCloudWidget::setCurrentScanFrame(const std::shared_ptr<std::vector<JMEngine::Point>>& points,
                                            bool trackingOk) {
-    constexpr std::uint32_t kGreen = 0xff00ff00u;
-    constexpr std::uint32_t kYellow = 0xff00ffffu;
-
     if (trackingOk) {
         recoveryScanFrameSource_.reset();
-        clearScanStatusLayer(recoveryScanFramePath_);
+        recoveryScanGpu_.pending.reset();
+        recoveryScanGpu_.dirty = false;
+        recoveryScanGpu_.count = 0;
+        recoveryScanGpu_.visible = false;
+
         currentScanFrameSource_ = points;
         currentScanFrameTrackingOk_ = true;
-        if (points && !points->empty())
-            upsertScanStatusLayer(currentScanFramePath_, QStringLiteral("JMEngine_current_scan_frame.ply"), points, kGreen);
-        else
-            clearScanStatusLayer(currentScanFramePath_);
+        currentScanGpu_.pending = points;
+        currentScanGpu_.dirty = true;
         return;
     }
 
     if (!recoveryScanFrameSource_ && currentScanFrameSource_ && currentScanFrameTrackingOk_) {
         recoveryScanFrameSource_ = currentScanFrameSource_;
-        upsertScanStatusLayer(recoveryScanFramePath_, QStringLiteral("JMEngine_recovery_reference_frame.ply"),
-                              recoveryScanFrameSource_, kYellow);
+        recoveryScanGpu_.pending = recoveryScanFrameSource_;
+        recoveryScanGpu_.dirty = true;
     }
+
     currentScanFrameSource_ = points;
     currentScanFrameTrackingOk_ = false;
-    if (points && !points->empty())
-        upsertScanStatusLayer(currentScanFramePath_, QStringLiteral("JMEngine_current_scan_frame.ply"), points, kGreen);
-    else
-        clearScanStatusLayer(currentScanFramePath_);
+    currentScanGpu_.pending = points;
+    currentScanGpu_.dirty = true;
 }
 
 void PointCloudWidget::finalizeCurrentScanFrame() {
     currentScanFrameSource_.reset();
     currentScanFrameTrackingOk_ = false;
     recoveryScanFrameSource_.reset();
-    clearScanStatusLayer(currentScanFramePath_);
-    clearScanStatusLayer(recoveryScanFramePath_);
+    currentScanGpu_.pending.reset();
+    recoveryScanGpu_.pending.reset();
+    currentScanGpu_.dirty = recoveryScanGpu_.dirty = false;
+    currentScanGpu_.count = recoveryScanGpu_.count = 0;
+    currentScanGpu_.visible = recoveryScanGpu_.visible = false;
     update();
 }
 
 void PointCloudWidget::clearCurrentScanFrame() {
-    currentScanFrameSource_.reset();
-    currentScanFrameTrackingOk_ = false;
-    recoveryScanFrameSource_.reset();
-    clearScanStatusLayer(currentScanFramePath_);
-    clearScanStatusLayer(recoveryScanFramePath_);
-    update();
+    finalizeCurrentScanFrame();
 }
 
 void PointCloudWidget::updateScanCameraPose(const ScanCameraViewPose& pose) {
@@ -1698,6 +1708,47 @@ bool PointCloudWidget::createPrograms() {
     if (!ok1 || !ok2)
         return false;
 
+    const bool gles = QOpenGLContext::currentContext() && QOpenGLContext::currentContext()->isOpenGLES();
+    const char* statusVs = gles ? R"GLSL(#version 310 es
+precision highp float;
+layout(location=0) in vec3 aPosition;
+uniform mat4 uMVP;
+uniform float uPointSize;
+void main() {
+    gl_Position = uMVP * vec4(aPosition, 1.0);
+    gl_PointSize = uPointSize;
+}
+)GLSL" : R"GLSL(#version 120
+attribute vec3 aPosition;
+uniform mat4 uMVP;
+uniform float uPointSize;
+void main() {
+    gl_Position = uMVP * vec4(aPosition, 1.0);
+    gl_PointSize = uPointSize;
+}
+)GLSL";
+    const char* statusFs = gles ? R"GLSL(#version 310 es
+precision highp float;
+uniform vec4 uColor;
+layout(location=0) out vec4 outColor;
+void main() {
+    vec2 q = gl_PointCoord * 2.0 - vec2(1.0);
+    if (dot(q, q) > 1.0) discard;
+    outColor = uColor;
+}
+)GLSL" : R"GLSL(#version 120
+uniform vec4 uColor;
+void main() {
+    vec2 q = gl_PointCoord * 2.0 - vec2(1.0);
+    if (dot(q, q) > 1.0) discard;
+    gl_FragColor = uColor;
+}
+)GLSL";
+    const bool statusOk = build(scanStatusProgram_, statusVs, statusFs,
+                                [](auto& p) { p.bindAttributeLocation("aPosition", 0); });
+    if (!statusOk)
+        return false;
+
     // GPU Picking 是可选能力。Desktop 只使用 OpenGL 3.2+ / GLSL 150 / R32UI 现代路径。
     // Context 或 shader/FBO 不满足时不影响正常渲染，选择自动回退 CPU。
     if (!backend_->gpuPickingSupported())
@@ -2014,9 +2065,6 @@ void PointCloudWidget::uploadLiveBackIncremental(Model& m, std::size_t& budget) 
 }
 
 void PointCloudWidget::uploadModelIncremental(Model& m, std::size_t& budget) {
-    QElapsedTimer uploadPerf; uploadPerf.start();
-    const std::size_t budgetBefore = budget;
-    const std::size_t cursorBefore = m.uploadPointCursor;
     if (!m.cloud)
         return;
     if (!m.glCreated)
@@ -2104,26 +2152,10 @@ void PointCloudWidget::uploadModelIncremental(Model& m, std::size_t& budget) {
         m.meshUploadComplete = verticesComplete && indicesComplete;
         m.drawIndexCount = m.meshUploadComplete ? static_cast<GLsizei>(indices.size()) : 0;
     }
-    const double uploadMs = double(uploadPerf.nsecsElapsed()) / 1000000.0;
-    const std::size_t uploadedPts = m.uploadPointCursor >= cursorBefore ? m.uploadPointCursor - cursorBefore : 0u;
-    if (uploadMs > 5.0) {
-        qInfo().noquote() << QStringLiteral("[SCAN STALL][GPU UPLOAD] pts=%1 bytes=%2 time=%3ms pending=%4")
-            .arg(qulonglong(uploadedPts))
-            .arg(qulonglong(budgetBefore - budget))
-            .arg(uploadMs, 0, 'f', 2)
-            .arg(qulonglong(m.cloud->size() > m.uploadPointCursor ? m.cloud->size() - m.uploadPointCursor : 0u));
-    }
 
 }
 
 void PointCloudWidget::paintGL() {
-    static QElapsedTimer renderGapClock;
-    static bool renderGapStarted = false;
-    double renderGapMs = 0.0;
-    if (!renderGapStarted) { renderGapClock.start(); renderGapStarted = true; }
-    else { renderGapMs = double(renderGapClock.restart()); }
-    QElapsedTimer paintPerf;
-    paintPerf.start();
     if (!renderReady_) {
         QPainter painter(this);
         painter.fillRect(rect(), QColor(12, 12, 14));
@@ -2158,12 +2190,15 @@ void PointCloudWidget::paintGL() {
     // Live scan frames contain local tails only. Both source types use the same
     // incremental upload policy and byte budget.
     // One uploader and one byte budget for both real and virtual scanning.
-    std::size_t budget = 12u * 1024u * 1024u;
+    std::size_t budget = 4u * 1024u * 1024u;
     for (auto& m : models_) {
         uploadModelIncremental(*m, budget);
         uploadLiveBackIncremental(*m, budget);
     }
+    uploadScanStatusFrame(recoveryScanGpu_);
+    uploadScanStatusFrame(currentScanGpu_);
     drawScene();
+    drawScanStatusOverlays();
     drawScanCameraOverlay();
     drawGestureOverlay();
     drawUtilityOverlay();
@@ -2173,19 +2208,6 @@ void PointCloudWidget::paintGL() {
         QPainter p(this);
         p.setPen(Qt::white);
         p.drawText(12, 24, statusText_);
-    }
-    static quint64 perfPaintFrames = 0;
-    ++perfPaintFrames;
-    const double paintMs = double(paintPerf.nsecsElapsed()) / 1000000.0;
-    if (renderGapMs > 180.0) {
-        qInfo().noquote() << QStringLiteral("[SCAN STALL][RENDER GAP] gap=%1ms paint=%2ms")
-            .arg(renderGapMs, 0, 'f', 2).arg(paintMs, 0, 'f', 2);
-    }
-    if ((perfPaintFrames % 60u) == 0u || paintMs > 20.0) {
-        qInfo().noquote() << QStringLiteral("[RENDER PERF] frame=%1 paint=%2ms models=%3 unifiedScanRender=1")
-            .arg(qulonglong(perfPaintFrames))
-            .arg(paintMs, 0, 'f', 2)
-            .arg(models_.size());
     }
 
     bool uploading = false;
@@ -2208,15 +2230,8 @@ void PointCloudWidget::drawScene() {
     for (auto& m : models_) {
         if (!m->visible || !m->cloud)
             continue;
-        const bool scanStatusLayer =
-            (!currentScanFramePath_.isEmpty() && m->path == currentScanFramePath_) ||
-            (!recoveryScanFramePath_.isEmpty() && m->path == recoveryScanFramePath_);
-        if (scanStatusLayer)
-            glDepthFunc(GL_LEQUAL); // green current + yellow recovery reference overlay RGB history
         drawModel(*m);
         drawSelectionOverlay(*m);
-        if (scanStatusLayer)
-            glDepthFunc(GL_LESS);
     }
 }
 

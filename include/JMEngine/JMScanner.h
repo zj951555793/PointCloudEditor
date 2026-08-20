@@ -20,6 +20,8 @@ class JMScanner {
     using MessageCallback = std::function<void(const std::string&)>;
     using ProgressCallback = std::function<void(int)>;
     using MarkerCallback = std::function<void(const ScanMarkerFrame&)>;
+    using PoseUpdateCallback =
+        std::function<void(std::vector<FramePoseUpdate>)>;
     using PreviewCallback = std::function<void(
         std::shared_ptr<std::vector<std::uint8_t>>, int, int)>;
 
@@ -56,6 +58,7 @@ class JMScanner {
     void setMessageCallback(MessageCallback callback);
     void setProgressCallback(ProgressCallback callback);
     void setMarkerCallback(MarkerCallback callback);
+    void setPoseUpdateCallback(PoseUpdateCallback callback);
 
   private:
     class Impl;

@@ -1103,6 +1103,25 @@ void MainWindow::createScanControl() {
             }
         }, Qt::QueuedConnection);
     });
+    scanner_->setPoseUpdateCallback(
+        [this](std::vector<JMEngine::FramePoseUpdate> updates) {
+            if (updates.empty())
+                return;
+            auto renderUpdates =
+                std::make_shared<std::vector<PointCloudWidget::LiveFramePoseUpdate>>();
+            renderUpdates->reserve(updates.size());
+            for (const auto& update : updates)
+                renderUpdates->push_back({update.frameId, update.pose.matrix});
+
+            QMetaObject::invokeMethod(
+                this,
+                [this, renderUpdates] {
+                    if (view_ && activeScanConfig_.liveOptimizationEnabled)
+                        view_->updateScanFramePoses(renderUpdates);
+                },
+                Qt::QueuedConnection);
+        });
+
     scanner_->setMarkerCallback([this](const JMEngine::ScanMarkerFrame& frame) {
         QMetaObject::invokeMethod(this, [this, frame] {
         latestMarkerFrame_ = frame;
@@ -1166,7 +1185,7 @@ MainWindow::ScanUiConfig MainWindow::scanConfigFromUi() const {
     cfg.engine.maxInflightFrames = 2;
     // Live preview is bounded but must represent the whole scan. PointCloudWidget compacts
     // old preview samples when this budget is reached instead of dropping all later frames.
-    cfg.engine.previewPointsPerFrame = 300;
+    cfg.engine.previewPointsPerFrame = 1000;
     cfg.previewPointLimit = 20000000;
     cfg.engine.previewPointLimit = cfg.previewPointLimit;
     cfg.engine.offlineVoxel = 3.0;

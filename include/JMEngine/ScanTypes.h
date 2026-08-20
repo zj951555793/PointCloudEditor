@@ -53,6 +53,11 @@ struct Pose {
         0, 0, 0, 1};
 };
 
+struct FramePoseUpdate {
+    int frameId{-1};
+    Pose pose;
+};
+
 // Pixel memory is owned by the frame. Producers may reuse their capture
 // buffers immediately after JMScanner::submit() returns.
 struct CameraFrame {

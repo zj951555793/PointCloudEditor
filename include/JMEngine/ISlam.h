@@ -16,6 +16,8 @@ class ISlam {
         int, const Pose&, std::shared_ptr<PointCloud>,
         std::shared_ptr<PointCloud>, bool)>;
     using MarkerCallback = std::function<void(const ScanMarkerFrame&)>;
+    using PoseUpdateCallback =
+        std::function<void(std::vector<FramePoseUpdate>)>;
 
     virtual ~ISlam() = default;
 
@@ -34,6 +36,7 @@ class ISlam {
     virtual void reset() {}
     virtual void setUpdateCallback(UpdateCallback) {}
     virtual void setMarkerCallback(MarkerCallback) {}
+    virtual void setPoseUpdateCallback(PoseUpdateCallback) {}
     virtual std::vector<TextureKeyframe> takeTextureKeyframes() {
         return {};
     }
