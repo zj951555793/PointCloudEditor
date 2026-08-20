@@ -2809,30 +2809,75 @@ void PointCloudWidget::fitView() {
 }
 void PointCloudWidget::updateOrbitPivotForActiveModel() {
     auto* model = activeModel();
-    if (!model || !model->cloud || model->cloud->empty()) return;
-    bool valid=false;
-    JMEngine::Vec3f mn{},mx{};
-    auto consume=[&](const JMEngine::Point& p){
-        if(p.flags&JMEngine::PointDeleted) return;
-        const auto w=JMEngine::transformPoint(model->modelTransform,p.position);
-        if(!valid){mn=mx=w;valid=true;return;}
-        mn.x=std::min(mn.x,w.x);mn.y=std::min(mn.y,w.y);mn.z=std::min(mn.z,w.z);
-        mx.x=std::max(mx.x,w.x);mx.y=std::max(mx.y,w.y);mx.z=std::max(mx.z,w.z);
-    };
-    if(model->meshMode && model->mesh){
-        const auto& idx=model->mesh->indices();
-        std::unordered_set<std::uint32_t> used;
-        used.reserve(model->mesh->activeTriangleCount()*2u);
-        for(std::size_t i=0;i+2<idx.size();i+=3){
-            if(!model->mesh->triangleActive(static_cast<JMEngine::TriangleId>(i/3u))) continue;
-            used.insert(idx[i]);used.insert(idx[i+1]);used.insert(idx[i+2]);
+    if (!model || !model->cloud || model->cloud->empty())
+        return;
+
+    bool valid = false;
+    JMEngine::Vec3f mn{}, mx{};
+    auto consumeWorld = [&](const JMEngine::Point& p, const JMEngine::Mat4f& world) {
+        if (p.flags & JMEngine::PointDeleted)
+            return;
+        const auto w = JMEngine::transformPoint(world, p.position);
+        if (!valid) {
+            mn = mx = w;
+            valid = true;
+            return;
         }
-        for(auto id:used) if(id<model->cloud->size()) consume(model->cloud->points()[id]);
-    } else for(const auto&p:model->cloud->points()) consume(p);
-    if(!valid) return;
-    camera_.target={(mn.x+mx.x)*0.5f,(mn.y+mx.y)*0.5f,(mn.z+mx.z)*0.5f};
-    const auto d=sub3(mx,mn);
-    camera_.sceneRadius=std::max(0.5f,0.5f*std::sqrt(dot3(d,d)));
+        mn.x = std::min(mn.x, w.x);
+        mn.y = std::min(mn.y, w.y);
+        mn.z = std::min(mn.z, w.z);
+        mx.x = std::max(mx.x, w.x);
+        mx.y = std::max(mx.y, w.y);
+        mx.z = std::max(mx.z, w.z);
+    };
+
+    if (model->liveFramePoseMode && !model->liveFrames.empty()) {
+        const auto& points = model->cloud->points();
+        for (const auto& frame : model->liveFrames) {
+            if (frame.count == 0 || frame.first >= points.size())
+                continue;
+            const std::size_t end = std::min(points.size(), frame.first + frame.count);
+            const auto world = JMEngine::example::multiply(model->modelTransform, frame.pose);
+            for (std::size_t i = frame.first; i < end; ++i)
+                consumeWorld(points[i], world);
+        }
+    } else if (model->meshMode && model->mesh) {
+        const auto& idx = model->mesh->indices();
+        std::unordered_set<std::uint32_t> used;
+        used.reserve(model->mesh->activeTriangleCount() * 2u);
+        for (std::size_t i = 0; i + 2 < idx.size(); i += 3) {
+            if (!model->mesh->triangleActive(static_cast<JMEngine::TriangleId>(i / 3u)))
+                continue;
+            used.insert(idx[i]);
+            used.insert(idx[i + 1]);
+            used.insert(idx[i + 2]);
+        }
+        for (auto id : used) {
+            if (id < model->cloud->size())
+                consumeWorld(model->cloud->points()[id], model->modelTransform);
+        }
+    } else {
+        for (const auto& p : model->cloud->points())
+            consumeWorld(p, model->modelTransform);
+    }
+
+    if (!valid)
+        return;
+
+    camera_.target = {
+        (mn.x + mx.x) * 0.5f,
+        (mn.y + mx.y) * 0.5f,
+        (mn.z + mx.z) * 0.5f
+    };
+    camera_.panNdcX = 0.0f;
+    camera_.panNdcY = 0.0f;
+    const auto d = sub3(mx, mn);
+    camera_.sceneRadius = std::max(0.5f, 0.5f * std::sqrt(dot3(d, d)));
+}
+
+void PointCloudWidget::centerScanOrbitPivot() {
+    updateOrbitPivotForActiveModel();
+    update();
 }
 
 bool PointCloudWidget::fitBasePlaneFromSelection(QString* message) {

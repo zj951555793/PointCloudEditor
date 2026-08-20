@@ -127,8 +127,8 @@ QString scanStateText(JMEngine::ScanState state) {
     case JMEngine::ScanState::Initializing: return QString::fromUtf8("初始化");
     case JMEngine::ScanState::Scanning: return QString::fromUtf8("扫描中");
     case JMEngine::ScanState::Stopping: return QString::fromUtf8("停止中");
-    case JMEngine::ScanState::ReadyForReconstruction: return QString::fromUtf8("可离线重建");
-    case JMEngine::ScanState::Reconstructing: return QString::fromUtf8("离线重建中");
+    case JMEngine::ScanState::ReadyForReconstruction: return QString::fromUtf8("可离线优化");
+    case JMEngine::ScanState::Reconstructing: return QString::fromUtf8("离线优化中");
     case JMEngine::ScanState::Error: return QString::fromUtf8("错误");
     }
     return QString::fromUtf8("未知");
@@ -670,11 +670,11 @@ void MainWindow::createScanControl() {
 
     scanStartButton_ = new QPushButton(QString::fromUtf8("开始"), panel);
     scanStopButton_ = new QPushButton(QString::fromUtf8("结束"), panel);
-    scanOfflineButton_ = new QPushButton(QString::fromUtf8("离线重建"), panel);
+    scanOfflineButton_ = new QPushButton(QString::fromUtf8("离线优化"), panel);
 #ifdef JMENGINE_HAS_TEXTURE_MAPPING
-    scanTextureButton_ = new QPushButton(QString::fromUtf8("纹理映射"), panel);
+    scanTextureButton_ = new QPushButton(QString::fromUtf8("一键处理"), panel);
     scanTextureButton_->setToolTip(QString::fromUtf8(
-        "扫描完成并执行离线重建后使用。若当前结果还是点云，会先自动进行工业泊松重建，再执行纹理映射。"));
+        "扫描完成并执行离线优化后使用。一键处理会在需要时自动进行网格重建，并继续完成纹理映射。"));
     scanTextureFramesLabel_ = new QLabel(QString::fromUtf8("纹理帧：0"), panel);
     scanTextureFramesLabel_->setMinimumWidth(82);
 #endif
@@ -1011,11 +1011,11 @@ void MainWindow::createScanControl() {
     connect(scanTextureButton_, &QPushButton::clicked, this, [this] {
         if (!view_) return;
         scanTextureButton_->setEnabled(false);
-        statusBar()->showMessage(QString::fromUtf8("正在准备扫描网格并执行纹理映射..."));
+        statusBar()->showMessage(QString::fromUtf8("正在一键处理：准备扫描网格并执行纹理映射..."));
         const bool started = view_->startScanTextureMappingAsync(
             JMEngine::texture::Backend::Auto,
             [this](float progress, const QString& stage) {
-                statusBar()->showMessage(QString::fromUtf8("纹理流程 %1%：%2")
+                statusBar()->showMessage(QString::fromUtf8("一键处理 %1%：%2")
                                              .arg(int(std::lround(progress * 100.0f)))
                                              .arg(stage));
             },
@@ -1025,7 +1025,7 @@ void MainWindow::createScanControl() {
                     scanTextureButton_->setEnabled(scanTextureFramesReady_ &&
                         state == JMEngine::ScanState::ReadyForReconstruction);
                 statusBar()->showMessage(message, 12000);
-                if (!ok) QMessageBox::warning(this, QString::fromUtf8("扫描纹理映射"), message);
+                if (!ok) QMessageBox::warning(this, QString::fromUtf8("一键处理"), message);
             });
         if (!started) {
             const auto state = scanner_ ? scanner_->state() : JMEngine::ScanState::Idle;
@@ -1055,7 +1055,7 @@ void MainWindow::createScanControl() {
     });
     scanner_->setProgressCallback([this](int progress) {
         QMetaObject::invokeMethod(this, [this, progress] {
-            statusBar()->showMessage(QString::fromUtf8("离线重建 %1%").arg(progress));
+            statusBar()->showMessage(QString::fromUtf8("离线优化 %1%").arg(progress));
         }, Qt::QueuedConnection);
     });
     scanner_->setFrameCallback([this](int frameId, const JMEngine::Pose& pose,
@@ -1185,7 +1185,7 @@ MainWindow::ScanUiConfig MainWindow::scanConfigFromUi() const {
     cfg.engine.maxInflightFrames = 2;
     // Live preview is bounded but must represent the whole scan. PointCloudWidget compacts
     // old preview samples when this budget is reached instead of dropping all later frames.
-    cfg.engine.previewPointsPerFrame = 1000;
+    cfg.engine.previewPointsPerFrame = 5000;
     cfg.previewPointLimit = 20000000;
     cfg.engine.previewPointLimit = cfg.previewPointLimit;
     cfg.engine.offlineVoxel = 3.0;
@@ -1386,10 +1386,13 @@ void MainWindow::applyScanState(JMEngine::ScanState state) {
         view_->clearScanCameraPose();
         if (state == JMEngine::ScanState::Stopping ||
             state == JMEngine::ScanState::ReadyForReconstruction ||
-            state == JMEngine::ScanState::Reconstructing)
+            state == JMEngine::ScanState::Reconstructing) {
             view_->finalizeCurrentScanFrame();
-        else
+            if (state == JMEngine::ScanState::ReadyForReconstruction)
+                view_->centerScanOrbitPivot();
+        } else {
             view_->clearCurrentScanFrame();
+        }
     }
     if (scanStateLabel_)
         scanStateLabel_->setText(QString::fromUtf8("状态：") + scanStateText(state));

@@ -582,7 +582,7 @@ class TestScanBackend final : public JMEngine::ISlam {
         std::this_thread::sleep_for(std::chrono::milliseconds(2));
         JMEngine::Point p; p.position={float(frame.frameId),0,0};
         cloud_=std::make_shared<JMEngine::PointCloud>(JMEngine::PointCloud::Container{p});
-        //if(update_)update_(frame.frameId,{},cloud_);
+        if(update_) update_(frame.frameId, {}, cloud_, cloud_, true);
         return true;
     }
     JMEngine::Pose pose()const override{return{};}

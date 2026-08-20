@@ -81,6 +81,7 @@ class PointCloudWidget final : public QOpenGLWidget, protected QOpenGLExtraFunct
     // Commit the last valid/recovery reference to RGB history, then remove temporary status layers.
     void finalizeCurrentScanFrame();
     void clearCurrentScanFrame();
+    void centerScanOrbitPivot();
     void replaceScanPreview(const std::shared_ptr<JMEngine::PointCloud>& cloud);
     void updateOptimizedScanPreview(const std::shared_ptr<JMEngine::PointCloud>& cloud);
     void clearScanPreview();
