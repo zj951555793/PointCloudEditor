@@ -51,6 +51,7 @@ ui_*.h
 Thumbs.db
 *.swp
 *.swo
-
+*.lib
+*.dll
 # Test/editor generated output
 *_edited.ply
