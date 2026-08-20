@@ -45,9 +45,8 @@ class JMScanner::Impl {
     }
 
     void publish(int frameId, const Pose& framePose,
-                 std::shared_ptr<PointCloud> frameCloud) {
-        // The backend callback carries only the incremental frame chunk. Keep the public
-        // liveCloud() view pointing at the backend's bounded aggregate without copying it.
+                 std::shared_ptr<PointCloud> frameCloud,
+                 std::shared_ptr<PointCloud> statusCloud, bool trackingOk) {
         const auto aggregate = backend ? backend->cloud() : frameCloud;
         FrameCallback callback;
         {
@@ -58,7 +57,8 @@ class JMScanner::Impl {
             callback = frameCallback;
         }
         if (callback)
-            callback(frameId, framePose, std::move(frameCloud));
+            callback(frameId, framePose, std::move(frameCloud),
+                     std::move(statusCloud), trackingOk);
     }
 
     void publishMarkers(const ScanMarkerFrame& frame) {
@@ -135,8 +135,11 @@ bool JMScanner::initialize(const ScanConfig& config) {
     impl_->setState(ScanState::Initializing);
     impl_->backend->setUpdateCallback(
         [implementation = impl_.get()](int frameId, const Pose& pose,
-                                       std::shared_ptr<PointCloud> cloud) {
-            implementation->publish(frameId, pose, std::move(cloud));
+                                       std::shared_ptr<PointCloud> cloud,
+                                       std::shared_ptr<PointCloud> statusCloud,
+                                       bool trackingOk) {
+            implementation->publish(frameId, pose, std::move(cloud),
+                                    std::move(statusCloud), trackingOk);
         });
     impl_->backend->setMarkerCallback(
         [implementation = impl_.get()](const ScanMarkerFrame& frame) {

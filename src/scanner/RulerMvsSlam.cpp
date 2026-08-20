@@ -30,8 +30,6 @@ namespace JMEngine {
 namespace {
 
 std::uint32_t packBgr(const cv::Vec3b& bgr) {
-    // Keep the pre-refactor RulerMVS contract: OpenCV camera/color data is BGR.
-    // Point::rgba is consumed as R,G,B,A bytes by the renderer.
     return std::uint32_t(bgr[2]) |
            (std::uint32_t(bgr[1]) << 8u) |
            (std::uint32_t(bgr[0]) << 16u) |
@@ -41,6 +39,14 @@ std::uint32_t packBgr(const cv::Vec3b& bgr) {
 float matrixValue(const cv::Mat& matrix, int row, int column) {
     return matrix.type() == CV_32F ? matrix.at<float>(row, column)
                                    : float(matrix.at<double>(row, column));
+}
+
+cv::Point3f transformPoint(const cv::Mat& m, const cv::Point3f& p) {
+    return {
+        matrixValue(m, 0, 0) * p.x + matrixValue(m, 0, 1) * p.y + matrixValue(m, 0, 2) * p.z + matrixValue(m, 0, 3),
+        matrixValue(m, 1, 0) * p.x + matrixValue(m, 1, 1) * p.y + matrixValue(m, 1, 2) * p.z + matrixValue(m, 1, 3),
+        matrixValue(m, 2, 0) * p.x + matrixValue(m, 2, 1) * p.y + matrixValue(m, 2, 2) * p.z + matrixValue(m, 2, 3)
+    };
 }
 
 Pose poseFromCv(const cv::Mat& matrix) {
@@ -75,6 +81,7 @@ class RulerMvsBackend final : public ISlam {
     bool initialize(const ScanConfig& config, std::string* error) override {
         reset();
         config_ = config;
+    
         if (config.calibrationPath.empty() || config.vocabularyPath.empty()) {
             setError(error, "calibrationPath/vocabularyPath is empty");
             return false;
@@ -86,10 +93,6 @@ class RulerMvsBackend final : public ISlam {
             return false;
         }
 
-        // Restore the exact pre-refactor pose basis. RGBDFusion reports its pose in
-        // the calibration/device basis; the live color-camera view uses colorRT as
-        // the base transform. Omitting this step only happened after scanner ownership
-        // moved into JMEngine and makes real-camera stacking differ from dataset mode.
         rulermvs::IOneShot::DevicePara devicePara;
         if (rulermvs::IOneShot::loadDeviceFile(config.calibrationPath, devicePara)) {
             baseRt_ = rulerPoseToCv(devicePara.colorRT);
@@ -105,7 +108,6 @@ class RulerMvsBackend final : public ISlam {
             pendingFrame_.reset();
         }
 
-        // These types match the supplied RulerMVS SDK and OpenCV interfaces.
         oneshot_->getColorCamera(camera_);
         rgbSize_ = cv::Size(camera_.width, camera_.height);
         depthSize_ = rgbSize_ / kDepthScale;
@@ -123,14 +125,12 @@ class RulerMvsBackend final : public ISlam {
 
         vocabulary_.load(config.vocabularyPath);
         database_ = std::make_unique<DBoW3::Database>(vocabulary_, false, 0);
-        std::vector<double> maxDistances{kMaxFeatureDistance};
-        std::vector<int> maxIterations{kFusionMaxIterations};
+        std::vector<double> maxDistances{3.0};
+        std::vector<int> maxIterations{3};
         fusion_ = std::make_unique<rgbdslam::RGBDFusion>(
             depthK_, vocabulary_, *database_, depthSize_.width, depthSize_.height,
             maxDistances.data(), maxIterations.data(), int(maxDistances.size()),
-                 8, 16, true, true);
-
-        //cv::setNumThreads(1);
+            8, 15, true, true);
 
         auto& parameters = fusion_->para();
         parameters.is_use_dbow =
@@ -330,6 +330,7 @@ class RulerMvsBackend final : public ISlam {
             std::lock_guard<std::mutex> lock(mutex_);
             cloud_ = std::make_shared<PointCloud>();
             pose_ = Pose{};
+            lastValidFramePose_.release();
         }
         inflight_.store(0, std::memory_order_release);
     }
@@ -379,14 +380,8 @@ class RulerMvsBackend final : public ISlam {
     }
 
   private:
-    // Keep these values identical to rulermvsPlugin/rulermvsWrap.cpp.
     static constexpr int kDepthScale = 16;
     static constexpr int kRectifyScale = 4;
-    static constexpr double kMaxFeatureDistance = 3.0;
-    static constexpr int kFusionMaxIterations = 3;
-    static constexpr int kFusionThreadPoolSize = 8;
-    static constexpr int kFusionGroupSize = 15;
-    static constexpr bool kFusionUpsampling = true;
 
     static void setError(std::string* error, const std::string& message) {
         if (error)
@@ -447,43 +442,35 @@ class RulerMvsBackend final : public ISlam {
     }
 
     void handleResult(const rgbdslam::IRGBDResult& result) {
-        using Clock = std::chrono::steady_clock;
-        static auto lastResult = Clock::now();
-        const auto resultNow = Clock::now();
-        const double resultGapMs = std::chrono::duration<double, std::milli>(resultNow - lastResult).count();
-        lastResult = resultNow;
-        const auto resultStart = resultNow;
-        if (result.getFlag() != 0)
-            return;
+        const bool trackingOk = result.getFlag() == 0;
+
+        cv::Mat measuredPose = result.getRT();
+        if (!baseRtInv_.empty())
+            measuredPose = baseRtInv_ * measuredPose;
+
+        cv::Mat displayPose = measuredPose;
+        if (trackingOk)
+            lastValidFramePose_ = measuredPose.clone();
+        else if (!lastValidFramePose_.empty())
+            displayPose = lastValidFramePose_;
 
         std::vector<cv::Point3f> points;
         std::vector<cv::Point3f> normals;
         std::vector<cv::Vec3b> colors;
-        const auto toCloudStart = Clock::now();
         result.toCloud(points, normals, colors);
-        const double toCloudMs = std::chrono::duration<double, std::milli>(Clock::now() - toCloudStart).count();
-        cv::Mat transform = result.getRT();
-        if (!baseRtInv_.empty())
-            transform = baseRtInv_ * transform;
 
-        // Keep the pre-refactor live-render contract: publish LOCAL points plus the
-        // frame pose.  The Qt renderer appends each local frame once and applies pose
-        // per draw; historical points are never CPU-transformed/re-uploaded when poses
-        // change.  A separate bounded WORLD aggregate is maintained only for liveCloud().
-        PointCloud::Container localPreview;
-        PointCloud::Container worldPreview;
-        // Match the pre-JMScanner live-preview budget. The old pipeline spread the
-        // total preview budget across the configured scan instead of uploading up to
-        // previewPointsPerFrame on every SLAM result. With the defaults this is about
-        // 250 points/frame instead of 12000 points/frame.
-        const int budgetPerFrame = std::max(
-            250, config_.previewPointLimit / std::max(1, config_.maxFrames));
-        const std::size_t target = std::size_t(std::max(
-            1, std::min(config_.previewPointsPerFrame, budgetPerFrame)));
+        const int budgetPerFrame = std::max(250,
+            config_.previewPointLimit / std::max(1, config_.maxFrames));
+        const std::size_t target = std::size_t(std::max(1,
+            std::min(config_.previewPointsPerFrame, budgetPerFrame)));
         const std::size_t stride = std::max<std::size_t>(1, points.size() / target);
+
+        PointCloud::Container localPreview;
+        PointCloud::Container statusPreview;
         localPreview.reserve(std::min(points.size(), target));
-        worldPreview.reserve(std::min(points.size(), target));
-        for (std::size_t index = 0; index < points.size(); index += stride) {
+        statusPreview.reserve(std::min(points.size(), target));
+
+        for (std::size_t index = 0; index < points.size() && localPreview.size() < target; index += stride) {
             const auto& source = points[index];
             Point local;
             local.position = {source.x, source.y, source.z};
@@ -494,50 +481,27 @@ class RulerMvsBackend final : public ISlam {
             localPreview.push_back(local);
 
             Point world = local;
-            world.position = {
-                matrixValue(transform, 0, 0) * source.x + matrixValue(transform, 0, 1) * source.y +
-                    matrixValue(transform, 0, 2) * source.z + matrixValue(transform, 0, 3),
-                matrixValue(transform, 1, 0) * source.x + matrixValue(transform, 1, 1) * source.y +
-                    matrixValue(transform, 1, 2) * source.z + matrixValue(transform, 1, 3),
-                matrixValue(transform, 2, 0) * source.x + matrixValue(transform, 2, 1) * source.y +
-                    matrixValue(transform, 2, 2) * source.z + matrixValue(transform, 2, 3)};
-            worldPreview.push_back(world);
+            const auto transformed = transformPoint(displayPose, source);
+            world.position = {transformed.x, transformed.y, transformed.z};
+            statusPreview.push_back(world);
         }
 
         auto frameChunk = std::make_shared<PointCloud>(std::move(localPreview));
+        auto statusChunk = std::make_shared<PointCloud>(std::move(statusPreview));
         UpdateCallback callback;
-        Pose currentPose;
+        Pose currentPose = poseFromCv(displayPose);
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            pose_ = poseFromCv(transform);
-            auto& destination = cloud_->points();
-            // Never erase from the beginning of a large vector in the realtime callback.
-            // That O(N) compaction caused periodic stalls once the preview reached its cap.
-            // The per-frame budget above naturally fills the configured total budget; after
-            // that, liveCloud() simply remains capped while the renderer still receives the
-            // newest local frame chunks through updateCallback_.
-            const std::size_t limit =
-                std::size_t(std::max(1, config_.previewPointLimit));
-            if (destination.size() < limit) {
-                const std::size_t remaining = limit - destination.size();
-                const std::size_t appendCount = std::min(remaining, worldPreview.size());
-                destination.insert(destination.end(), worldPreview.begin(),
-                                   worldPreview.begin() + static_cast<std::ptrdiff_t>(appendCount));
-            }
-            currentPose = pose_;
+            pose_ = currentPose;
+            if (trackingOk)
+                cloud_ = frameChunk;
             callback = updateCallback_;
         }
-        const auto callbackStart = Clock::now();
+
         if (callback)
-            callback(result.getFrameID(), currentPose, std::move(frameChunk));
-        const double callbackMs = std::chrono::duration<double, std::milli>(Clock::now() - callbackStart).count();
-        const double totalMs = std::chrono::duration<double, std::milli>(Clock::now() - resultStart).count();
-        if (resultGapMs > 180.0 || toCloudMs > 20.0 || callbackMs > 10.0 || totalMs > 30.0) {
-            std::cout << "[SCAN STALL][SLAM RESULT] frame=" << result.getFrameID()
-                      << " gap=" << resultGapMs << "ms toCloud=" << toCloudMs
-                      << "ms callback=" << callbackMs << "ms total=" << totalMs
-                      << "ms rawPts=" << points.size() << std::endl;
-        }
+            callback(result.getFrameID(), currentPose,
+                     trackingOk ? frameChunk : std::shared_ptr<PointCloud>{},
+                     std::move(statusChunk), trackingOk);
     }
 
     void handleMarkerResult(
@@ -624,6 +588,7 @@ class RulerMvsBackend final : public ISlam {
     cv::Mat depthK_;
     cv::Mat baseRt_;
     cv::Mat baseRtInv_;
+    cv::Mat lastValidFramePose_;
     std::mutex inputMutex_;
     std::atomic<int> inflight_{0};
     std::atomic<bool> accepting_{false};

@@ -1059,36 +1059,43 @@ void MainWindow::createScanControl() {
         }, Qt::QueuedConnection);
     });
     scanner_->setFrameCallback([this](int frameId, const JMEngine::Pose& pose,
-                                      std::shared_ptr<JMEngine::PointCloud> cloud) {
+                                      std::shared_ptr<JMEngine::PointCloud> cloud,
+                                      std::shared_ptr<JMEngine::PointCloud> statusCloud,
+                                      bool trackingOk) {
         const auto queuedAt = std::chrono::steady_clock::now();
-        QMetaObject::invokeMethod(this, [this, frameId, pose, cloud = std::move(cloud), queuedAt]() mutable {
+        QMetaObject::invokeMethod(this, [this, frameId, pose, cloud = std::move(cloud),
+                                              statusCloud = std::move(statusCloud),
+                                              trackingOk, queuedAt]() mutable {
             const double queueMs = std::chrono::duration<double, std::milli>(
                 std::chrono::steady_clock::now() - queuedAt).count();
-            QElapsedTimer dispatchPerf; dispatchPerf.start();
-            if (view_ && cloud && !cloud->empty()) {
-                // Restore the pre-refactor incremental path: keep each SLAM frame in
-                // local coordinates, upload only this new range once, and keep its RT
-                // separately for rendering/optimization.
+            QElapsedTimer dispatchPerf;
+            dispatchPerf.start();
+
+            if (view_ && trackingOk && cloud && !cloud->empty()) {
                 auto points = std::make_shared<std::vector<JMEngine::Point>>(
                     std::move(cloud->points()));
                 view_->appendScanLocalFrame(frameId, points, pose.matrix);
             }
+
+            if (view_ && statusCloud && !statusCloud->empty()) {
+                auto points = std::make_shared<std::vector<JMEngine::Point>>(
+                    std::move(statusCloud->points()));
+                view_->setCurrentScanFrame(points, trackingOk);
+            }
+
             PointCloudWidget::ScanCameraViewPose viewPose;
             viewPose.position = {pose.matrix[12], pose.matrix[13], pose.matrix[14]};
             viewPose.right = {pose.matrix[0], pose.matrix[1], pose.matrix[2]};
-            // Restore the pre-refactor scan-camera convention: OpenCV +Y points down,
-            // while the viewer's camera up vector must point toward -Y.
             viewPose.up = {-pose.matrix[4], -pose.matrix[5], -pose.matrix[6]};
             viewPose.forward = {pose.matrix[8], pose.matrix[9], pose.matrix[10]};
-            viewPose.trackingOk = true;
+            viewPose.trackingOk = trackingOk;
             viewPose.frameId = frameId;
             if (view_) {
                 view_->updateScanCameraPose(viewPose);
-                // SLAM only publishes geometry/pose. Physical-camera repaint cadence is
-                // driven by camera frames, matching the smooth version; the GL backend
-                // itself remains JMEngine::IRenderBackend inside the library.              
+                if (activeScanConfig_.sourceMode == ScanSourceMode::Virtual)
                     view_->requestScanRenderFrame();
             }
+
             const double dispatchMs = double(dispatchPerf.nsecsElapsed()) / 1000000.0;
             if (queueMs > 20.0 || dispatchMs > 10.0) {
                 qInfo().noquote() << QStringLiteral("[SCAN STALL][QT] frame=%1 queued=%2ms dispatch=%3ms")
@@ -1131,8 +1138,6 @@ void MainWindow::createScanControl() {
         cameraPreviewLabel_->show();
         cameraPreviewLabel_->raise();
         updateCameraPreviewGeometry();
-        // Physical camera is the stable display clock. This does not move rendering out
-        // of JMEngine; PointCloudWidget still renders through JMEngine::IRenderBackend.
         if (view_) view_->requestScanRenderFrame();
         }, Qt::QueuedConnection);
     });
@@ -1357,14 +1362,9 @@ void MainWindow::applyScanState(JMEngine::ScanState state) {
         cameraPreviewLabel_->hide();
     }
 
-    // The 3D camera/frustum is only a live scanning aid.  As soon as scanning leaves the
-    // Scanning state (Stopping / ReadyForReconstruction / Error / Idle), remove it and stop
-    // forcing the 3D observer to follow the last SLAM pose.  The completed cloud remains.
+    // Remove live scan aids when scanning ends.
     if (view_ && state != JMEngine::ScanState::Scanning) {
         view_->clearScanCameraPose();
-        // On a normal scan finish, preserve the last valid current frame by promoting it to
-        // the RGB history before removing the green/yellow temporary layer. Reset clears the
-        // whole preview immediately in its button handler, so there is nothing to preserve.
         if (state == JMEngine::ScanState::Stopping ||
             state == JMEngine::ScanState::ReadyForReconstruction ||
             state == JMEngine::ScanState::Reconstructing)

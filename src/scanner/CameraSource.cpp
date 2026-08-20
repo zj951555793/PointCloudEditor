@@ -241,10 +241,7 @@ class OpenCvDualCamera final : public ICameraSource {
             if (cameraA.image.empty() || cameraB.image.empty())
                 continue;
 
-            // Keep the same OpenCV/RulerMVS color contract as the pre-refactor path:
-            // Camera B stays BGR all the way into RGBDFusion. Converting it to RGB here
-            // changed both DBoW grayscale generation and point colors, and cost another
-            // full-frame conversion on every camera pair.
+            // Camera B stays BGR for RGBDFusion.
             cv::Mat rgb;
             cv::Mat code;
             if (cameraB.image.channels() == 3)

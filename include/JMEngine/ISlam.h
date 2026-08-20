@@ -13,7 +13,8 @@ namespace JMEngine {
 class ISlam {
   public:
     using UpdateCallback = std::function<void(
-        int, const Pose&, std::shared_ptr<PointCloud>)>;
+        int, const Pose&, std::shared_ptr<PointCloud>,
+        std::shared_ptr<PointCloud>, bool)>;
     using MarkerCallback = std::function<void(const ScanMarkerFrame&)>;
 
     virtual ~ISlam() = default;

@@ -63,9 +63,11 @@ Java_com_jmengine_sdk_JMEngineNative_nativeCreate(JNIEnv*, jclass) {
                 [ctx](
                         int,
                         const JMEngine::Pose&,
-                        std::shared_ptr<JMEngine::PointCloud> cloud) {
+                        std::shared_ptr<JMEngine::PointCloud> cloud,
+                        std::shared_ptr<JMEngine::PointCloud>,
+                        bool trackingOk) {
                     std::lock_guard<std::mutex> guard(ctx->mutex);
-                    if (cloud) {
+                    if (trackingOk && cloud) {
                         ctx->engine.setPointCloud(std::move(cloud));
                         ++ctx->revision;
                     }

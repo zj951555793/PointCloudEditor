@@ -1259,14 +1259,10 @@ void PointCloudWidget::upsertScanStatusLayer(
     }
 
     auto& model = *models_[static_cast<std::size_t>(index)];
-    bool canDirectUpload = model.glCreated && cloud->size() <= model.gpuReservedPointCapacity;
     if (model.glCreated && cloud->size() > model.gpuReservedPointCapacity) {
-        // 当前/找回帧通常只有几千点；尺寸真的变大时一次性扩容即可，不走历史分块逻辑。
         makeCurrent();
         destroyModelGl(model);
         doneCurrent();
-        model.gpuReservedPointCapacity = cloud->size();
-        canDirectUpload = false;
     }
     model.cloud = cloud;
     model.editor.setPointCloud(cloud);
@@ -1276,15 +1272,10 @@ void PointCloudWidget::upsertScanStatusLayer(
     model.selectionMask.assign(cloud->size(), 0u);
     model.selectedIds.clear();
     model.selectedTriangleIds.clear();
-    model.uploadPointCursor = canDirectUpload ? cloud->size() : 0;
+    model.uploadPointCursor = 0;
     model.uploadIndexCursor = 0;
-    model.drawPointCount = canDirectUpload ? static_cast<GLsizei>(cloud->size()) : 0;
+    model.drawPointCount = 0;
     model.gpuReservedPointCapacity = std::max(model.gpuReservedPointCapacity, cloud->size());
-    if (canDirectUpload) {
-        makeCurrent();
-        uploadPointRangeNow(model, 0, cloud->size());
-        doneCurrent();
-    }
     model.pickBlocks.clear();
     model.pickGridIds.clear();
     model.pickIndexedCloud = nullptr;
@@ -1308,8 +1299,6 @@ void PointCloudWidget::clearScanStatusLayer(QString& path) {
 
 void PointCloudWidget::setCurrentScanFrame(const std::shared_ptr<std::vector<JMEngine::Point>>& points,
                                            bool trackingOk) {
-    // Persistent RGB history is now uploaded independently in frame-local coordinates.
-    // These two layers are status-only overlays and never mutate/re-upload history.
     constexpr std::uint32_t kGreen = 0xff00ff00u;
     constexpr std::uint32_t kYellow = 0xff00ffffu;
 
@@ -1322,7 +1311,6 @@ void PointCloudWidget::setCurrentScanFrame(const std::shared_ptr<std::vector<JME
             upsertScanStatusLayer(currentScanFramePath_, QStringLiteral("JMEngine_current_scan_frame.ply"), points, kGreen);
         else
             clearScanStatusLayer(currentScanFramePath_);
-        update();
         return;
     }
 
@@ -1337,7 +1325,6 @@ void PointCloudWidget::setCurrentScanFrame(const std::shared_ptr<std::vector<JME
         upsertScanStatusLayer(currentScanFramePath_, QStringLiteral("JMEngine_current_scan_frame.ply"), points, kGreen);
     else
         clearScanStatusLayer(currentScanFramePath_);
-    update();
 }
 
 void PointCloudWidget::finalizeCurrentScanFrame() {
@@ -1376,9 +1363,6 @@ void PointCloudWidget::updateScanCameraPose(const ScanCameraViewPose& pose) {
             const auto right = JMEngine::example::normalize(pose.right);
             const auto up = JMEngine::example::normalize(pose.up);
             const float base = std::max(camera_.sceneRadius, 1.0f);
-            // Restore the pre-refactor scan view: keep the observer slightly behind
-            // the physical/virtual scan camera and look in exactly the same direction.
-            // This intentionally keeps the camera frustum/model visible in the scene.
             const float behind = std::max(base * 0.10f, 1.0f);
             const float lookAhead = std::max(base * 0.24f, behind * 2.0f);
             scanFollowTarget_ = JMEngine::example::add(
@@ -1473,10 +1457,7 @@ void PointCloudWidget::replaceScanPreview(const std::shared_ptr<JMEngine::PointC
     model.pickIndexedPointCount = 0;
     activeModelIndex_ = index;
 
-    // The migrated JMScanner publishes accumulated snapshots through
-    // replaceScanPreview(), not appendScanPreview(). Fit the rendering camera on
-    // the first non-empty snapshot or the default camera/clipping range may not
-    // contain millimetre-scale scan coordinates.
+    // Fit the view on the first non-empty scan snapshot.
     if (!scanPreviewViewInitialized_ && !cloud->empty()) {
         camera_.fit(*cloud);
         scanPreviewViewInitialized_ = true;

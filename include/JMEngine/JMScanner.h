@@ -15,7 +15,8 @@ class JMScanner {
   public:
     using StateCallback = std::function<void(ScanState)>;
     using FrameCallback = std::function<void(
-        int, const Pose&, std::shared_ptr<PointCloud>)>;
+        int, const Pose&, std::shared_ptr<PointCloud>,
+        std::shared_ptr<PointCloud>, bool)>;
     using MessageCallback = std::function<void(const std::string&)>;
     using ProgressCallback = std::function<void(int)>;
     using MarkerCallback = std::function<void(const ScanMarkerFrame&)>;

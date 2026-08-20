@@ -67,12 +67,11 @@ class PointCloudWidget final : public QOpenGLWidget, protected QOpenGLExtraFunct
 
     void loadModelAsync(const QString& path);
 
-    // 扫描预览专用接口：只在 UI 线程改场景对象，采集与扫描工作由 JMEngine::JMScanner 完成。
-    // reservePoints 同时用于 CPU vector 与 GPU VBO 预留，避免实时扫描期间反复 realloc/glBufferData。
+    // Scan preview scene updates run on the UI thread; acquisition and SLAM run in JMEngine.
     QString beginScanPreview(std::size_t reservePoints = 2000000);
     void appendScanPreview(const std::shared_ptr<std::vector<JMEngine::Point>>& points, std::size_t pointLimit = 2000000);
     struct LiveFramePoseUpdate { int frameId{-1}; std::array<float,16> pose{1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1}; };
-    // Live SLAM history: local points are uploaded exactly once; later optimization only updates frame poses.
+    // Local points are uploaded once; optimization updates frame poses only.
     void appendScanLocalFrame(int frameId, const std::shared_ptr<std::vector<JMEngine::Point>>& localPoints,
                               const std::array<float,16>& pose);
     void setScanFrameMarkers(int frameId, const std::vector<std::array<float,3>>& localMarkers);
