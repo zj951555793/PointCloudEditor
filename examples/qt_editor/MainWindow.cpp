@@ -1084,9 +1084,10 @@ void MainWindow::createScanControl() {
             viewPose.frameId = frameId;
             if (view_) {
                 view_->updateScanCameraPose(viewPose);
-                // Exactly one 3D render request per accepted SLAM result, regardless
-                // of whether the source is a dataset or a physical camera.
-                view_->requestScanRenderFrame();
+                // SLAM only publishes geometry/pose. Physical-camera repaint cadence is
+                // driven by camera frames, matching the smooth version; the GL backend
+                // itself remains JMEngine::IRenderBackend inside the library.              
+                    view_->requestScanRenderFrame();
             }
             const double dispatchMs = double(dispatchPerf.nsecsElapsed()) / 1000000.0;
             if (queueMs > 20.0 || dispatchMs > 10.0) {
@@ -1130,8 +1131,9 @@ void MainWindow::createScanControl() {
         cameraPreviewLabel_->show();
         cameraPreviewLabel_->raise();
         updateCameraPreviewGeometry();
-        // Preview is UI-only. 3D rendering is driven by the same SLAM-frame
-        // dispatch used by virtual scanning, so source type cannot change render behavior.
+        // Physical camera is the stable display clock. This does not move rendering out
+        // of JMEngine; PointCloudWidget still renders through JMEngine::IRenderBackend.
+        if (view_) view_->requestScanRenderFrame();
         }, Qt::QueuedConnection);
     });
 
