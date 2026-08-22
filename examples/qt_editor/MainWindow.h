@@ -100,7 +100,6 @@ class MainWindow final : public QMainWindow {
     QLabel* cameraAExposureValueLabel_{nullptr};
     QLabel* cameraBExposureValueLabel_{nullptr};
     QCheckBox* liveOptimizationCheck_{nullptr};
-    QCheckBox* keepTextureInMemoryCheck_{nullptr};
     QSlider* cameraABacklightSlider_{nullptr};
     QDoubleSpinBox* cameraABacklightSpin_{nullptr};
     QSlider* cameraBBacklightSlider_{nullptr};

@@ -162,3 +162,20 @@ The realtime scan observer now uses the exact same filtered visual pose as the s
 The pose is filtered once, converted to a single orthonormal quaternion basis, and then shared by
 both the camera overlay and the OpenGL observer. The previous behind-camera offset and the second
 paintGL follow EMA were removed, so observer eye/forward/up no longer lag the scanner visual pose.
+
+## CUDA runtime deployment
+
+The application package should ship CUDA runtime DLLs only, not the full CUDA Toolkit.
+Place runtime libraries under `cuda/` next to the application executable:
+
+```
+app/
+  bin/
+    JMScanner.exe
+  cuda/
+    cudart64_*.dll
+    cublas64_*.dll
+    cublasLt64_*.dll
+```
+
+The NVIDIA driver remains a prerequisite on the target machine.

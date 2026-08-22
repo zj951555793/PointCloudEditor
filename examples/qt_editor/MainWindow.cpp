@@ -624,10 +624,6 @@ void MainWindow::createScanControl() {
     cameraBExposureValueLabel_ = new QLabel(QStringLiteral("-6"), panel);
     liveOptimizationCheck_ = new QCheckBox(QString::fromUtf8("实时优化"), panel);
     liveOptimizationCheck_->setChecked(true);
-    keepTextureInMemoryCheck_ = new QCheckBox(QString::fromUtf8("内存带纹理"), panel);
-    keepTextureInMemoryCheck_->setChecked(false);
-    keepTextureInMemoryCheck_->setToolTip(QString::fromUtf8(
-        "开启后扫描时缓存高分辨率纹理关键帧到内存，供扫描后纹理映射使用；默认关闭以降低内存和CPU占用。"));
     cameraABacklightSlider_ = new QSlider(Qt::Horizontal, panel);
     cameraABacklightSpin_ = new QDoubleSpinBox(panel);
     cameraBBacklightSlider_ = new QSlider(Qt::Horizontal, panel);
@@ -728,7 +724,6 @@ void MainWindow::createScanControl() {
     quickGrid->addWidget(new QLabel(QString::fromUtf8("B逆光"), panel), 3, 5);
     quickGrid->addWidget(cameraBBacklightSlider_, 3, 6, 1, 3);
     quickGrid->addWidget(cameraBBacklightSpin_, 3, 9);
-    quickGrid->addWidget(keepTextureInMemoryCheck_, 3, 10, 1, 2);
 
     quickGrid->addWidget(scanRenderFpsLabel_, 4, 0, 1, 2);
 #ifdef JMENGINE_HAS_TEXTURE_MAPPING
@@ -1229,9 +1224,7 @@ MainWindow::ScanUiConfig MainWindow::scanConfigFromUi() const {
     cfg.engine.offlineVoxel = 3.0;
     cfg.engine.offlineIterations = 30;
     cfg.liveOptimizationEnabled = liveOptimizationCheck_ ? liveOptimizationCheck_->isChecked() : true;
-    cfg.engine.keepTextureInMemory =
-        keepTextureInMemoryCheck_ && keepTextureInMemoryCheck_->isChecked();
-    cfg.cameraModelJsonPath = cameraModelJsonEdit_ ? cameraModelJsonEdit_->text().trimmed() : QString{};
+        cfg.cameraModelJsonPath = cameraModelJsonEdit_ ? cameraModelJsonEdit_->text().trimmed() : QString{};
     cfg.recordRawData = recordRawDataCheck_ && recordRawDataCheck_->isChecked();
     cfg.rawDataDir = rawDataDirEdit_ ? rawDataDirEdit_->text().trimmed() : QString{};
     cfg.cameraADeviceId = cameraACombo_ ? cameraACombo_->currentData().toString() : QString{};
@@ -1399,7 +1392,6 @@ void MainWindow::applyScanSourceUi() {
     if (cameraAExposureSlider_) cameraAExposureSlider_->setEnabled(cameraMode);
     if (cameraBExposureSlider_) cameraBExposureSlider_->setEnabled(cameraMode);
     if (liveOptimizationCheck_) liveOptimizationCheck_->setEnabled(true);
-    if (keepTextureInMemoryCheck_) keepTextureInMemoryCheck_->setEnabled(true);
     if (cameraABacklightSlider_) cameraABacklightSlider_->setEnabled(cameraMode);
     if (cameraABacklightSpin_) cameraABacklightSpin_->setEnabled(cameraMode);
     if (cameraBBacklightSlider_) cameraBBacklightSlider_->setEnabled(cameraMode);
@@ -1452,7 +1444,6 @@ void MainWindow::applyScanState(JMEngine::ScanState state) {
     if (scanMaxFramesSpin_) scanMaxFramesSpin_->setEnabled(editable);
     applyScanSourceUi();
     if (liveOptimizationCheck_) liveOptimizationCheck_->setEnabled(editable);
-    if (keepTextureInMemoryCheck_) keepTextureInMemoryCheck_->setEnabled(editable);
     if (!editable) {
         if (scanDataDirEdit_) scanDataDirEdit_->setEnabled(false);
         if (cameraModelJsonEdit_) cameraModelJsonEdit_->setEnabled(false);
@@ -1461,7 +1452,6 @@ void MainWindow::applyScanState(JMEngine::ScanState state) {
         if (cameraBCombo_) cameraBCombo_->setEnabled(false);
         if (cameraSyncToleranceSpin_) cameraSyncToleranceSpin_->setEnabled(false);
         if (recordRawDataCheck_) recordRawDataCheck_->setEnabled(false);
-        if (keepTextureInMemoryCheck_) keepTextureInMemoryCheck_->setEnabled(false);
         if (rawDataDirEdit_) rawDataDirEdit_->setEnabled(false);
         // Exposure remains editable during camera scanning; setter is posted to camera worker threads.
         const bool cameraScanning = scanning && scanSourceModeCombo_ &&

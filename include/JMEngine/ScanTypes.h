@@ -31,9 +31,6 @@ struct ScanConfig {
     int previewPointLimit{500000};
     int textureKeyframeStride{5};
     int textureMaxKeyframes{120};
-    // Cache high-resolution texture keyframes in RAM for post-scan texture mapping.
-    // Disabled by default to keep scan memory usage bounded.
-    bool keepTextureInMemory{false};
     double offlineVoxel{3.0};
     int offlineIterations{30};
     float depthScale{0.001f};
@@ -46,6 +43,9 @@ struct ScanConfig {
     ScanRegistrationMode registrationMode{ScanRegistrationMode::Texture};
     std::string calibrationPath;
     std::string vocabularyPath;
+    // Optional scan project persistence: pose/frame cloud are saved without affecting SLAM memory.
+    bool saveScanProject{false};
+    std::string scanProjectPath;
 };
 
 struct Pose {

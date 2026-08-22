@@ -73,6 +73,8 @@ set(JMENGINE_PUBLIC_HEADERS
     include/JMEngine/FrameQueue.h
     include/JMEngine/JMScanner.h
     include/JMEngine/RulerMvsSlam.h
+    include/JMEngine/ScanProject.h
+    include/JMEngine/ProjectManager.h
     include/JMEngine/CameraSource.h
     include/JMEngine/TriangleMesh.h
     include/JMEngine/edit/DirtyRange.h
@@ -106,6 +108,8 @@ set(JMENGINE_SOURCES
     src/JMEngine.cpp
     src/scanner/JMScanner.cpp
     src/scanner/RulerMvsSlam.cpp
+    src/scanner/ScanProject.cpp
+    src/scanner/ProjectManager.cpp
     src/scanner/CameraSource.cpp
     src/scanner/FrameQueue.cpp
     src/TriangleMesh.cpp

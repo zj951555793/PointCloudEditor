@@ -1,4 +1,5 @@
 #include "JMEngine/RulerMvsSlam.h"
+#include "JMEngine/ScanProject.h"
 
 #include <algorithm>
 #include <atomic>
@@ -154,9 +155,14 @@ class RulerMvsBackend final : public ISlam {
         textureK_.at<double>(1, 1) = camera_.fy;
         textureK_.at<double>(1, 2) = camera_.cy;
         if (config_.registrationMode == ScanRegistrationMode::Texture &&
-            config_.keepTextureInMemory) {
+            false) {
             rulermvs::createUndistorRectifyMap(
                 camera_, {}, camera_.nodistor().noskew(), textureMapX_, textureMapY_);
+        }
+
+        if (config_.saveScanProject && !config_.scanProjectPath.empty()) {
+            project_ = std::make_unique<ScanProject>();
+            project_->open(config_.scanProjectPath);
         }
 
         vocabulary_.load(config.vocabularyPath);
@@ -324,6 +330,9 @@ class RulerMvsBackend final : public ISlam {
         fusion_.reset();
         database_.reset();
         oneshot_ = nullptr;
+        if (project_)
+            project_->close();
+        project_.reset();
 
         inflight_.store(0, std::memory_order_release);
         submitted_.store(0, std::memory_order_release);
@@ -362,7 +371,6 @@ class RulerMvsBackend final : public ISlam {
     }
 
     std::vector<TextureKeyframe> takeTextureKeyframes() override {
-        if (!config_.keepTextureInMemory)
             return {};
 
         std::unordered_map<int, cv::Mat> finalWorldFromCamera;
@@ -492,7 +500,7 @@ class RulerMvsBackend final : public ISlam {
                 cv::resize(color, color, depthSize_);
 
                 if (config_.registrationMode == ScanRegistrationMode::Texture &&
-                    config_.keepTextureInMemory) {
+                    false) {
                     const int textureStride = std::max(1, config_.textureKeyframeStride);
                     if ((frameIndex % textureStride) == 0) {
                         cv::Mat textureColor;
@@ -872,6 +880,25 @@ class RulerMvsBackend final : public ISlam {
         const Pose measured = poseFromCv(measuredPose);
         const Pose displayed = poseFromCv(framePose);
 
+        // ScanProject persistence: save full OneShot frame cloud + pose.
+        // Do not use localCloud here because localCloud is display-limited/decimated.
+        // Project data is intended for offline optimization, texture mapping and resume scan.
+        if (project_ && raw.trackingOk && !raw.points.empty()) {
+            PointCloud::Container projectPoints;
+            projectPoints.reserve(raw.points.size());
+            for (size_t i = 0; i < raw.points.size(); ++i) {
+                Point p;
+                p.position = {raw.points[i].x, raw.points[i].y, raw.points[i].z};
+                if (i < raw.colors.size())
+                    p.rgba = packBgr(raw.colors[i]);
+                if (i < raw.normals.size())
+                    p.normal = {raw.normals[i].x, raw.normals[i].y, raw.normals[i].z};
+                projectPoints.push_back(p);
+            }
+            PointCloud projectCloud(std::move(projectPoints));
+            project_->saveFrame(raw.frameId, measured, projectCloud);
+        }
+
         UpdateCallback update;
         {
             std::lock_guard<std::mutex> lock(stateMutex_);
@@ -966,6 +993,7 @@ class RulerMvsBackend final : public ISlam {
     DBoW3::Vocabulary vocabulary_;
     std::unique_ptr<DBoW3::Database> database_;
     std::unique_ptr<rgbdslam::RGBDFusion> fusion_;
+    std::unique_ptr<ScanProject> project_;
 
     std::atomic<bool> resultWorkersRunning_{false};
     std::thread resultConsumerThread_;
