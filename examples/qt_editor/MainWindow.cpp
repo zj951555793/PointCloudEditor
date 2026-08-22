@@ -624,6 +624,10 @@ void MainWindow::createScanControl() {
     cameraBExposureValueLabel_ = new QLabel(QStringLiteral("-6"), panel);
     liveOptimizationCheck_ = new QCheckBox(QString::fromUtf8("实时优化"), panel);
     liveOptimizationCheck_->setChecked(true);
+    keepTextureInMemoryCheck_ = new QCheckBox(QString::fromUtf8("内存带纹理"), panel);
+    keepTextureInMemoryCheck_->setChecked(false);
+    keepTextureInMemoryCheck_->setToolTip(QString::fromUtf8(
+        "开启后扫描时缓存高分辨率纹理关键帧到内存，供扫描后纹理映射使用；默认关闭以降低内存和CPU占用。"));
     cameraABacklightSlider_ = new QSlider(Qt::Horizontal, panel);
     cameraABacklightSpin_ = new QDoubleSpinBox(panel);
     cameraBBacklightSlider_ = new QSlider(Qt::Horizontal, panel);
@@ -724,6 +728,7 @@ void MainWindow::createScanControl() {
     quickGrid->addWidget(new QLabel(QString::fromUtf8("B逆光"), panel), 3, 5);
     quickGrid->addWidget(cameraBBacklightSlider_, 3, 6, 1, 3);
     quickGrid->addWidget(cameraBBacklightSpin_, 3, 9);
+    quickGrid->addWidget(keepTextureInMemoryCheck_, 3, 10, 1, 2);
 
     quickGrid->addWidget(scanRenderFpsLabel_, 4, 0, 1, 2);
 #ifdef JMENGINE_HAS_TEXTURE_MAPPING
@@ -736,6 +741,22 @@ void MainWindow::createScanControl() {
             scanRenderFpsLabel_->setText(QString::fromUtf8("渲染 FPS：%1").arg(view_->renderFps(), 0, 'f', 1));
     });
     renderFpsTimer->start();
+
+    // Rendering must not be clocked by irregular SLAM-result callbacks.  A fixed UI render
+    // cadence keeps camera following smooth while acquisition/SLAM continue at their own rate.
+    auto* scanRenderTimer = new QTimer(panel);
+    scanRenderTimer->setTimerType(Qt::PreciseTimer);
+    scanRenderTimer->setInterval(33); // ~30 FPS; enough for a 10 FPS scanner without wasting GPU.
+    connect(scanRenderTimer, &QTimer::timeout, panel, [this] {
+        if (!view_ || !scanner_)
+            return;
+        const auto state = scanner_->state();
+        if (state == JMEngine::ScanState::Scanning ||
+            state == JMEngine::ScanState::Stopping) {
+            view_->requestScanRenderFrame();
+        }
+    });
+    scanRenderTimer->start();
 
     quickGrid->setColumnStretch(1, 2);
     quickGrid->setColumnStretch(6, 2);
@@ -956,6 +977,7 @@ void MainWindow::createScanControl() {
         }
         removeScanModelListEntry();
         latestMarkerFrame_ = JMEngine::ScanMarkerFrame{};
+        lastScanVisualFrameId_ = -1;
         view_->clearScanPreview();
 #ifdef JMENGINE_HAS_TEXTURE_MAPPING
         view_->setTextureFrames(nullptr);
@@ -1048,6 +1070,7 @@ void MainWindow::createScanControl() {
         if (scanner_) scanner_->reset();
         removeScanModelListEntry();
         latestMarkerFrame_ = JMEngine::ScanMarkerFrame{};
+        lastScanVisualFrameId_ = -1;
         view_->clearScanPreview();
 #ifdef JMENGINE_HAS_TEXTURE_MAPPING
         view_->setTextureFrames(nullptr);
@@ -1087,22 +1110,28 @@ void MainWindow::createScanControl() {
                 view_->appendScanLocalFrame(frameId, points, pose.matrix);
             }
 
-            if (view_ && statusCloud && !statusCloud->empty()) {
-                auto points = std::make_shared<std::vector<JMEngine::Point>>(
-                    std::move(statusCloud->points()));
-                view_->setCurrentScanFrame(points, trackingOk);
-            }
+            // Accumulated live cloud may accept a late/out-of-order frame, but the current
+            // frame and observer must never move backwards to an older SLAM result. RGBDFusion
+            // can invoke trace callbacks from several worker threads, so callback arrival order
+            // is not guaranteed to match frameId order.
+            const bool newestVisualFrame = frameId > lastScanVisualFrameId_;
+            if (newestVisualFrame) {
+                lastScanVisualFrameId_ = frameId;
+                if (view_ && statusCloud && !statusCloud->empty()) {
+                    auto points = std::make_shared<std::vector<JMEngine::Point>>(
+                        std::move(statusCloud->points()));
+                    view_->setCurrentScanFrame(points, trackingOk);
+                }
 
-            PointCloudWidget::ScanCameraViewPose viewPose;
-            viewPose.position = {pose.matrix[12], pose.matrix[13], pose.matrix[14]};
-            viewPose.right = {pose.matrix[0], pose.matrix[1], pose.matrix[2]};
-            viewPose.up = {-pose.matrix[4], -pose.matrix[5], -pose.matrix[6]};
-            viewPose.forward = {pose.matrix[8], pose.matrix[9], pose.matrix[10]};
-            viewPose.trackingOk = trackingOk;
-            viewPose.frameId = frameId;
-            if (view_) {
-                view_->updateScanCameraPose(viewPose);                 
-                    view_->requestScanRenderFrame();
+                PointCloudWidget::ScanCameraViewPose viewPose;
+                viewPose.position = {pose.matrix[12], pose.matrix[13], pose.matrix[14]};
+                viewPose.right = {pose.matrix[0], pose.matrix[1], pose.matrix[2]};
+                viewPose.up = {-pose.matrix[4], -pose.matrix[5], -pose.matrix[6]};
+                viewPose.forward = {pose.matrix[8], pose.matrix[9], pose.matrix[10]};
+                viewPose.trackingOk = trackingOk;
+                viewPose.frameId = frameId;
+                if (view_)
+                    view_->updateScanCameraPose(viewPose);
             }
 
             const double dispatchMs = double(dispatchPerf.nsecsElapsed()) / 1000000.0;
@@ -1191,7 +1220,7 @@ MainWindow::ScanUiConfig MainWindow::scanConfigFromUi() const {
     cfg.engine.calibrationPath = scanCalibEdit_ ? scanCalibEdit_->text().trimmed().toStdString() : std::string{};
     cfg.engine.vocabularyPath = scanVocabEdit_ ? scanVocabEdit_->text().trimmed().toStdString() : std::string{};
     cfg.engine.maxFrames = scanMaxFramesSpin_ ? scanMaxFramesSpin_->value() : 2000;
-    cfg.engine.maxInflightFrames = 2;
+    cfg.engine.maxInflightFrames = 6;
     // Live preview is bounded but must represent the whole scan. PointCloudWidget compacts
     // old preview samples when this budget is reached instead of dropping all later frames.
     cfg.engine.previewPointsPerFrame = 300;
@@ -1200,6 +1229,8 @@ MainWindow::ScanUiConfig MainWindow::scanConfigFromUi() const {
     cfg.engine.offlineVoxel = 3.0;
     cfg.engine.offlineIterations = 30;
     cfg.liveOptimizationEnabled = liveOptimizationCheck_ ? liveOptimizationCheck_->isChecked() : true;
+    cfg.engine.keepTextureInMemory =
+        keepTextureInMemoryCheck_ && keepTextureInMemoryCheck_->isChecked();
     cfg.cameraModelJsonPath = cameraModelJsonEdit_ ? cameraModelJsonEdit_->text().trimmed() : QString{};
     cfg.recordRawData = recordRawDataCheck_ && recordRawDataCheck_->isChecked();
     cfg.rawDataDir = rawDataDirEdit_ ? rawDataDirEdit_->text().trimmed() : QString{};
@@ -1368,6 +1399,7 @@ void MainWindow::applyScanSourceUi() {
     if (cameraAExposureSlider_) cameraAExposureSlider_->setEnabled(cameraMode);
     if (cameraBExposureSlider_) cameraBExposureSlider_->setEnabled(cameraMode);
     if (liveOptimizationCheck_) liveOptimizationCheck_->setEnabled(true);
+    if (keepTextureInMemoryCheck_) keepTextureInMemoryCheck_->setEnabled(true);
     if (cameraABacklightSlider_) cameraABacklightSlider_->setEnabled(cameraMode);
     if (cameraABacklightSpin_) cameraABacklightSpin_->setEnabled(cameraMode);
     if (cameraBBacklightSlider_) cameraBBacklightSlider_->setEnabled(cameraMode);
@@ -1420,6 +1452,7 @@ void MainWindow::applyScanState(JMEngine::ScanState state) {
     if (scanMaxFramesSpin_) scanMaxFramesSpin_->setEnabled(editable);
     applyScanSourceUi();
     if (liveOptimizationCheck_) liveOptimizationCheck_->setEnabled(editable);
+    if (keepTextureInMemoryCheck_) keepTextureInMemoryCheck_->setEnabled(editable);
     if (!editable) {
         if (scanDataDirEdit_) scanDataDirEdit_->setEnabled(false);
         if (cameraModelJsonEdit_) cameraModelJsonEdit_->setEnabled(false);
@@ -1428,6 +1461,7 @@ void MainWindow::applyScanState(JMEngine::ScanState state) {
         if (cameraBCombo_) cameraBCombo_->setEnabled(false);
         if (cameraSyncToleranceSpin_) cameraSyncToleranceSpin_->setEnabled(false);
         if (recordRawDataCheck_) recordRawDataCheck_->setEnabled(false);
+        if (keepTextureInMemoryCheck_) keepTextureInMemoryCheck_->setEnabled(false);
         if (rawDataDirEdit_) rawDataDirEdit_->setEnabled(false);
         // Exposure remains editable during camera scanning; setter is posted to camera worker threads.
         const bool cameraScanning = scanning && scanSourceModeCombo_ &&

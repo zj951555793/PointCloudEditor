@@ -34,6 +34,7 @@
 #include <array>
 #include <optional>
 #include <memory>
+#include <utility>
 #include <vector>
 #include <unordered_map>
 
@@ -71,7 +72,7 @@ class PointCloudWidget final : public QOpenGLWidget, protected QOpenGLExtraFunct
     QString beginScanPreview(std::size_t reservePoints = 2000000);
     void appendScanPreview(const std::shared_ptr<std::vector<JMEngine::Point>>& points, std::size_t pointLimit = 2000000);
     struct LiveFramePoseUpdate { int frameId{-1}; std::array<float,16> pose{1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1}; };
-    // Local points are uploaded once; optimization updates frame poses only.
+    // Local preview tails are kept for pose updates; rendering uses one world-space VBO.
     void appendScanLocalFrame(int frameId, const std::shared_ptr<std::vector<JMEngine::Point>>& localPoints,
                               const std::array<float,16>& pose);
     void setScanFrameMarkers(int frameId, const std::vector<std::array<float,3>>& localMarkers);
@@ -266,21 +267,30 @@ class PointCloudWidget final : public QOpenGLWidget, protected QOpenGLExtraFunct
         // back 上传期间继续到来的正常实时帧，swap 后再追加，避免优化刷新吃掉最新历史帧。
         std::vector<JMEngine::Point> livePostSwapPoints;
 
-        // Live SLAM history is stored in frame-local coordinates. Each frame's points are appended
-        // to the shared VBO exactly once. Backend optimization only changes pose matrices.
+        // Live scan points are baked to world coordinates for rendering, so the whole history
+        // is drawn with one glDrawArrays() instead of one draw call per SLAM frame.  Keep each
+        // frame's small local preview tail only so a later RT optimization can rewrite exactly
+        // that frame range in the shared VBO.
         struct LiveFrameRange {
             int frameId{-1};
             std::size_t first{0};
             std::size_t count{0};
             JMEngine::Mat4f pose{JMEngine::Mat4f::identity()};
+            std::shared_ptr<std::vector<JMEngine::Point>> localPoints;
         };
         bool liveFramePoseMode{false};
         std::vector<LiveFrameRange> liveFrames;
         std::unordered_map<int, std::size_t> liveFrameIndex;
-        struct LiveMarkerRange { int frameId{-1}; std::size_t first{0}; std::size_t count{0}; };
+        struct LiveMarkerRange {
+            int frameId{-1};
+            std::size_t first{0};
+            std::size_t count{0};
+            std::shared_ptr<std::vector<JMEngine::Point>> localPoints;
+        };
         std::vector<LiveMarkerRange> liveMarkerRanges;
         std::unordered_map<int, std::size_t> liveMarkerIndex;
         std::unordered_map<int, std::vector<std::array<float,3>>> pendingLiveMarkers;
+        std::vector<std::pair<std::size_t, std::size_t>> livePoseDirtyRanges;
 
         // 场景级非破坏变换。当前交互器只修改平移，不重写点/三角形数据。
         JMEngine::Mat4f modelTransform{JMEngine::Mat4f::identity()};
@@ -396,6 +406,9 @@ class PointCloudWidget final : public QOpenGLWidget, protected QOpenGLExtraFunct
     std::uint64_t scanPreviewFrameCount_{0};
     std::optional<ScanCameraViewPose> scanCameraPose_;
     std::optional<ScanCameraViewPose> lastValidScanCameraPose_;
+    // One canonical visual scanner pose drives the camera frustum and observer orientation.
+    // The observer is rigidly offset a short distance behind that pose; adaptive jitter rejection
+    // happens once in updateScanCameraPose(), and paintGL() never adds a second follow lag.
     bool scanCameraFollowEnabled_{true};
     bool scanCameraFollowInitialized_{false};
     JMEngine::Vec3f scanFollowTarget_{};
@@ -476,8 +489,8 @@ class PointCloudWidget final : public QOpenGLWidget, protected QOpenGLExtraFunct
     ModelAddedCallback modelAddedCallback_;
     QString statusText_;
 
-    // Actual QOpenGLWidget paint rate, sampled over ~0.5 s windows.  Stored atomically so
-    // the compact scan panel can poll it without coupling rendering to UI labels.
+    // Actual QOpenGLWidget paint rate, sampled over ~1 s windows and lightly filtered.
+    // Stored atomically so the compact scan panel can poll it without coupling rendering to UI labels.
     QElapsedTimer renderFpsClock_;
     int renderFpsFrameCount_{0};
     std::atomic<int> renderFpsTenths_{0};

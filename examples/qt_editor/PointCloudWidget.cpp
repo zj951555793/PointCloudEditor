@@ -51,23 +51,23 @@ JMEngine::example::OrbitCamera::Quat quatFromBasis(const JMEngine::Vec3f& rightI
     const auto r = JMEngine::example::normalize(rightIn);
     const auto u = JMEngine::example::normalize(upIn);
     const auto b = JMEngine::example::normalize(backIn);
-    const float m00=r.x, m01=u.x, m02=b.x;
-    const float m10=r.y, m11=u.y, m12=b.y;
-    const float m20=r.z, m21=u.z, m22=b.z;
+    const float m00 = r.x, m01 = u.x, m02 = b.x;
+    const float m10 = r.y, m11 = u.y, m12 = b.y;
+    const float m20 = r.z, m21 = u.z, m22 = b.z;
     Cam::Quat q{};
     const float tr = m00 + m11 + m22;
     if (tr > 0.0f) {
         const float ss = std::sqrt(tr + 1.0f) * 2.0f;
-        q.w = 0.25f * ss; q.x = (m21-m12)/ss; q.y = (m02-m20)/ss; q.z = (m10-m01)/ss;
+        q.w = 0.25f * ss; q.x = (m21 - m12) / ss; q.y = (m02 - m20) / ss; q.z = (m10 - m01) / ss;
     } else if (m00 > m11 && m00 > m22) {
         const float ss = std::sqrt(1.0f + m00 - m11 - m22) * 2.0f;
-        q.w=(m21-m12)/ss; q.x=0.25f*ss; q.y=(m01+m10)/ss; q.z=(m02+m20)/ss;
+        q.w = (m21 - m12) / ss; q.x = 0.25f * ss; q.y = (m01 + m10) / ss; q.z = (m02 + m20) / ss;
     } else if (m11 > m22) {
         const float ss = std::sqrt(1.0f + m11 - m00 - m22) * 2.0f;
-        q.w=(m02-m20)/ss; q.x=(m01+m10)/ss; q.y=0.25f*ss; q.z=(m12+m21)/ss;
+        q.w = (m02 - m20) / ss; q.x = (m01 + m10) / ss; q.y = 0.25f * ss; q.z = (m12 + m21) / ss;
     } else {
         const float ss = std::sqrt(1.0f + m22 - m00 - m11) * 2.0f;
-        q.w=(m10-m01)/ss; q.x=(m02+m20)/ss; q.y=(m12+m21)/ss; q.z=0.25f*ss;
+        q.w = (m10 - m01) / ss; q.x = (m02 + m20) / ss; q.y = (m12 + m21) / ss; q.z = 0.25f * ss;
     }
     return Cam::normalizeQuat(q);
 }
@@ -78,21 +78,44 @@ JMEngine::example::OrbitCamera::Quat slerpQuat(const JMEngine::example::OrbitCam
     using Cam = JMEngine::example::OrbitCamera;
     auto a = Cam::normalizeQuat(aIn);
     auto b = Cam::normalizeQuat(bIn);
-    float d = a.w*b.w + a.x*b.x + a.y*b.y + a.z*b.z;
-    if (d < 0.0f) { b = {-b.w, -b.x, -b.y, -b.z}; d = -d; }
+    float d = a.w * b.w + a.x * b.x + a.y * b.y + a.z * b.z;
+    if (d < 0.0f) {
+        b = {-b.w, -b.x, -b.y, -b.z};
+        d = -d;
+    }
     d = std::clamp(d, -1.0f, 1.0f);
     if (d > 0.9995f) {
-        Cam::Quat q{a.w + (b.w-a.w)*t, a.x + (b.x-a.x)*t,
-                    a.y + (b.y-a.y)*t, a.z + (b.z-a.z)*t};
+        Cam::Quat q{a.w + (b.w - a.w) * t, a.x + (b.x - a.x) * t,
+                    a.y + (b.y - a.y) * t, a.z + (b.z - a.z) * t};
         return Cam::normalizeQuat(q);
     }
     const float theta = std::acos(d);
     const float st = std::sin(theta);
-    if (std::fabs(st) < 1e-6f) return b;
-    const float wa = std::sin((1.0f-t)*theta) / st;
-    const float wb = std::sin(t*theta) / st;
-    return Cam::normalizeQuat({a.w*wa+b.w*wb, a.x*wa+b.x*wb,
-                               a.y*wa+b.y*wb, a.z*wa+b.z*wb});
+    if (std::fabs(st) < 1.0e-6f)
+        return b;
+    const float wa = std::sin((1.0f - t) * theta) / st;
+    const float wb = std::sin(t * theta) / st;
+    return Cam::normalizeQuat({a.w * wa + b.w * wb, a.x * wa + b.x * wb,
+                               a.y * wa + b.y * wb, a.z * wa + b.z * wb});
+}
+
+JMEngine::Vec3f transformNormalByPose(const JMEngine::Mat4f& pose, const JMEngine::Vec3f& n) {
+    const JMEngine::Vec3f q{
+        pose.m[0] * n.x + pose.m[4] * n.y + pose.m[8] * n.z,
+        pose.m[1] * n.x + pose.m[5] * n.y + pose.m[9] * n.z,
+        pose.m[2] * n.x + pose.m[6] * n.y + pose.m[10] * n.z};
+    const float len2 = q.x * q.x + q.y * q.y + q.z * q.z;
+    if (len2 <= 1.0e-12f)
+        return {};
+    const float invLen = 1.0f / std::sqrt(len2);
+    return {q.x * invLen, q.y * invLen, q.z * invLen};
+}
+
+JMEngine::Point worldPointFromLocal(const JMEngine::Point& local, const JMEngine::Mat4f& pose) {
+    auto world = local;
+    world.position = JMEngine::transformPoint(pose, local.position);
+    world.normal = transformNormalByPose(pose, local.normal);
+    return world;
 }
 
 bool bakeTexture(const JMEngine::ObjAppearanceData& appearance, JMEngine::PointCloud& cloud) {
@@ -1084,147 +1107,209 @@ void PointCloudWidget::appendScanPreview(const std::shared_ptr<std::vector<JMEng
     // Repaint is requested once by the unified SLAM-frame dispatch in MainWindow.
 }
 
-void PointCloudWidget::appendScanLocalFrame(int frameId,
-                                             const std::shared_ptr<std::vector<JMEngine::Point>>& localPoints,
-                                             const std::array<float,16>& poseArray) {
-    QElapsedTimer appendPerf; appendPerf.start();
-    if (!localPoints || localPoints->empty()) return;
-    if (scanPreviewPath_.isEmpty()) beginScanPreview(scanPreviewPointLimit_);
+void PointCloudWidget::appendScanLocalFrame(
+    int frameId, const std::shared_ptr<std::vector<JMEngine::Point>>& localPoints,
+    const std::array<float, 16>& poseArray) {
+    QElapsedTimer appendPerf;
+    appendPerf.start();
+    if (!localPoints || localPoints->empty())
+        return;
+    if (scanPreviewPath_.isEmpty())
+        beginScanPreview(scanPreviewPointLimit_);
     const int index = findModel(scanPreviewPath_);
-    if (index < 0) return;
+    if (index < 0)
+        return;
     auto& model = *models_[static_cast<std::size_t>(index)];
-    if (!model.cloud) return;
+    if (!model.cloud)
+        return;
 
     JMEngine::Mat4f pose;
     pose.m = poseArray;
     auto existing = model.liveFrameIndex.find(frameId);
     if (existing != model.liveFrameIndex.end()) {
-        model.liveFrames[existing->second].pose = pose;
+        auto updates = std::make_shared<std::vector<LiveFramePoseUpdate>>();
+        updates->push_back({frameId, poseArray});
+        updateScanFramePoses(updates);
         return;
     }
 
     auto& dst = model.cloud->points();
     const std::size_t first = dst.size();
     const std::size_t count = localPoints->size();
-    // Pre-refactor contract: this callback is CPU-only.  Never resize/recreate/upload GL
-    // buffers from the SLAM callback; paintGL() owns all GPU work.
-    dst.insert(dst.end(), localPoints->begin(), localPoints->end());
+
+    // Render history is stored in WORLD coordinates so the complete scan is one draw call.
+    // Keep the tiny frame-local tail separately for later pose-only optimization.
+    std::vector<JMEngine::Point> worldPoints;
+    worldPoints.reserve(count);
+    for (const auto& local : *localPoints)
+        worldPoints.push_back(worldPointFromLocal(local, pose));
+    dst.insert(dst.end(), worldPoints.begin(), worldPoints.end());
+
     model.selectionMask.resize(dst.size(), 0u);
     model.liveFramePoseMode = true;
     model.liveFrameIndex[frameId] = model.liveFrames.size();
-    model.liveFrames.push_back({frameId, first, count, pose});
+    model.liveFrames.push_back({frameId, first, count, pose, localPoints});
+
     const double appendMs = double(appendPerf.nsecsElapsed()) / 1000000.0;
     if (appendMs > 8.0) {
-        qInfo().noquote() << QStringLiteral("[SCAN STALL][APPEND] frame=%1 pts=%2 total=%3 time=%4ms")
-            .arg(frameId).arg(qulonglong(count)).arg(qulonglong(dst.size())).arg(appendMs, 0, 'f', 2);
+        qInfo().noquote()
+            << QStringLiteral("[SCAN STALL][APPEND] frame=%1 pts=%2 total=%3 time=%4ms")
+                   .arg(frameId)
+                   .arg(qulonglong(count))
+                   .arg(qulonglong(dst.size()))
+                   .arg(appendMs, 0, 'f', 2);
     }
 
-    // Establish clipping/scene scale from the first frame in WORLD coordinates. The stored
-    // history remains local, so optimization never requires point re-upload.
-    if (!scanPreviewViewInitialized_) {
-        JMEngine::PointCloud::Container world;
-        world.reserve(localPoints->size());
-        for (const auto& src : *localPoints) {
-            auto q = src;
-            q.position = JMEngine::transformPoint(pose, src.position);
-            world.push_back(q);
-        }
-        if (!world.empty()) {
-            JMEngine::PointCloud tmp(std::move(world));
-            camera_.fit(tmp);
-            scanPreviewViewInitialized_ = true;
-            activeModelIndex_ = index;
-            if (scanCameraPose_ && scanCameraPose_->trackingOk) {
-                const ScanCameraViewPose pending = *scanCameraPose_;
-                updateScanCameraPose(pending);
-            }
+    // First valid frame establishes clipping using the already world-baked preview tail.
+    if (!scanPreviewViewInitialized_ && !worldPoints.empty()) {
+        JMEngine::PointCloud tmp(std::move(worldPoints));
+        camera_.fit(tmp);
+        scanPreviewViewInitialized_ = true;
+        activeModelIndex_ = index;
+        if (scanCameraPose_ && scanCameraPose_->trackingOk) {
+            const ScanCameraViewPose pending = *scanCameraPose_;
+            updateScanCameraPose(pending);
         }
     }
 
     if (model.glCreated && first + count > model.gpuReservedPointCapacity) {
-        // Capacity miss must not stall the callback.  Defer a complete back-buffer build to
-        // paintGL(); the visible front remains untouched until the back buffer is complete.
-        model.gpuReservedPointCapacity = std::max(first + count,
-            std::max<std::size_t>(1, model.gpuReservedPointCapacity) * 2u);
+        model.gpuReservedPointCapacity =
+            std::max(first + count, std::max<std::size_t>(1, model.gpuReservedPointCapacity) * 2u);
         model.liveBackCloud = std::make_shared<JMEngine::PointCloud>(model.cloud->points());
         model.liveBackUploadCursor = 0;
-        qWarning().noquote() << QStringLiteral("[SCAN VBO] capacity miss deferred: need=%1 reserved=%2")
-            .arg(qulonglong(first + count)).arg(qulonglong(model.gpuReservedPointCapacity));
+        qWarning().noquote()
+            << QStringLiteral("[SCAN VBO] capacity miss deferred: need=%1 reserved=%2")
+                   .arg(qulonglong(first + count))
+                   .arg(qulonglong(model.gpuReservedPointCapacity));
     }
+
     model.pickBlocks.clear();
     model.pickGridIds.clear();
     model.pickIndexedCloud = nullptr;
     model.pickIndexedPointCount = 0;
+
     auto pendingMarkerIt = model.pendingLiveMarkers.find(frameId);
     if (pendingMarkerIt != model.pendingLiveMarkers.end()) {
         auto pendingMarkers = std::move(pendingMarkerIt->second);
         model.pendingLiveMarkers.erase(pendingMarkerIt);
         setScanFrameMarkers(frameId, pendingMarkers);
     }
-    // Repaint is requested once by the unified SLAM-frame dispatch in MainWindow.
 }
 
-void PointCloudWidget::setScanFrameMarkers(int frameId, const std::vector<std::array<float,3>>& localMarkers) {
-    if (localMarkers.empty() || scanPreviewPath_.isEmpty()) return;
+void PointCloudWidget::setScanFrameMarkers(
+    int frameId, const std::vector<std::array<float, 3>>& localMarkers) {
+    if (localMarkers.empty() || scanPreviewPath_.isEmpty())
+        return;
     const int index = findModel(scanPreviewPath_);
-    if (index < 0) return;
+    if (index < 0)
+        return;
     auto& model = *models_[static_cast<std::size_t>(index)];
-    if (!model.cloud) return;
-    if (model.liveFrameIndex.find(frameId) == model.liveFrameIndex.end()) {
+    if (!model.cloud)
+        return;
+
+    const auto frameIt = model.liveFrameIndex.find(frameId);
+    if (frameIt == model.liveFrameIndex.end()) {
         model.pendingLiveMarkers[frameId] = localMarkers;
         return;
     }
-    if (model.liveMarkerIndex.find(frameId) != model.liveMarkerIndex.end()) return;
+    if (model.liveMarkerIndex.find(frameId) != model.liveMarkerIndex.end())
+        return;
 
-    // Marker centers are in the same frame-local coordinates as the live scan cloud. Render a
-    // small 3D cross around each center so it remains visible from different viewpoints.
-    auto& dst = model.cloud->points();
-    const std::size_t first = dst.size();
-    constexpr float r = 2.0f; // scan coordinates are millimetres in the current rulermvs pipeline
-    constexpr std::uint32_t markerColor = 0xff00ffffu; // bright yellow, display only
+    const auto& frame = model.liveFrames[frameIt->second];
+    auto markerLocalPoints = std::make_shared<std::vector<JMEngine::Point>>();
+    markerLocalPoints->reserve(localMarkers.size() * 7u);
+
+    constexpr float r = 2.0f;
+    constexpr std::uint32_t markerColor = 0xff00ffffu;
     for (const auto& m : localMarkers) {
         const JMEngine::Vec3f c{m[0], m[1], m[2]};
         const std::array<JMEngine::Vec3f, 7> ps{{
             c,
-            {c.x-r,c.y,c.z},{c.x+r,c.y,c.z},
-            {c.x,c.y-r,c.z},{c.x,c.y+r,c.z},
-            {c.x,c.y,c.z-r},{c.x,c.y,c.z+r}
+            {c.x - r, c.y, c.z},
+            {c.x + r, c.y, c.z},
+            {c.x, c.y - r, c.z},
+            {c.x, c.y + r, c.z},
+            {c.x, c.y, c.z - r},
+            {c.x, c.y, c.z + r},
         }};
         for (const auto& q : ps) {
-            JMEngine::Point p; p.position=q; p.rgba=markerColor; dst.push_back(p);
+            JMEngine::Point p;
+            p.position = q;
+            p.rgba = markerColor;
+            markerLocalPoints->push_back(p);
         }
     }
+
+    auto& dst = model.cloud->points();
+    const std::size_t first = dst.size();
+    for (const auto& local : *markerLocalPoints)
+        dst.push_back(worldPointFromLocal(local, frame.pose));
+
     const std::size_t count = dst.size() - first;
     model.selectionMask.resize(dst.size(), 0u);
     model.liveMarkerIndex[frameId] = model.liveMarkerRanges.size();
-    model.liveMarkerRanges.push_back({frameId, first, count});
+    model.liveMarkerRanges.push_back({frameId, first, count, markerLocalPoints});
+
     if (first + count > model.gpuReservedPointCapacity) {
-        model.gpuReservedPointCapacity = std::max(first + count,
-            std::max<std::size_t>(1, model.gpuReservedPointCapacity) * 2u);
+        model.gpuReservedPointCapacity =
+            std::max(first + count, std::max<std::size_t>(1, model.gpuReservedPointCapacity) * 2u);
         if (model.glCreated) {
             model.liveBackCloud = std::make_shared<JMEngine::PointCloud>(model.cloud->points());
             model.liveBackUploadCursor = 0;
         }
     }
-    // Marker callback is CPU-only too.  Camera mode renders on the next camera frame;
-    // virtual mode requests one repaint and lets paintGL upload the new tail.
-    // Repaint is requested once by the unified SLAM-frame dispatch in MainWindow.
 }
 
-void PointCloudWidget::updateScanFramePoses(const std::shared_ptr<std::vector<LiveFramePoseUpdate>>& updates) {
-    if (!updates || updates->empty() || scanPreviewPath_.isEmpty()) return;
+
+void PointCloudWidget::updateScanFramePoses(
+    const std::shared_ptr<std::vector<LiveFramePoseUpdate>>& updates) {
+    if (!updates || updates->empty() || scanPreviewPath_.isEmpty())
+        return;
     const int index = findModel(scanPreviewPath_);
-    if (index < 0) return;
+    if (index < 0)
+        return;
     auto& model = *models_[static_cast<std::size_t>(index)];
-    if (!model.liveFramePoseMode) return;
+    if (!model.liveFramePoseMode || !model.cloud)
+        return;
+
+    auto& world = model.cloud->points();
     for (const auto& u : *updates) {
         const auto it = model.liveFrameIndex.find(u.frameId);
-        if (it == model.liveFrameIndex.end()) continue;
-        model.liveFrames[it->second].pose.m = u.pose;
+        if (it == model.liveFrameIndex.end())
+            continue;
+
+        auto& frame = model.liveFrames[it->second];
+        JMEngine::Mat4f nextPose;
+        nextPose.m = u.pose;
+        frame.pose = nextPose;
+
+        if (frame.localPoints && frame.first < world.size()) {
+            const std::size_t count =
+                std::min(frame.count, std::min(frame.localPoints->size(), world.size() - frame.first));
+            for (std::size_t i = 0; i < count; ++i)
+                world[frame.first + i] = worldPointFromLocal((*frame.localPoints)[i], nextPose);
+            if (count > 0)
+                model.livePoseDirtyRanges.push_back({frame.first, count});
+        }
+
+        const auto markerIt = model.liveMarkerIndex.find(u.frameId);
+        if (markerIt != model.liveMarkerIndex.end()) {
+            auto& marker = model.liveMarkerRanges[markerIt->second];
+            if (marker.localPoints && marker.first < world.size()) {
+                const std::size_t count = std::min(
+                    marker.count, std::min(marker.localPoints->size(), world.size() - marker.first));
+                for (std::size_t i = 0; i < count; ++i)
+                    world[marker.first + i] = worldPointFromLocal((*marker.localPoints)[i], nextPose);
+                if (count > 0)
+                    model.livePoseDirtyRanges.push_back({marker.first, count});
+            }
+        }
     }
-    // Only CPU pose data changed. In camera-driven mode it becomes visible on the next
-    // physical-camera render tick; do not enqueue a second repaint stream.
-    // Repaint is requested once by the unified SLAM-frame dispatch in MainWindow.
+
+    model.pickBlocks.clear();
+    model.pickGridIds.clear();
+    model.pickIndexedCloud = nullptr;
+    model.pickIndexedPointCount = 0;
 }
 
 void PointCloudWidget::uploadScanStatusFrame(ScanStatusGpu& layer) {
@@ -1356,43 +1441,135 @@ void PointCloudWidget::clearCurrentScanFrame() {
 }
 
 void PointCloudWidget::updateScanCameraPose(const ScanCameraViewPose& pose) {
-    scanCameraPose_ = pose;
+    // RGBDFusion can deliver callbacks from several workers. Older frames may still be useful
+    // for the accumulated live cloud, but they must never drive the current camera backwards.
+    if (scanCameraPose_ && pose.frameId < scanCameraPose_->frameId)
+        return;
 
-    // SLAM pose can arrive before the first realtime point chunk. Fit the first cloud
-    // before driving the observer so sceneRadius / clipping are valid for scan units.
-    if (!scanPreviewViewInitialized_) {
-        if (pose.trackingOk)
-            lastValidScanCameraPose_ = pose;
+    if (!pose.trackingOk) {
+        // Tracking loss keeps the last valid DISPLAY pose. The frustum changes colour/state but
+        // neither the displayed scanner camera nor the observer is allowed to jump to a failed RT.
+        if (lastValidScanCameraPose_) {
+            ScanCameraViewPose lost = *lastValidScanCameraPose_;
+            lost.frameId = pose.frameId;
+            lost.trackingOk = false;
+            scanCameraPose_ = lost;
+        } else {
+            scanCameraPose_ = pose;
+        }
         return;
     }
 
-    if (pose.trackingOk) {
-        lastValidScanCameraPose_ = pose;
-        if (scanCameraFollowEnabled_) {
-            const auto forward = JMEngine::example::normalize(pose.forward);
-            const auto right = JMEngine::example::normalize(pose.right);
-            const auto up = JMEngine::example::normalize(pose.up);
-            const float base = std::max(camera_.sceneRadius, 1.0f);
-            const float behind = std::max(base * 0.10f, 1.0f);
-            const float lookAhead = std::max(base * 0.24f, behind * 2.0f);
-            scanFollowTarget_ = JMEngine::example::add(
-                pose.position, JMEngine::example::mul(forward, lookAhead));
-            scanFollowDistance_ = behind + lookAhead;
-            scanFollowOrientation_ = quatFromBasis(
-                right, up, JMEngine::example::mul(forward, -1.0f));
-            if (!scanCameraFollowInitialized_) {
-                camera_.target = scanFollowTarget_;
-                camera_.distance = scanFollowDistance_;
-                camera_.orientation = scanFollowOrientation_;
-                camera_.panNdcX = 0.0f;
-                camera_.panNdcY = 0.0f;
-                scanCameraFollowInitialized_ = true;
-            }
-            camera_.sceneRadius = std::max(camera_.sceneRadius, scanFollowDistance_ * 1.5f);
+    // There is exactly ONE visual camera pose during scanning. Both the drawn scanner frustum
+    // and the observer use this same pose. Do not use a second observer-side filter.
+    //
+    // A fixed EMA (the previous implementation) still visibly oscillates when SLAM alternates
+    // around the true pose: it simply follows the jitter more slowly. Instead use an adaptive
+    // dead-band filter here: tiny pose changes are treated as tracking noise, while larger real
+    // camera motion quickly approaches alpha=1. The dead-band is measured against the *displayed*
+    // pose, so genuine slow motion accumulates and is eventually followed rather than being lost.
+    ScanCameraViewPose filtered = pose;
+    const auto rawRight = JMEngine::example::normalize(pose.right);
+    const auto rawUp = JMEngine::example::normalize(pose.up);
+    const auto rawForward = JMEngine::example::normalize(pose.forward);
+    auto visualQ = quatFromBasis(rawRight, rawUp, JMEngine::example::mul(rawForward, -1.0f));
+
+    if (lastValidScanCameraPose_ && lastValidScanCameraPose_->trackingOk) {
+        const auto& prev = *lastValidScanCameraPose_;
+        const auto prevQ = quatFromBasis(
+            JMEngine::example::normalize(prev.right),
+            JMEngine::example::normalize(prev.up),
+            JMEngine::example::mul(JMEngine::example::normalize(prev.forward), -1.0f));
+
+        const JMEngine::Vec3f delta = JMEngine::example::sub(pose.position, prev.position);
+        const float positionDelta = JMEngine::example::length(delta);
+        const float base = std::max(camera_.sceneRadius, 1.0f);
+        // Keep the threshold scale-relative instead of assuming millimetres. About 0.3% of the
+        // current scene radius rejects sub-pixel/SLAM pose noise but still follows deliberate
+        // hand motion quickly. The tiny absolute floor only protects degenerate test scenes.
+        const float positionDeadBand = std::max(1.0e-4f, base * 0.0030f);
+        const float positionFullFollow = std::max(positionDeadBand * 8.0f, base * 0.020f);
+        if (positionDelta <= positionDeadBand) {
+            filtered.position = prev.position;
+        } else {
+            const float motion = std::clamp(
+                (positionDelta - positionDeadBand) /
+                    std::max(positionFullFollow - positionDeadBand, 1.0e-6f),
+                0.0f, 1.0f);
+            const float alpha = 0.20f + 0.80f * motion;
+            filtered.position = JMEngine::example::add(prev.position,
+                JMEngine::example::mul(delta, alpha));
+        }
+
+        auto alignedRawQ = visualQ;
+        float qDot = prevQ.w * alignedRawQ.w + prevQ.x * alignedRawQ.x +
+                     prevQ.y * alignedRawQ.y + prevQ.z * alignedRawQ.z;
+        if (qDot < 0.0f) {
+            alignedRawQ = {-alignedRawQ.w, -alignedRawQ.x, -alignedRawQ.y, -alignedRawQ.z};
+            qDot = -qDot;
+        }
+        qDot = std::clamp(qDot, -1.0f, 1.0f);
+        const float rotationDelta = 2.0f * std::acos(qDot);
+        constexpr float kPi = 3.14159265358979323846f;
+        constexpr float rotationDeadBand = 0.35f * kPi / 180.0f;
+        constexpr float rotationFullFollow = 3.0f * kPi / 180.0f;
+        if (rotationDelta <= rotationDeadBand) {
+            visualQ = prevQ;
+        } else {
+            const float motion = std::clamp(
+                (rotationDelta - rotationDeadBand) /
+                    (rotationFullFollow - rotationDeadBand),
+                0.0f, 1.0f);
+            const float alpha = 0.16f + 0.84f * motion;
+            visualQ = slerpQuat(prevQ, alignedRawQ, alpha);
         }
     }
-    // Tracking lost: keep the last valid observer pose so the view does not jump.
-    // Repaint is requested once by the unified SLAM-frame dispatch in MainWindow.
+
+    // Rebuild an orthonormal basis from the single filtered quaternion.  Blending forward/up
+    // independently can make the basis breathe and is visible as small observer roll/yaw jitter.
+    filtered.right = JMEngine::example::normalize(
+        JMEngine::example::OrbitCamera::rotate(visualQ, {1.0f, 0.0f, 0.0f}));
+    filtered.up = JMEngine::example::normalize(
+        JMEngine::example::OrbitCamera::rotate(visualQ, {0.0f, 1.0f, 0.0f}));
+    filtered.forward = JMEngine::example::normalize(JMEngine::example::mul(
+        JMEngine::example::OrbitCamera::rotate(visualQ, {0.0f, 0.0f, 1.0f}), -1.0f));
+
+    lastValidScanCameraPose_ = filtered;
+    scanCameraPose_ = filtered;
+
+    // SLAM pose can arrive before the first realtime point chunk. Fit the first cloud before
+    // driving the observer so sceneRadius / clipping are valid for scan units.
+    if (!scanPreviewViewInitialized_ || !scanCameraFollowEnabled_)
+        return;
+
+    // Scanner chase view: keep exactly the same orientation as the displayed scanner camera,
+    // but place the observer a small, fixed distance behind it.  Do NOT add another pose filter
+    // here; the rigid offset is derived from the same filtered displayPose every frame.
+    //
+    // target   = scannerPosition + forward * lookDistance
+    // distance = lookDistance + behindDistance
+    // eye      = target - forward * distance
+    //          = scannerPosition - forward * behindDistance
+    //
+    // This gives a stable view slightly behind the physical/SLAM camera while preserving the
+    // exact scanner viewing direction.
+    const float base = std::max(camera_.sceneRadius, 1.0f);
+    const float lookDistance = std::max(base * 0.24f, 1.0f);
+    const float behindDistance = std::max(base * 0.08f, 0.5f);
+    scanFollowTarget_ = JMEngine::example::add(
+        filtered.position, JMEngine::example::mul(filtered.forward, lookDistance));
+    scanFollowDistance_ = lookDistance + behindDistance;
+    scanFollowOrientation_ = visualQ;
+
+    // Apply the same display orientation immediately.  The only observer/scanner difference is
+    // the fixed backwards translation above; there is intentionally no second EMA or follow lag.
+    camera_.target = scanFollowTarget_;
+    camera_.distance = scanFollowDistance_;
+    camera_.orientation = scanFollowOrientation_;
+    camera_.panNdcX = 0.0f;
+    camera_.panNdcY = 0.0f;
+    scanCameraFollowInitialized_ = true;
+    camera_.sceneRadius = std::max(camera_.sceneRadius, scanFollowDistance_ * 1.5f);
 }
 
 void PointCloudWidget::clearScanCameraPose() {
@@ -1400,25 +1577,23 @@ void PointCloudWidget::clearScanCameraPose() {
     lastValidScanCameraPose_.reset();
     scanCameraFollowEnabled_ = true;
     scanCameraFollowInitialized_ = false;
+    scanFollowTarget_ = {};
+    scanFollowOrientation_ = {};
     scanFollowDistance_ = 0.0f;
     update();
 }
 
 void PointCloudWidget::advanceScanCameraFollow() {
-    // Camera-pose following is identical for physical and virtual scanning.
-    // Source type never changes the observer update policy.
     if (!scanCameraFollowEnabled_ || !scanCameraFollowInitialized_)
         return;
 
-    // Both sources apply the same scan pose on the same render tick. Do not
-    // introduce source-specific smoothing/lag.
-    constexpr float positionAlpha = 1.0f;
-    constexpr float rotationAlpha = 1.0f;
-    camera_.target.x += (scanFollowTarget_.x - camera_.target.x) * positionAlpha;
-    camera_.target.y += (scanFollowTarget_.y - camera_.target.y) * positionAlpha;
-    camera_.target.z += (scanFollowTarget_.z - camera_.target.z) * positionAlpha;
-    camera_.distance += (scanFollowDistance_ - camera_.distance) * positionAlpha;
-    camera_.orientation = slerpQuat(camera_.orientation, scanFollowOrientation_, rotationAlpha);
+    // Keep the observer rigidly attached just behind the displayed scanner-camera pose.
+    // updateScanCameraPose() performs the only filtering step; paintGL() must not introduce a
+    // second delay.  Orientation is identical to the scanner camera and the fixed behind offset
+    // is already encoded in scanFollowDistance_.
+    camera_.target = scanFollowTarget_;
+    camera_.distance = scanFollowDistance_;
+    camera_.orientation = scanFollowOrientation_;
     camera_.panNdcX = 0.0f;
     camera_.panNdcY = 0.0f;
 }
@@ -2167,9 +2342,13 @@ void PointCloudWidget::paintGL() {
         renderFpsClock_.start();
     ++renderFpsFrameCount_;
     const qint64 fpsElapsedMs = renderFpsClock_.elapsed();
-    if (fpsElapsedMs >= 500) {
-        const int tenths = int((qint64(renderFpsFrameCount_) * 10000 + fpsElapsedMs / 2) / fpsElapsedMs);
-        renderFpsTenths_.store(tenths, std::memory_order_relaxed);
+    if (fpsElapsedMs >= 1000) {
+        const int instantTenths =
+            int((qint64(renderFpsFrameCount_) * 10000 + fpsElapsedMs / 2) / fpsElapsedMs);
+        const int previous = renderFpsTenths_.load(std::memory_order_relaxed);
+        const int filteredTenths =
+            previous > 0 ? (previous * 3 + instantTenths + 2) / 4 : instantTenths;
+        renderFpsTenths_.store(filteredTenths, std::memory_order_relaxed);
         renderFpsFrameCount_ = 0;
         renderFpsClock_.restart();
     }
@@ -2194,6 +2373,39 @@ void PointCloudWidget::paintGL() {
     for (auto& m : models_) {
         uploadModelIncremental(*m, budget);
         uploadLiveBackIncremental(*m, budget);
+
+        // Pose optimization only rewrites the affected world-baked frame ranges.
+        // Coalesce adjacent ranges so one optimization batch usually becomes one small
+        // glBufferSubData sequence rather than hundreds of historical draw calls.
+        if (m->glCreated && !m->livePoseDirtyRanges.empty()) {
+            auto ranges = std::move(m->livePoseDirtyRanges);
+            m->livePoseDirtyRanges.clear();
+            std::sort(ranges.begin(), ranges.end(),
+                      [](const auto& a, const auto& b) { return a.first < b.first; });
+
+            std::size_t mergedFirst = ranges.front().first;
+            std::size_t mergedEnd = mergedFirst + ranges.front().second;
+            auto flushRange = [&](std::size_t first, std::size_t end) {
+                if (first >= end || first >= m->uploadPointCursor)
+                    return;
+                end = std::min(end, m->uploadPointCursor);
+                if (end > first)
+                    uploadPointRangeNow(*m, first, end - first);
+            };
+
+            for (std::size_t i = 1; i < ranges.size(); ++i) {
+                const std::size_t first = ranges[i].first;
+                const std::size_t end = first + ranges[i].second;
+                if (first <= mergedEnd) {
+                    mergedEnd = std::max(mergedEnd, end);
+                } else {
+                    flushRange(mergedFirst, mergedEnd);
+                    mergedFirst = first;
+                    mergedEnd = end;
+                }
+            }
+            flushRange(mergedFirst, mergedEnd);
+        }
     }
     uploadScanStatusFrame(recoveryScanGpu_);
     uploadScanStatusFrame(currentScanGpu_);
@@ -2296,43 +2508,37 @@ void PointCloudWidget::drawModel(Model& m) {
     prog.setUniformValue("uUseTexture", 0.0f);
 #endif
 
-    backend_->bindRenderLayout(*this, m.gpu);
-    if (pointMode && m.liveFramePoseMode && !m.liveFrames.empty()) {
-        // One shared local-point VBO; each frame is drawn with its latest optimized RT.
-        // getResults() therefore changes only tiny CPU pose records, never historical point data.
-        const auto vp = currentMvp();
-        for (const auto& frame : m.liveFrames) {
-            if (frame.count == 0 || frame.first >= std::size_t(m.drawPointCount)) continue;
-            const auto world = JMEngine::example::multiply(m.modelTransform, frame.pose);
-            const auto frameMvp = JMEngine::example::multiply(vp, world);
-            prog.setUniformValue("uMVP", QMatrix4x4(frameMvp.m.data()).transposed());
+    QMatrix3x3 normalMatrix;
+    normalMatrix(0, 0) = mm[0];
+    normalMatrix(0, 1) = mm[4];
+    normalMatrix(0, 2) = mm[8];
+    normalMatrix(1, 0) = mm[1];
+    normalMatrix(1, 1) = mm[5];
+    normalMatrix(1, 2) = mm[9];
+    normalMatrix(2, 0) = mm[2];
+    normalMatrix(2, 1) = mm[6];
+    normalMatrix(2, 2) = mm[10];
+    prog.setUniformValue("uNormalMatrix", normalMatrix);
 
-            QMatrix3x3 normalMatrix;
-            normalMatrix(0,0)=world.m[0]; normalMatrix(0,1)=world.m[4]; normalMatrix(0,2)=world.m[8];
-            normalMatrix(1,0)=world.m[1]; normalMatrix(1,1)=world.m[5]; normalMatrix(1,2)=world.m[9];
-            normalMatrix(2,0)=world.m[2]; normalMatrix(2,1)=world.m[6]; normalMatrix(2,2)=world.m[10];
-            prog.setUniformValue("uNormalMatrix", normalMatrix);
-            const GLsizei count = static_cast<GLsizei>(std::min<std::size_t>(frame.count, std::size_t(m.drawPointCount) - frame.first));
-            glDrawArrays(GL_POINTS, static_cast<GLint>(frame.first), count);
-        }
-        // 3D marker observations are stored in each frame's local coordinates and rendered
-        // with that frame's current pose. They therefore follow live marker/SLAM optimization.
+    backend_->bindRenderLayout(*this, m.gpu);
+    if (pointMode) {
+        // Live history is already baked to world coordinates. Regardless of scan length this
+        // stays one draw call instead of N draw calls for N historical SLAM frames.
+        glDrawArrays(GL_POINTS, 0, m.drawPointCount);
+
+        // Marker crosses share the same world-baked VBO. Draw them once more with a larger
+        // point size for visibility; normal texture/geometry scans have no marker ranges here.
         if (!m.liveMarkerRanges.empty()) {
             prog.setUniformValue("uPointSize", 9.0f * float(devicePixelRatioF()));
             for (const auto& marker : m.liveMarkerRanges) {
-                const auto fit = m.liveFrameIndex.find(marker.frameId);
-                if (fit == m.liveFrameIndex.end() || marker.count == 0 || marker.first >= std::size_t(m.drawPointCount)) continue;
-                const auto& frame = m.liveFrames[fit->second];
-                const auto world = JMEngine::example::multiply(m.modelTransform, frame.pose);
-                const auto markerMvp = JMEngine::example::multiply(vp, world);
-                prog.setUniformValue("uMVP", QMatrix4x4(markerMvp.m.data()).transposed());
-                const GLsizei markerCount = static_cast<GLsizei>(std::min<std::size_t>(marker.count, std::size_t(m.drawPointCount) - marker.first));
+                if (marker.count == 0 || marker.first >= std::size_t(m.drawPointCount))
+                    continue;
+                const GLsizei markerCount = static_cast<GLsizei>(
+                    std::min<std::size_t>(marker.count, std::size_t(m.drawPointCount) - marker.first));
                 glDrawArrays(GL_POINTS, static_cast<GLint>(marker.first), markerCount);
             }
             prog.setUniformValue("uPointSize", 3.0f * float(devicePixelRatioF()));
         }
-    } else if (pointMode) {
-        glDrawArrays(GL_POINTS, 0, m.drawPointCount);
     } else if (m.drawIndexCount > 0) {
         if (m.displayMode == DisplayMode::Solid || m.displayMode == DisplayMode::SolidWireframe)
             glDrawElements(GL_TRIANGLES, m.drawIndexCount, GL_UNSIGNED_INT, nullptr);
@@ -2832,14 +3038,15 @@ void PointCloudWidget::updateOrbitPivotForActiveModel() {
     };
 
     if (model->liveFramePoseMode && !model->liveFrames.empty()) {
+        // Live scan history is already stored in world coordinates. Only the scene-level
+        // modelTransform remains to be applied here; applying frame.pose again would double it.
         const auto& points = model->cloud->points();
         for (const auto& frame : model->liveFrames) {
             if (frame.count == 0 || frame.first >= points.size())
                 continue;
             const std::size_t end = std::min(points.size(), frame.first + frame.count);
-            const auto world = JMEngine::example::multiply(model->modelTransform, frame.pose);
             for (std::size_t i = frame.first; i < end; ++i)
-                consumeWorld(points[i], world);
+                consumeWorld(points[i], model->modelTransform);
         }
     } else if (model->meshMode && model->mesh) {
         const auto& idx = model->mesh->indices();

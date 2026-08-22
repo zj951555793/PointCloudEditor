@@ -15,6 +15,20 @@ void FrameQueue::setCapacity(std::size_t capacity) {
         queue_.pop_front();
 }
 
+
+bool FrameQueue::pushSequential(CameraFrame frame) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (closed_)
+        return false;
+
+    if (queue_.size() >= capacity_)
+        return false;
+
+    queue_.push_back(std::move(frame));
+    condition_.notify_one();
+    return true;
+}
+
 bool FrameQueue::pushLatest(CameraFrame frame) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (closed_)

@@ -2,14 +2,19 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <cstdint>
 #include <deque>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
+#include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -148,7 +153,8 @@ class RulerMvsBackend final : public ISlam {
         textureK_.at<double>(0, 2) = camera_.cx;
         textureK_.at<double>(1, 1) = camera_.fy;
         textureK_.at<double>(1, 2) = camera_.cy;
-        if (config_.registrationMode == ScanRegistrationMode::Texture) {
+        if (config_.registrationMode == ScanRegistrationMode::Texture &&
+            config_.keepTextureInMemory) {
             rulermvs::createUndistorRectifyMap(
                 camera_, {}, camera_.nodistor().noskew(), textureMapX_, textureMapY_);
         }
@@ -186,14 +192,17 @@ class RulerMvsBackend final : public ISlam {
         inflight_.store(0, std::memory_order_release);
         submitted_.store(0, std::memory_order_release);
         completed_.store(0, std::memory_order_release);
+        converted_.store(0, std::memory_order_release);
         pendingReplaced_.store(0, std::memory_order_release);
         {
             std::lock_guard<std::mutex> lock(inputMutex_);
-            pendingFrame_.reset();
+            pendingFrames_.clear();
         }
         {
             std::lock_guard<std::mutex> lock(stateMutex_);
             lastValidFramePose_.release();
+            lastValidPoseFrameId_ = -1;
+            lastStateFrameId_ = -1;
             pose_ = Pose{};
             cloud_ = std::make_shared<PointCloud>();
             lastPublishedPoseByFrame_.clear();
@@ -203,6 +212,7 @@ class RulerMvsBackend final : public ISlam {
             textureImages_.clear();
         }
 
+        startResultWorkers();
         fusion_->setTraceCallBack(
             [this](const rgbdslam::IRGBDResult& result) { handleFusionResult(result); });
         fusion_->start();
@@ -221,8 +231,20 @@ class RulerMvsBackend final : public ISlam {
 
         const int maxInflight = std::max(1, config_.maxInflightFrames);
         if (inflight_.load(std::memory_order_acquire) >= maxInflight) {
-            pendingFrame_ = frame;
-            pendingReplaced_.fetch_add(1, std::memory_order_relaxed);
+            // Preserve a short sequence of adjacent frames instead of replacing
+            // one pending frame with the newest image. Fast turntable motion
+            // needs small inter-frame pose changes for robust registration.
+            const std::size_t maxPending =
+                std::size_t(std::clamp(maxInflight, 3, 8));
+            if (pendingFrames_.size() >= maxPending) {
+                pendingReplaced_.fetch_add(1, std::memory_order_relaxed);
+                std::cout << "[SCAN STALL][SLAM INPUT] frame=" << frame.frameId
+                          << " pending=" << pendingFrames_.size()
+                          << " inflight=" << inflight_.load(std::memory_order_relaxed)
+                          << " dropNewest=1" << std::endl;
+                return true;
+            }
+            pendingFrames_.push_back(frame);
             return true;
         }
 
@@ -251,8 +273,9 @@ class RulerMvsBackend final : public ISlam {
         accepting_.store(false, std::memory_order_release);
         {
             std::lock_guard<std::mutex> lock(inputMutex_);
-            pendingFrame_.reset();
+            pendingFrames_.clear();
         }
+        stopResultWorkers();
         fusion_->stop();
 
         fusion_->optimizePointMap(
@@ -292,9 +315,10 @@ class RulerMvsBackend final : public ISlam {
         accepting_.store(false, std::memory_order_release);
         {
             std::lock_guard<std::mutex> lock(inputMutex_);
-            pendingFrame_.reset();
+            pendingFrames_.clear();
         }
 
+        stopResultWorkers();
         if (fusion_)
             fusion_->stop();
         fusion_.reset();
@@ -304,6 +328,7 @@ class RulerMvsBackend final : public ISlam {
         inflight_.store(0, std::memory_order_release);
         submitted_.store(0, std::memory_order_release);
         completed_.store(0, std::memory_order_release);
+        converted_.store(0, std::memory_order_release);
         pendingReplaced_.store(0, std::memory_order_release);
 
         {
@@ -311,6 +336,8 @@ class RulerMvsBackend final : public ISlam {
             pose_ = Pose{};
             cloud_ = std::make_shared<PointCloud>();
             lastValidFramePose_.release();
+            lastValidPoseFrameId_ = -1;
+            lastStateFrameId_ = -1;
             lastPublishedPoseByFrame_.clear();
         }
         {
@@ -335,8 +362,12 @@ class RulerMvsBackend final : public ISlam {
     }
 
     std::vector<TextureKeyframe> takeTextureKeyframes() override {
+        if (!config_.keepTextureInMemory)
+            return {};
+
         std::unordered_map<int, cv::Mat> finalWorldFromCamera;
         if (fusion_) {
+            std::lock_guard<std::mutex> resultsLock(fusionResultsMutex_);
             fusion_->getResults([this, &finalWorldFromCamera](const rgbdslam::IRGBDResult& result) {
                 if (result.getFlag() != 0)
                     return;
@@ -395,6 +426,7 @@ class RulerMvsBackend final : public ISlam {
     static constexpr int kDepthScale = 16;
     static constexpr int kRectifyScale = 4;
     static constexpr int kLivePoseRefreshInterval = 30;
+    static constexpr std::size_t kMaxRawResultQueue = 4;
 
     static void setError(std::string* error, const std::string& message) {
         if (error)
@@ -459,7 +491,8 @@ class RulerMvsBackend final : public ISlam {
                 // then resize RGB to the /16 depth size before RGBDFusion consumes it.
                 cv::resize(color, color, depthSize_);
 
-                if (config_.registrationMode == ScanRegistrationMode::Texture) {
+                if (config_.registrationMode == ScanRegistrationMode::Texture &&
+                    config_.keepTextureInMemory) {
                     const int textureStride = std::max(1, config_.textureKeyframeStride);
                     if ((frameIndex % textureStride) == 0) {
                         cv::Mat textureColor;
@@ -488,11 +521,11 @@ class RulerMvsBackend final : public ISlam {
             if (inflight_.load(std::memory_order_relaxed) > 0)
                 inflight_.fetch_sub(1, std::memory_order_acq_rel);
 
-            if (accepting_.load(std::memory_order_acquire) && pendingFrame_) {
+            if (accepting_.load(std::memory_order_acquire) && !pendingFrames_.empty()) {
                 const int maxInflight = std::max(1, config_.maxInflightFrames);
                 if (inflight_.load(std::memory_order_acquire) < maxInflight) {
-                    next = std::move(*pendingFrame_);
-                    pendingFrame_.reset();
+                    next = std::move(pendingFrames_.front());
+                    pendingFrames_.pop_front();
                     inflight_.fetch_add(1, std::memory_order_acq_rel);
                     hasNext = true;
                 }
@@ -584,53 +617,245 @@ class RulerMvsBackend final : public ISlam {
             callback(frame);
     }
 
-    void handleFusionResult(const rgbdslam::IRGBDResult& result) {
-        const int completedNow = completed_.fetch_add(1, std::memory_order_relaxed) + 1;
-        const bool trackingOk = result.getFlag() == 0;
+    struct ResultSignal {
+        int frameId{-1};
+    };
 
-        cv::Mat measuredPose = result.getRT();
+    struct RawFusionResult {
+        int frameId{-1};
+        bool trackingOk{false};
+        cv::Mat measuredPose;
+        std::vector<cv::Point3f> points;
+        std::vector<cv::Point3f> normals;
+        std::vector<cv::Vec3b> colors;
+    };
+
+    void startResultWorkers() {
+        stopResultWorkers();
+        {
+            std::lock_guard<std::mutex> lock(resultSignalMutex_);
+            pendingResultSignals_.clear();
+            acceptedResultFrameIds_.clear();
+        }
+        {
+            std::lock_guard<std::mutex> lock(resultConvertMutex_);
+            pendingRawResults_.clear();
+        }
+        resultWorkersRunning_.store(true, std::memory_order_release);
+        resultConsumerThread_ = std::thread([this] { resultConsumerLoop(); });
+        resultConvertThread_ = std::thread([this] { resultConvertLoop(); });
+    }
+
+    void stopResultWorkers() {
+        resultWorkersRunning_.store(false, std::memory_order_release);
+        resultSignalCv_.notify_all();
+        resultConvertCv_.notify_all();
+        if (resultConsumerThread_.joinable())
+            resultConsumerThread_.join();
+        if (resultConvertThread_.joinable())
+            resultConvertThread_.join();
+        {
+            std::lock_guard<std::mutex> lock(resultSignalMutex_);
+            pendingResultSignals_.clear();
+            acceptedResultFrameIds_.clear();
+        }
+        {
+            std::lock_guard<std::mutex> lock(resultConvertMutex_);
+            pendingRawResults_.clear();
+        }
+    }
+
+    // This callback runs on RGBDFusion's worker thread(s). Keep it deliberately tiny.
+    // IRGBDResult is received by const reference and its lifetime is not documented as extending
+    // past the callback, so never queue the reference/pointer itself. Queue only frame metadata.
+    // The consumer snapshots BOTH RT and cloud from the same getResults() result so the pose can
+    // never be an older callback-time RT paired with a newer/optimized point cloud.
+    void handleFusionResult(const rgbdslam::IRGBDResult& result) {
+        completed_.fetch_add(1, std::memory_order_relaxed);
+        if (!resultWorkersRunning_.load(std::memory_order_acquire))
+            return;
+
+        ResultSignal signal;
+        signal.frameId = result.getFrameID();
+
+        {
+            std::lock_guard<std::mutex> lock(resultSignalMutex_);
+            auto pending = pendingResultSignals_.find(signal.frameId);
+            if (pending != pendingResultSignals_.end()) {
+                // Same frame callback while it is still pending: one wake-up is enough.
+                pending->second = std::move(signal);
+            } else if (!acceptedResultFrameIds_.insert(signal.frameId).second) {
+                // The frame is already being consumed or has been published. Do not append a
+                // duplicate persistent live frame if RGBDFusion reports the same id twice.
+                return;
+            } else {
+                pendingResultSignals_.emplace(signal.frameId, std::move(signal));
+            }
+        }
+        resultSignalCv_.notify_one();
+    }
+
+    void resultConsumerLoop() {
+        using namespace std::chrono_literals;
+        while (true) {
+            std::map<int, ResultSignal> wanted;
+
+            // Bound the full-resolution raw cloud queue. If conversion temporarily falls
+            // behind, only tiny ResultSignal metadata accumulates; large point buffers do not.
+            std::size_t availableSlots = 0;
+            {
+                std::unique_lock<std::mutex> rawLock(resultConvertMutex_);
+                resultConvertCv_.wait(rawLock, [this] {
+                    return !resultWorkersRunning_.load(std::memory_order_acquire) ||
+                           pendingRawResults_.size() < kMaxRawResultQueue;
+                });
+                if (!resultWorkersRunning_.load(std::memory_order_acquire))
+                    break;
+                availableSlots = kMaxRawResultQueue - pendingRawResults_.size();
+            }
+
+            {
+                std::unique_lock<std::mutex> lock(resultSignalMutex_);
+                resultSignalCv_.wait(lock, [this] {
+                    return !resultWorkersRunning_.load(std::memory_order_acquire) ||
+                           !pendingResultSignals_.empty();
+                });
+                if (!resultWorkersRunning_.load(std::memory_order_acquire))
+                    break;
+
+                // pendingResultSignals_ is ordered by frame id. Consume only as many frames as
+                // the conversion queue can accept, keeping callback-side memory bounded.
+                const std::size_t takeCount =
+                    std::min(availableSlots, pendingResultSignals_.size());
+                auto it = pendingResultSignals_.begin();
+                for (std::size_t i = 0; i < takeCount && it != pendingResultSignals_.end(); ++i) {
+                    auto current = it++;
+                    wanted.emplace(current->first, std::move(current->second));
+                    pendingResultSignals_.erase(current);
+                }
+            }
+
+            if (!fusion_ || wanted.empty())
+                continue;
+
+            std::vector<RawFusionResult> ready;
+            ready.reserve(wanted.size());
+            {
+                // getResults()/toCloud() are deliberately off RGBDFusion callback threads.
+                // IRGBDResult itself cannot safely cross the callback boundary, so this worker
+                // snapshots owning vectors; the next worker performs the expensive coordinate
+                // conversion / PointCloud construction.
+                std::lock_guard<std::mutex> resultsLock(fusionResultsMutex_);
+                fusion_->getResults([&wanted, &ready](const rgbdslam::IRGBDResult& result) {
+                    auto it = wanted.find(result.getFrameID());
+                    if (it == wanted.end())
+                        return;
+
+                    RawFusionResult raw;
+                    raw.frameId = result.getFrameID();
+                    raw.trackingOk = result.getFlag() == 0;
+                    // IMPORTANT: RT and point cloud must come from this same getResults()
+                    // snapshot. Callback-time RT may already have been changed by live
+                    // optimization by the time getResults() exposes the frame.
+                    raw.measuredPose = result.getRT().clone();
+                    result.toCloud(raw.points, raw.normals, raw.colors);
+                    ready.push_back(std::move(raw));
+                    wanted.erase(it);
+                });
+            }
+
+            // Some SDK builds invoke trace slightly before the frame becomes visible from
+            // getResults(). Requeue the tiny metadata rather than spinning or dropping it.
+            if (!wanted.empty() && resultWorkersRunning_.load(std::memory_order_acquire)) {
+                std::this_thread::sleep_for(2ms);
+                {
+                    std::lock_guard<std::mutex> lock(resultSignalMutex_);
+                    for (auto& item : wanted)
+                        pendingResultSignals_[item.first] = std::move(item.second);
+                }
+                resultSignalCv_.notify_one();
+            }
+
+            if (ready.empty())
+                continue;
+
+            std::sort(ready.begin(), ready.end(), [](const RawFusionResult& a,
+                                                     const RawFusionResult& b) {
+                return a.frameId < b.frameId;
+            });
+            {
+                std::lock_guard<std::mutex> lock(resultConvertMutex_);
+                for (auto& raw : ready)
+                    pendingRawResults_.push_back(std::move(raw));
+            }
+            resultConvertCv_.notify_all();
+        }
+    }
+
+    void resultConvertLoop() {
+        while (true) {
+            RawFusionResult raw;
+            {
+                std::unique_lock<std::mutex> lock(resultConvertMutex_);
+                resultConvertCv_.wait(lock, [this] {
+                    return !resultWorkersRunning_.load(std::memory_order_acquire) ||
+                           !pendingRawResults_.empty();
+                });
+                if (!resultWorkersRunning_.load(std::memory_order_acquire) &&
+                    pendingRawResults_.empty())
+                    break;
+                raw = std::move(pendingRawResults_.front());
+                pendingRawResults_.pop_front();
+            }
+            resultConvertCv_.notify_all();
+            convertAndPublishFusionResult(std::move(raw));
+        }
+    }
+
+    void convertAndPublishFusionResult(RawFusionResult raw) {
+        cv::Mat measuredPose = std::move(raw.measuredPose);
         if (!baseRtInv_.empty())
             measuredPose = baseRtInv_ * measuredPose;
 
         cv::Mat framePose = measuredPose;
         {
             std::lock_guard<std::mutex> lock(stateMutex_);
-            if (trackingOk)
-                lastValidFramePose_ = measuredPose.clone();
-            else if (!lastValidFramePose_.empty())
+            if (raw.trackingOk) {
+                // A late callback must not replace the recovery pose with an older frame.
+                if (raw.frameId >= lastValidPoseFrameId_) {
+                    lastValidFramePose_ = measuredPose.clone();
+                    lastValidPoseFrameId_ = raw.frameId;
+                }
+            } else if (!lastValidFramePose_.empty()) {
                 framePose = lastValidFramePose_;
+            }
         }
-
-        std::vector<cv::Point3f> pts;
-        std::vector<cv::Point3f> nls;
-        std::vector<cv::Vec3b> colors;
-        result.toCloud(pts, nls, colors);
 
         const int budgetPerFrame = std::max(
             250, config_.previewPointLimit / std::max(1, config_.maxFrames));
         const int limit = std::max(
             1, std::min(config_.previewPointsPerFrame, budgetPerFrame));
         const std::size_t stride = std::max<std::size_t>(
-            1, pts.size() / std::size_t(limit));
+            1, raw.points.size() / std::size_t(limit));
 
         PointCloud::Container localPoints;
         PointCloud::Container worldPoints;
-        localPoints.reserve(std::min<std::size_t>(pts.size(), std::size_t(limit)));
+        localPoints.reserve(std::min<std::size_t>(raw.points.size(), std::size_t(limit)));
         worldPoints.reserve(localPoints.capacity());
 
-        for (std::size_t i = 0; i < pts.size(); i += stride) {
+        for (std::size_t i = 0; i < raw.points.size(); i += stride) {
             Point local;
-            local.position = {pts[i].x, pts[i].y, pts[i].z};
-            if (i < nls.size())
-                local.normal = {nls[i].x, nls[i].y, nls[i].z};
-            if (i < colors.size())
-                local.rgba = packBgr(colors[i]);
+            local.position = {raw.points[i].x, raw.points[i].y, raw.points[i].z};
+            if (i < raw.normals.size())
+                local.normal = {raw.normals[i].x, raw.normals[i].y, raw.normals[i].z};
+            if (i < raw.colors.size())
+                local.rgba = packBgr(raw.colors[i]);
             localPoints.push_back(local);
 
             Point world = local;
-            world.position = transformPoint(framePose, pts[i]);
-            if (i < nls.size())
-                world.normal = transformNormal(framePose, nls[i]);
+            world.position = transformPoint(framePose, raw.points[i]);
+            if (i < raw.normals.size())
+                world.normal = transformNormal(framePose, raw.normals[i]);
             worldPoints.push_back(world);
 
             if (int(localPoints.size()) >= limit)
@@ -638,7 +863,7 @@ class RulerMvsBackend final : public ISlam {
         }
 
         std::shared_ptr<PointCloud> localCloud;
-        if (trackingOk && !localPoints.empty())
+        if (raw.trackingOk && !localPoints.empty())
             localCloud = std::make_shared<PointCloud>(std::move(localPoints));
         auto worldCloud = worldPoints.empty()
             ? std::shared_ptr<PointCloud>{}
@@ -650,21 +875,28 @@ class RulerMvsBackend final : public ISlam {
         UpdateCallback update;
         {
             std::lock_guard<std::mutex> lock(stateMutex_);
-            pose_ = displayed;
-            if (trackingOk && localCloud) {
-                cloud_ = localCloud;
-                lastPublishedPoseByFrame_[result.getFrameID()] = measured;
+            // pose()/cloud() represent the newest visual state only. Late frames are still
+            // published so the accumulated live cloud can fill holes, but they cannot roll
+            // the scanner's current state backwards.
+            if (raw.frameId >= lastStateFrameId_) {
+                lastStateFrameId_ = raw.frameId;
+                pose_ = displayed;
+                if (raw.trackingOk && localCloud)
+                    cloud_ = localCloud;
             }
+            if (raw.trackingOk && localCloud)
+                lastPublishedPoseByFrame_[raw.frameId] = measured;
             update = updateCallback_;
         }
 
         if (update && worldCloud) {
-            update(result.getFrameID(), displayed, std::move(localCloud),
-                   std::move(worldCloud), trackingOk);
+            update(raw.frameId, displayed, std::move(localCloud),
+                   std::move(worldCloud), raw.trackingOk);
         }
 
+        const int convertedNow = converted_.fetch_add(1, std::memory_order_relaxed) + 1;
         if (config_.registrationMode == ScanRegistrationMode::Texture &&
-            config_.maxFrames > 0 && completedNow % kLivePoseRefreshInterval == 0) {
+            config_.maxFrames > 0 && convertedNow % kLivePoseRefreshInterval == 0) {
             refreshLiveOptimizedPreview();
         }
     }
@@ -682,26 +914,29 @@ class RulerMvsBackend final : public ISlam {
             return;
 
         std::vector<FramePoseUpdate> updates;
-        fusion_->getResults([this, &updates](const rgbdslam::IRGBDResult& result) {
-            if (result.getFlag() != 0)
-                return;
+        {
+            std::lock_guard<std::mutex> resultsLock(fusionResultsMutex_);
+            fusion_->getResults([this, &updates](const rgbdslam::IRGBDResult& result) {
+                if (result.getFlag() != 0)
+                    return;
 
-            cv::Mat pose = result.getRT();
-            if (!baseRtInv_.empty())
-                pose = baseRtInv_ * pose;
-            const Pose next = poseFromCv(pose);
+                cv::Mat pose = result.getRT();
+                if (!baseRtInv_.empty())
+                    pose = baseRtInv_ * pose;
+                const Pose next = poseFromCv(pose);
 
-            std::lock_guard<std::mutex> lock(stateMutex_);
-            auto it = lastPublishedPoseByFrame_.find(result.getFrameID());
-            if (it == lastPublishedPoseByFrame_.end() || !poseChanged(it->second, next))
-                return;
-            it->second = next;
-            if (result.getFlag() != 0){
+                std::lock_guard<std::mutex> lock(stateMutex_);
+                auto it = lastPublishedPoseByFrame_.find(result.getFrameID());
+                if (it == lastPublishedPoseByFrame_.end() || !poseChanged(it->second, next))
+                    return;
+                it->second = next;
+
                 FramePoseUpdate framePose;
                 framePose.frameId = result.getFrameID();
                 framePose.pose = next;
-            }                 
-        });
+                updates.push_back(std::move(framePose));
+            });
+        }
 
         if (!updates.empty())
             callback(std::move(updates));
@@ -724,17 +959,32 @@ class RulerMvsBackend final : public ISlam {
     cv::Mat baseRt_;
     cv::Mat baseRtInv_;
     cv::Mat lastValidFramePose_;
+    int lastValidPoseFrameId_{-1};
+    int lastStateFrameId_{-1};
 
     rulermvs::IOneShot::Ptr oneshot_{nullptr};
     DBoW3::Vocabulary vocabulary_;
     std::unique_ptr<DBoW3::Database> database_;
     std::unique_ptr<rgbdslam::RGBDFusion> fusion_;
 
+    std::atomic<bool> resultWorkersRunning_{false};
+    std::thread resultConsumerThread_;
+    std::thread resultConvertThread_;
+    std::mutex resultSignalMutex_;
+    std::condition_variable resultSignalCv_;
+    std::map<int, ResultSignal> pendingResultSignals_;
+    std::unordered_set<int> acceptedResultFrameIds_;
+    std::mutex resultConvertMutex_;
+    std::condition_variable resultConvertCv_;
+    std::deque<RawFusionResult> pendingRawResults_;
+    std::mutex fusionResultsMutex_;
+
     std::mutex inputMutex_;
-    std::optional<CameraFrame> pendingFrame_;
+    std::deque<CameraFrame> pendingFrames_;
     std::atomic<int> inflight_{0};
     std::atomic<int> submitted_{0};
     std::atomic<int> completed_{0};
+    std::atomic<int> converted_{0};
     std::atomic<unsigned long long> pendingReplaced_{0};
     std::atomic<bool> accepting_{false};
 

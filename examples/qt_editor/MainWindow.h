@@ -100,6 +100,7 @@ class MainWindow final : public QMainWindow {
     QLabel* cameraAExposureValueLabel_{nullptr};
     QLabel* cameraBExposureValueLabel_{nullptr};
     QCheckBox* liveOptimizationCheck_{nullptr};
+    QCheckBox* keepTextureInMemoryCheck_{nullptr};
     QSlider* cameraABacklightSlider_{nullptr};
     QDoubleSpinBox* cameraABacklightSpin_{nullptr};
     QSlider* cameraBBacklightSlider_{nullptr};
@@ -122,6 +123,7 @@ class MainWindow final : public QMainWindow {
     std::unique_ptr<JMEngine::JMScanner> scanner_;
     std::thread reconstructionThread_;
     ScanUiConfig activeScanConfig_;
+    int lastScanVisualFrameId_{-1};
 
     QAction* openAction_{nullptr};
     QAction* saveAction_{nullptr};

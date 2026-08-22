@@ -14,6 +14,9 @@ class FrameQueue {
     explicit FrameQueue(std::size_t capacity = 1);
 
     void setCapacity(std::size_t capacity);
+    // Preserve chronological continuity: when full, reject the incoming
+    // newest frame instead of evicting an older frame already waiting.
+    bool pushSequential(CameraFrame frame);
     bool pushLatest(CameraFrame frame);
     bool pop(CameraFrame& frame);
     void close();

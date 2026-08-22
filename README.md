@@ -155,3 +155,10 @@ The Qt scan pipeline keeps camera acquisition, SLAM and rendering delivery separ
 - Point history is uploaded once; subsequent live optimization changes only per-frame transforms rather than rebuilding the point VBO.
 
 This design keeps the UI/OpenGL thread free of camera and SLAM computation and prevents queued rendering events from accumulating during SLAM bursts.
+
+## 2026-08-21 scanner/observer camera consistency fix
+
+The realtime scan observer now uses the exact same filtered visual pose as the scanner camera.
+The pose is filtered once, converted to a single orthonormal quaternion basis, and then shared by
+both the camera overlay and the OpenGL observer. The previous behind-camera offset and the second
+paintGL follow EMA were removed, so observer eye/forward/up no longer lag the scanner visual pose.

@@ -181,9 +181,12 @@ bool JMScanner::initialize(const ScanConfig& config) {
         impl_->liveCloud.reset();
         impl_->resultCloud.reset();
     }
-    // RGBDFusion inflight is controlled by RulerMvsSlam. The outer queue is only
-    // a latest-frame mailbox so stale camera pairs never accumulate behind it.
-    impl_->queue.setCapacity(1);
+    // Preserve a short run of consecutive camera pairs before the SLAM backend.
+    // Fast turntable motion needs small pose deltas between adjacent frames; a
+    // one-slot latest-only mailbox can otherwise turn 100,101,102... into
+    // 100,104,108... when the backend is briefly busy. Keep the queue bounded
+    // so latency and memory cannot grow without limit.
+    impl_->queue.setCapacity(std::size_t(std::clamp(config.maxInflightFrames, 3, 8)));
     impl_->queue.reopen();
     impl_->setState(ScanState::Idle);
     return true;
@@ -315,13 +318,15 @@ bool JMScanner::submit(CameraFrame frame) {
     const double submitGapMs = std::chrono::duration<double, std::milli>(now - lastSubmit).count();
     lastSubmit = now;
     const int submitFrameId = frame.frameId;
-    const bool replaced = impl_->queue.pushLatest(std::move(frame));
-    if (submitGapMs > 180.0 || replaced) {
+    // Do not evict an older queued frame: preserving adjacency is more important
+    // for fast rigid turntable motion than always displaying the newest frame.
+    const bool queued = impl_->queue.pushSequential(std::move(frame));
+    if (submitGapMs > 180.0 || !queued) {
         std::cout << "[SCAN STALL][SOURCE] frame=" << submitFrameId
-                  << " gap=" << submitGapMs << "ms replaced=" << (replaced ? 1 : 0)
+                  << " gap=" << submitGapMs << "ms queueDropNewest=" << (!queued ? 1 : 0)
                   << std::endl;
     }
-    if (replaced) {
+    if (!queued) {
         std::lock_guard<std::mutex> lock(impl_->mutex);
         ++impl_->statistics.replacedFrames;
     }
