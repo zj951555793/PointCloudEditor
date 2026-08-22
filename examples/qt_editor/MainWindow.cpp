@@ -3,6 +3,7 @@
 #include "ProcessingDialog.h"
 
 #include <JMEngine/processing/Processing.h>
+#include <JMEngine/ScanProject.h>
 
 #include <algorithm>
 #include <cmath>
@@ -32,6 +33,7 @@
 #include <QGridLayout>
 #include <QToolButton>
 #include <QHBoxLayout>
+#include <QGroupBox>
 #include <QStandardPaths>
 #include <QFile>
 #include <QJsonArray>
@@ -57,6 +59,65 @@
 
 namespace {
 constexpr int kPathRole = Qt::UserRole + 1;
+
+std::filesystem::path fsPathFromQString(const QString& path) {
+#ifdef _WIN32
+    return std::filesystem::path(path.toStdWString());
+#else
+    return std::filesystem::path(path.toStdString());
+#endif
+}
+
+QString qStringFromFsPath(const std::filesystem::path& path) {
+#ifdef _WIN32
+    return QString::fromStdWString(path.wstring());
+#else
+    return QString::fromStdString(path.string());
+#endif
+}
+
+QString defaultProjectWorkspacePath() {
+    return qStringFromFsPath(JMEngine::ProjectManager::defaultWorkspace());
+}
+
+std::filesystem::path nextDatedProjectPath() {
+    const auto now = QDateTime::currentDateTime();
+    const auto root = fsPathFromQString(defaultProjectWorkspacePath());
+    auto base = root / now.toString(QStringLiteral("yyyyMMdd")).toStdString() /
+                now.toString(QStringLiteral("scan_HHmmss")).toStdString();
+    auto candidate = base;
+    int suffix = 2;
+    while (std::filesystem::exists(candidate))
+        candidate = std::filesystem::path(base.string() + "_" + std::to_string(suffix++));
+    return candidate;
+}
+
+bool writeProjectOptimizedFlag(const QString& projectPath, bool optimized, QString* error = nullptr) {
+    const QString jsonPath = QDir(projectPath).filePath(QStringLiteral("project.json"));
+    QFile file(jsonPath);
+    QJsonObject root;
+    if (file.exists()) {
+        if (!file.open(QIODevice::ReadOnly)) {
+            if (error) *error = QString::fromUtf8("无法读取工程文件: %1").arg(jsonPath);
+            return false;
+        }
+        QJsonParseError parseError{};
+        const auto doc = QJsonDocument::fromJson(file.readAll(), &parseError);
+        file.close();
+        if (parseError.error != QJsonParseError::NoError || !doc.isObject()) {
+            if (error) *error = QString::fromUtf8("工程文件格式错误: %1").arg(parseError.errorString());
+            return false;
+        }
+        root = doc.object();
+    }
+    root.insert(QStringLiteral("version"), root.value(QStringLiteral("version")).toInt(3));
+    root.insert(QStringLiteral("optimized"), optimized);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        if (error) *error = QString::fromUtf8("无法写入工程文件: %1").arg(jsonPath);
+        return false;
+    }
+    return file.write(QJsonDocument(root).toJson(QJsonDocument::Indented)) >= 0;
+}
 
 QString defaultCameraModelJsonPath() {
 #ifdef Q_OS_ANDROID
@@ -157,6 +218,7 @@ MainWindow::MainWindow(const QString& initialFile, QWidget* parent) : QMainWindo
 
     createActions();
     createModelManager();
+    createProjectManager();
     createScanControl();
     view_->setModelAddedCallback([this](const QString& path) {
         for (int i = 0; i < modelList_->count(); ++i)
@@ -387,6 +449,17 @@ void MainWindow::createMenus() {
     file->addSeparator();
     file->addAction(QString::fromUtf8("退出"), qApp, &QApplication::quit);
 
+    auto* project = menuBar()->addMenu(QString::fromUtf8("工程"));
+    auto* newProjectAction = project->addAction(QString::fromUtf8("新建工程..."));
+    auto* openProjectAction = project->addAction(QString::fromUtf8("打开工程..."));
+    auto* loadProjectAction = project->addAction(QString::fromUtf8("重建并载入工程点云"));
+    project->addSeparator();
+    auto* closeProjectAction = project->addAction(QString::fromUtf8("关闭工程"));
+    connect(newProjectAction, &QAction::triggered, this, [this] { newProject(); });
+    connect(openProjectAction, &QAction::triggered, this, [this] { openProject(); });
+    connect(loadProjectAction, &QAction::triggered, this, [this] { loadProjectMergedCloud(); });
+    connect(closeProjectAction, &QAction::triggered, this, [this] { closeProject(); });
+
     auto* edit = menuBar()->addMenu(QString::fromUtf8("编辑"));
     edit->addAction(touchEditAction_);
     edit->addAction(objectMoveAction_);
@@ -547,6 +620,153 @@ void MainWindow::createModelManager() {
     modelList_->addAction(modelColorAction_);
     modelList_->addAction(removeModelAction_);
     connect(modelList_, &QListWidget::itemDoubleClicked, this, [this](QListWidgetItem*) { setCurrentModelColor(); });
+}
+
+void MainWindow::createProjectManager() {
+    projectDock_ = new QDockWidget(QString::fromUtf8("工程管理"), this);
+    auto* panel = new QWidget(projectDock_);
+    auto* root = new QVBoxLayout(panel);
+    root->setContentsMargins(6, 6, 6, 6);
+    root->setSpacing(6);
+
+    auto* summary = new QGroupBox(QString::fromUtf8("当前工程"), panel);
+    auto* form = new QFormLayout(summary);
+    form->setContentsMargins(8, 8, 8, 8);
+    form->setHorizontalSpacing(8);
+    form->setVerticalSpacing(5);
+    projectNameLabel_ = new QLabel(QStringLiteral("-"), summary);
+    projectPathLabel_ = new QLabel(QStringLiteral("-"), summary);
+    projectPathLabel_->setWordWrap(true);
+    projectFrameCountLabel_ = new QLabel(QStringLiteral("0"), summary);
+    projectOptimizedLabel_ = new QLabel(QString::fromUtf8("否"), summary);
+    form->addRow(QString::fromUtf8("名称"), projectNameLabel_);
+    form->addRow(QString::fromUtf8("路径"), projectPathLabel_);
+    form->addRow(QString::fromUtf8("帧数"), projectFrameCountLabel_);
+    form->addRow(QString::fromUtf8("已优化"), projectOptimizedLabel_);
+    root->addWidget(summary);
+
+    projectSaveScanCheck_ = new QCheckBox(QString::fromUtf8("扫描时写入当前工程"), panel);
+    projectSaveScanCheck_->setChecked(true);
+    root->addWidget(projectSaveScanCheck_);
+
+    auto* buttonGrid = new QGridLayout();
+    buttonGrid->setContentsMargins(0, 0, 0, 0);
+    buttonGrid->setHorizontalSpacing(6);
+    buttonGrid->setVerticalSpacing(6);
+    projectNewButton_ = new QPushButton(QString::fromUtf8("新建"), panel);
+    projectOpenButton_ = new QPushButton(QString::fromUtf8("打开"), panel);
+    projectLoadMergedButton_ = new QPushButton(QString::fromUtf8("载入点云"), panel);
+    projectCloseButton_ = new QPushButton(QString::fromUtf8("关闭"), panel);
+    buttonGrid->addWidget(projectNewButton_, 0, 0);
+    buttonGrid->addWidget(projectOpenButton_, 0, 1);
+    buttonGrid->addWidget(projectLoadMergedButton_, 1, 0);
+    buttonGrid->addWidget(projectCloseButton_, 1, 1);
+    root->addLayout(buttonGrid);
+    root->addStretch(1);
+
+    connect(projectNewButton_, &QPushButton::clicked, this, [this] { newProject(); });
+    connect(projectOpenButton_, &QPushButton::clicked, this, [this] { openProject(); });
+    connect(projectLoadMergedButton_, &QPushButton::clicked, this, [this] { loadProjectMergedCloud(); });
+    connect(projectCloseButton_, &QPushButton::clicked, this, [this] { closeProject(); });
+
+    projectDock_->setWidget(panel);
+    projectDock_->setMinimumWidth(260);
+    addDockWidget(Qt::RightDockWidgetArea, projectDock_);
+    if (modelDock_)
+        tabifyDockWidget(modelDock_, projectDock_);
+    updateProjectUi();
+}
+
+void MainWindow::updateProjectUi() {
+    const bool hasProject = !currentProjectPath_.isEmpty();
+    if (projectNameLabel_)
+        projectNameLabel_->setText(hasProject ? QString::fromStdString(currentProject_.name) : QStringLiteral("-"));
+    if (projectPathLabel_) {
+        projectPathLabel_->setText(hasProject ? currentProjectPath_ : QStringLiteral("-"));
+        projectPathLabel_->setToolTip(hasProject ? currentProjectPath_ : QString{});
+    }
+    if (projectFrameCountLabel_)
+        projectFrameCountLabel_->setText(hasProject ? QString::number(currentProject_.frameCount) : QStringLiteral("0"));
+    if (projectOptimizedLabel_)
+        projectOptimizedLabel_->setText(hasProject && currentProject_.optimized ? QString::fromUtf8("是")
+                                                                                : QString::fromUtf8("否"));
+    if (projectSaveScanCheck_)
+        projectSaveScanCheck_->setEnabled(hasProject);
+    if (projectCloseButton_)
+        projectCloseButton_->setEnabled(hasProject);
+    if (projectLoadMergedButton_)
+        projectLoadMergedButton_->setEnabled(hasProject);
+    if (scanStartButton_) {
+        const bool canStartForProject =
+            hasProject && (!scanner_ || scanner_->state() == JMEngine::ScanState::Idle ||
+                           scanner_->state() == JMEngine::ScanState::Error);
+        scanStartButton_->setEnabled(canStartForProject);
+    }
+}
+
+void MainWindow::newProject() {
+    const auto path = nextDatedProjectPath();
+    if (!projectManager_.createProject(path)) {
+        QMessageBox::warning(this, QString::fromUtf8("新建工程"), QString::fromUtf8("无法创建工程目录或 project.json"));
+        return;
+    }
+    JMEngine::ProjectInfo info;
+    if (!projectManager_.openProject(path, info)) {
+        QMessageBox::warning(this, QString::fromUtf8("新建工程"), QString::fromUtf8("工程已创建，但读取 project.json 失败"));
+        return;
+    }
+    currentProject_ = info;
+    currentProjectPath_ = qStringFromFsPath(info.path);
+    updateProjectUi();
+    statusBar()->showMessage(QString::fromUtf8("已按日期新建工程：") + currentProjectPath_, 8000);
+}
+
+void MainWindow::openProject() {
+    const QString dir = QFileDialog::getExistingDirectory(
+        this, QString::fromUtf8("打开工程目录"), defaultProjectWorkspacePath(),
+        QFileDialog::ShowDirsOnly | QFileDialog::DontResolveSymlinks);
+    if (dir.isEmpty())
+        return;
+
+    JMEngine::ProjectInfo info;
+    if (!projectManager_.openProject(fsPathFromQString(dir), info)) {
+        QMessageBox::warning(this, QString::fromUtf8("打开工程"), QString::fromUtf8("该目录不是有效工程，缺少 project.json"));
+        return;
+    }
+    currentProject_ = info;
+    currentProjectPath_ = qStringFromFsPath(info.path);
+    updateProjectUi();
+    statusBar()->showMessage(QString::fromUtf8("已打开工程：") + currentProjectPath_, 8000);
+}
+
+void MainWindow::closeProject() {
+    currentProject_ = JMEngine::ProjectInfo{};
+    currentProjectPath_.clear();
+    updateProjectUi();
+    statusBar()->showMessage(QString::fromUtf8("已关闭当前工程"), 5000);
+}
+
+void MainWindow::loadProjectMergedCloud() {
+    if (currentProjectPath_.isEmpty()) {
+        QMessageBox::information(this, QString::fromUtf8("工程点云"), QString::fromUtf8("请先打开或新建工程"));
+        return;
+    }
+    JMEngine::ScanProject project;
+    if (!project.openExisting(currentProjectPath_.toStdString())) {
+        QMessageBox::warning(this, QString::fromUtf8("工程点云"), QString::fromUtf8("无法读取工程 frames 目录"));
+        return;
+    }
+    const QDir resultDir(QDir(currentProjectPath_).filePath(QStringLiteral("result")));
+    QDir().mkpath(resultDir.absolutePath());
+    const QString output = resultDir.filePath(QStringLiteral("project_merged.ply"));
+    if (!project.rebuildProjectCloud(output.toStdString())) {
+        QMessageBox::warning(this, QString::fromUtf8("工程点云"), QString::fromUtf8("工程帧为空或合并点云失败"));
+        return;
+    }
+    addModelPath(output);
+    if (projectManager_.openProject(fsPathFromQString(currentProjectPath_), currentProject_))
+        updateProjectUi();
+    statusBar()->showMessage(QString::fromUtf8("已载入工程点云：") + output, 8000);
 }
 
 void MainWindow::createScanControl() {
@@ -951,6 +1171,12 @@ void MainWindow::createScanControl() {
     });
 
     connect(scanStartButton_, &QPushButton::clicked, this, [this] {
+        if (currentProjectPath_.isEmpty()) {
+            QMessageBox::information(this, QString::fromUtf8("开始扫描"), QString::fromUtf8("请先新建或打开工程"));
+            statusBar()->showMessage(QString::fromUtf8("请先新建工程，再开始扫描"), 8000);
+            updateProjectUi();
+            return;
+        }
         ScanUiConfig cfg = scanConfigFromUi();
         // Virtual mode always derives <dataDir>/calib.txt. Camera mode keeps the
         // last calibration path in camera_models.json.
@@ -995,7 +1221,8 @@ void MainWindow::createScanControl() {
     connect(scanOfflineButton_, &QPushButton::clicked, this, [this] {
         if (!scanner_) return;
         if (reconstructionThread_.joinable()) reconstructionThread_.join();
-        reconstructionThread_ = std::thread([this] {
+        const QString projectPath = currentProjectPath_;
+        reconstructionThread_ = std::thread([this, projectPath] {
             const bool ok = scanner_->reconstruct();
             const auto cloud = scanner_->resultCloud();
             const auto error = scanner_->lastError();
@@ -1016,20 +1243,38 @@ void MainWindow::createScanControl() {
                 frame.worldToCamera.m = keyframe.worldToCamera.matrix;
                 textureFrames->push_back(std::move(frame));
             }
-            QMetaObject::invokeMethod(this, [this, ok, cloud, error, textureFrames = std::move(textureFrames)] {
+            QMetaObject::invokeMethod(this, [this, ok, cloud, error, projectPath, textureFrames = std::move(textureFrames)] {
                 if (ok && cloud) view_->replaceScanPreview(cloud);
                 else if (!error.empty()) statusBar()->showMessage(QString::fromStdString(error), 12000);
+                if (ok && !projectPath.isEmpty()) {
+                    QString projectError;
+                    if (!writeProjectOptimizedFlag(projectPath, true, &projectError) && !projectError.isEmpty())
+                        statusBar()->showMessage(projectError, 10000);
+                    if (projectManager_.openProject(fsPathFromQString(projectPath), currentProject_)) {
+                        currentProjectPath_ = projectPath;
+                        updateProjectUi();
+                    }
+                }
                 const std::size_t count = textureFrames ? textureFrames->size() : 0u;
                 scanTextureFramesReady_ = count > 0u;
                 if (scanTextureFramesLabel_)
                     scanTextureFramesLabel_->setText(QString::fromUtf8("纹理帧：%1").arg(static_cast<qulonglong>(count)));
                 if (view_) view_->setTextureFrames(textureFrames);
-                if (scanTextureButton_) scanTextureButton_->setEnabled(scanTextureFramesReady_ && ok);
+                if (scanTextureButton_) scanTextureButton_->setEnabled(ok);
             }, Qt::QueuedConnection);
 #else
-            QMetaObject::invokeMethod(this, [this, ok, cloud, error] {
+            QMetaObject::invokeMethod(this, [this, ok, cloud, error, projectPath] {
                 if (ok && cloud) view_->replaceScanPreview(cloud);
                 else if (!error.empty()) statusBar()->showMessage(QString::fromStdString(error), 12000);
+                if (ok && !projectPath.isEmpty()) {
+                    QString projectError;
+                    if (!writeProjectOptimizedFlag(projectPath, true, &projectError) && !projectError.isEmpty())
+                        statusBar()->showMessage(projectError, 10000);
+                    if (projectManager_.openProject(fsPathFromQString(projectPath), currentProject_)) {
+                        currentProjectPath_ = projectPath;
+                        updateProjectUi();
+                    }
+                }
             }, Qt::QueuedConnection);
 #endif
         });
@@ -1049,15 +1294,13 @@ void MainWindow::createScanControl() {
             [this](bool ok, const QString& message) {
                 const auto state = scanner_ ? scanner_->state() : JMEngine::ScanState::Idle;
                 if (scanTextureButton_)
-                    scanTextureButton_->setEnabled(scanTextureFramesReady_ &&
-                        state == JMEngine::ScanState::ReadyForReconstruction);
+                    scanTextureButton_->setEnabled(state == JMEngine::ScanState::ReadyForReconstruction);
                 statusBar()->showMessage(message, 12000);
                 if (!ok) QMessageBox::warning(this, QString::fromUtf8("一键处理"), message);
             });
         if (!started) {
             const auto state = scanner_ ? scanner_->state() : JMEngine::ScanState::Idle;
-            scanTextureButton_->setEnabled(scanTextureFramesReady_ &&
-                state == JMEngine::ScanState::ReadyForReconstruction);
+            scanTextureButton_->setEnabled(state == JMEngine::ScanState::ReadyForReconstruction);
         }
     });
 #endif
@@ -1224,7 +1467,10 @@ MainWindow::ScanUiConfig MainWindow::scanConfigFromUi() const {
     cfg.engine.offlineVoxel = 3.0;
     cfg.engine.offlineIterations = 30;
     cfg.liveOptimizationEnabled = liveOptimizationCheck_ ? liveOptimizationCheck_->isChecked() : true;
-        cfg.cameraModelJsonPath = cameraModelJsonEdit_ ? cameraModelJsonEdit_->text().trimmed() : QString{};
+    cfg.engine.saveScanProject = projectSaveScanCheck_ && projectSaveScanCheck_->isChecked() &&
+                                 !currentProjectPath_.isEmpty();
+    cfg.engine.scanProjectPath = cfg.engine.saveScanProject ? currentProjectPath_.toStdString() : std::string{};
+    cfg.cameraModelJsonPath = cameraModelJsonEdit_ ? cameraModelJsonEdit_->text().trimmed() : QString{};
     cfg.recordRawData = recordRawDataCheck_ && recordRawDataCheck_->isChecked();
     cfg.rawDataDir = rawDataDirEdit_ ? rawDataDirEdit_->text().trimmed() : QString{};
     cfg.cameraADeviceId = cameraACombo_ ? cameraACombo_->currentData().toString() : QString{};
@@ -1425,16 +1671,23 @@ void MainWindow::applyScanState(JMEngine::ScanState state) {
     const bool idleLike = state == JMEngine::ScanState::Idle || state == JMEngine::ScanState::Error;
     const bool scanning = state == JMEngine::ScanState::Scanning;
     const bool ready = state == JMEngine::ScanState::ReadyForReconstruction;
-    if (scanStartButton_) scanStartButton_->setEnabled(idleLike);
+    if (scanStartButton_) scanStartButton_->setEnabled(idleLike && !currentProjectPath_.isEmpty());
     if (scanStopButton_) scanStopButton_->setEnabled(scanning);
     if (scanOfflineButton_) scanOfflineButton_->setEnabled(ready);
 #ifdef JMENGINE_HAS_TEXTURE_MAPPING
-    if (scanTextureButton_) scanTextureButton_->setEnabled(ready && scanTextureFramesReady_);
+    if (scanTextureButton_) scanTextureButton_->setEnabled(ready);
 #endif
     if (scanResetButton_)
         scanResetButton_->setEnabled(state != JMEngine::ScanState::Stopping &&
                                      state != JMEngine::ScanState::Reconstructing &&
                                      state != JMEngine::ScanState::Initializing);
+
+    if (!currentProjectPath_.isEmpty() &&
+        (state == JMEngine::ScanState::ReadyForReconstruction || state == JMEngine::ScanState::Idle ||
+         state == JMEngine::ScanState::Error)) {
+        if (projectManager_.openProject(fsPathFromQString(currentProjectPath_), currentProject_))
+            updateProjectUi();
+    }
 
     const bool editable = idleLike;
     if (scanSourceModeCombo_) scanSourceModeCombo_->setEnabled(editable);

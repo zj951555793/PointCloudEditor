@@ -35,6 +35,7 @@ public:
     std::vector<ScanProjectFrameInfo> frames() const;
     bool loadFrameCloud(int frameId, PointCloud& cloud) const;
     bool loadFramePose(int frameId, Pose& pose) const;
+    bool rebuildProjectCloud(PointCloud& cloud) const;
     bool rebuildProjectCloud(const std::string& outputFile) const;
 
 private:

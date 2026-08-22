@@ -217,6 +217,10 @@ class RulerMvsBackend final : public ISlam {
             std::lock_guard<std::mutex> lock(textureMutex_);
             textureImages_.clear();
         }
+        {
+            std::lock_guard<std::mutex> lock(decodedFrameCloudMutex_);
+            decodedFrameClouds_.clear();
+        }
 
         startResultWorkers();
         fusion_->setTraceCallBack(
@@ -292,6 +296,22 @@ class RulerMvsBackend final : public ISlam {
                     progress(value);
             });
 
+        saveOptimizedProjectPoses();
+
+        if (project_) {
+            PointCloud projectCloud;
+            if (project_->rebuildProjectCloud(projectCloud)) {
+                auto result = std::make_shared<PointCloud>(std::move(projectCloud.points()));
+                {
+                    std::lock_guard<std::mutex> lock(stateMutex_);
+                    cloud_ = result;
+                }
+                if (progress)
+                    progress(100);
+                return result;
+            }
+        }
+
         std::vector<cv::Point3f> points;
         std::vector<cv::Point3f> normals;
         std::vector<cv::Vec3b> colors;
@@ -352,6 +372,10 @@ class RulerMvsBackend final : public ISlam {
         {
             std::lock_guard<std::mutex> lock(textureMutex_);
             textureImages_.clear();
+        }
+        {
+            std::lock_guard<std::mutex> lock(decodedFrameCloudMutex_);
+            decodedFrameClouds_.clear();
         }
     }
 
@@ -441,6 +465,51 @@ class RulerMvsBackend final : public ISlam {
             *error = message;
     }
 
+    void cacheDecodedFrameCloud(int frameId, const rulermvs::SimpleTriMesh& mesh, const cv::Mat& rectifiedColor) {
+        if (!project_ || mesh.points.empty())
+            return;
+
+        const auto colorCamera = camera_.nodistor().noskew() / kRectifyScale;
+        const bool canSampleColor = !rectifiedColor.empty() && rectifiedColor.type() == CV_8UC3;
+
+        PointCloud::Container points;
+        points.reserve(mesh.points.size());
+        for (std::size_t i = 0; i < mesh.points.size(); ++i) {
+            const auto& src = mesh.points[i];
+            Point point;
+            point.position = {src.x, src.y, src.z};
+            if (i < mesh.normals.size()) {
+                const auto& normal = mesh.normals[i];
+                point.normal = {normal.x, normal.y, normal.z};
+            }
+            if (canSampleColor && src.z > 1.0e-6f) {
+                const double u = colorCamera.fx * src.x / src.z + colorCamera.cx;
+                const double v = colorCamera.fy * src.y / src.z + colorCamera.cy;
+                const int x = int(std::lround(u));
+                const int y = int(std::lround(v));
+                if (x >= 0 && y >= 0 && x < rectifiedColor.cols && y < rectifiedColor.rows)
+                    point.rgba = packBgr(rectifiedColor.at<cv::Vec3b>(y, x));
+            }
+            points.push_back(point);
+        }
+
+        auto cloud = std::make_shared<PointCloud>(std::move(points));
+        std::lock_guard<std::mutex> lock(decodedFrameCloudMutex_);
+        decodedFrameClouds_[frameId] = std::move(cloud);
+        while (decodedFrameClouds_.size() > std::size_t(std::max(8, config_.maxInflightFrames * 4)))
+            decodedFrameClouds_.erase(decodedFrameClouds_.begin());
+    }
+
+    std::shared_ptr<PointCloud> takeDecodedFrameCloud(int frameId) {
+        std::lock_guard<std::mutex> lock(decodedFrameCloudMutex_);
+        auto it = decodedFrameClouds_.find(frameId);
+        if (it == decodedFrameClouds_.end())
+            return {};
+        auto cloud = std::move(it->second);
+        decodedFrameClouds_.erase(it);
+        return cloud;
+    }
+
     void submitFrame(const CameraFrame& frame) {
         if (!fusion_ || !accepting_.load(std::memory_order_acquire)) {
             releaseInputSlot();
@@ -490,6 +559,7 @@ class RulerMvsBackend final : public ISlam {
                 cv::Mat mapX = mapX_.to<cv::Mat>();
                 cv::Mat mapY = mapY_.to<cv::Mat>();
                 cv::remap(rgb, color, mapX, mapY, cv::INTER_LINEAR);
+                cacheDecodedFrameCloud(frameIndex, mesh, color);
                 cv::cvtColor(color, gray, cv::COLOR_BGR2GRAY);
 
                 if (config_.registrationMode == ScanRegistrationMode::Marker)
@@ -880,23 +950,12 @@ class RulerMvsBackend final : public ISlam {
         const Pose measured = poseFromCv(measuredPose);
         const Pose displayed = poseFromCv(framePose);
 
-        // ScanProject persistence: save full OneShot frame cloud + pose.
-        // Do not use localCloud here because localCloud is display-limited/decimated.
-        // Project data is intended for offline optimization, texture mapping and resume scan.
-        if (project_ && raw.trackingOk && !raw.points.empty()) {
-            PointCloud::Container projectPoints;
-            projectPoints.reserve(raw.points.size());
-            for (size_t i = 0; i < raw.points.size(); ++i) {
-                Point p;
-                p.position = {raw.points[i].x, raw.points[i].y, raw.points[i].z};
-                if (i < raw.colors.size())
-                    p.rgba = packBgr(raw.colors[i]);
-                if (i < raw.normals.size())
-                    p.normal = {raw.normals[i].x, raw.normals[i].y, raw.normals[i].z};
-                projectPoints.push_back(p);
-            }
-            PointCloud projectCloud(std::move(projectPoints));
-            project_->saveFrame(raw.frameId, measured, projectCloud);
+        // ScanProject persistence saves the per-frame OneShot decode result.
+        // RGBDFusion/SLAM contributes only the measured pose used to place that raw frame.
+        if (project_ && raw.trackingOk) {
+            auto decodedCloud = takeDecodedFrameCloud(raw.frameId);
+            if (decodedCloud && !decodedCloud->empty())
+                project_->saveFrame(raw.frameId, measured, *decodedCloud);
         }
 
         UpdateCallback update;
@@ -969,6 +1028,43 @@ class RulerMvsBackend final : public ISlam {
             callback(std::move(updates));
     }
 
+    void saveOptimizedProjectPoses() {
+        if (!fusion_ || !project_)
+            return;
+
+        std::vector<FramePoseUpdate> updates;
+        {
+            std::lock_guard<std::mutex> resultsLock(fusionResultsMutex_);
+            fusion_->getResults([this, &updates](const rgbdslam::IRGBDResult& result) {
+                if (result.getFlag() != 0)
+                    return;
+
+                cv::Mat pose = result.getRT();
+                if (!baseRtInv_.empty())
+                    pose = baseRtInv_ * pose;
+                const Pose optimizedPose = poseFromCv(pose);
+                project_->savePose(result.getFrameID(), optimizedPose);
+
+                FramePoseUpdate update;
+                update.frameId = result.getFrameID();
+                update.pose = optimizedPose;
+                updates.push_back(std::move(update));
+            });
+        }
+
+        if (!updates.empty()) {
+            PoseUpdateCallback callback;
+            {
+                std::lock_guard<std::mutex> lock(stateMutex_);
+                for (const auto& update : updates)
+                    lastPublishedPoseByFrame_[update.frameId] = update.pose;
+                callback = poseUpdateCallback_;
+            }
+            if (callback)
+                callback(std::move(updates));
+        }
+    }
+
     ScanConfig config_;
     rulermvs::CircleMarkerExtractor markerExtractor_;
     rulermvs::CicrleConfigs markerConfigs_;
@@ -1026,6 +1122,8 @@ class RulerMvsBackend final : public ISlam {
 
     std::mutex textureMutex_;
     std::unordered_map<int, cv::Mat> textureImages_;
+    std::mutex decodedFrameCloudMutex_;
+    std::map<int, std::shared_ptr<PointCloud>> decodedFrameClouds_;
 };
 
 } // namespace

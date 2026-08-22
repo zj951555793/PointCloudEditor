@@ -7,6 +7,7 @@
 #include <thread>
 #include <vector>
 #include <JMEngine/JMScanner.h>
+#include <JMEngine/ProjectManager.h>
 
 class QAction;
 class QActionGroup;
@@ -57,9 +58,15 @@ class MainWindow final : public QMainWindow {
     void createActions();
     void createMenus();
     void createModelManager();
+    void createProjectManager();
     void createScanControl();
     void applyScanState(JMEngine::ScanState state);
     void applyScanSourceUi();
+    void updateProjectUi();
+    void newProject();
+    void openProject();
+    void closeProject();
+    void loadProjectMergedCloud();
     void refreshCameras();
     void updateCameraSelectionUi();
     void removeScanModelListEntry();
@@ -78,6 +85,16 @@ class MainWindow final : public QMainWindow {
     PointCloudWidget* view_{nullptr};
     QListWidget* modelList_{nullptr};
     QDockWidget* modelDock_{nullptr};
+    QDockWidget* projectDock_{nullptr};
+    QLabel* projectNameLabel_{nullptr};
+    QLabel* projectPathLabel_{nullptr};
+    QLabel* projectFrameCountLabel_{nullptr};
+    QLabel* projectOptimizedLabel_{nullptr};
+    QCheckBox* projectSaveScanCheck_{nullptr};
+    QPushButton* projectNewButton_{nullptr};
+    QPushButton* projectOpenButton_{nullptr};
+    QPushButton* projectCloseButton_{nullptr};
+    QPushButton* projectLoadMergedButton_{nullptr};
     QDockWidget* scanDock_{nullptr};
     QComboBox* scanSourceModeCombo_{nullptr};
     QComboBox* scanRegistrationModeCombo_{nullptr};
@@ -108,6 +125,9 @@ class MainWindow final : public QMainWindow {
     QLabel* cameraPreviewLabel_{nullptr};
     JMEngine::ScanMarkerFrame latestMarkerFrame_;
     std::vector<CameraDeviceInfo> cameraInfos_;
+    JMEngine::ProjectManager projectManager_;
+    JMEngine::ProjectInfo currentProject_;
+    QString currentProjectPath_;
     QLabel* scanStateLabel_{nullptr};
     QLabel* scanRenderFpsLabel_{nullptr};
     QPushButton* scanStartButton_{nullptr};

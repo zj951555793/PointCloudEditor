@@ -4376,12 +4376,6 @@ bool PointCloudWidget::startTextureMappingAsync(JMEngine::texture::Backend backe
 bool PointCloudWidget::startScanTextureMappingAsync(JMEngine::texture::Backend backend,
                                                      ProcessingProgressCallback progress,
                                                      ProcessingFinishedCallback finished) {
-    if (!textureFrames_ || textureFrames_->empty()) {
-        if (finished)
-            finished(false, QString::fromUtf8("没有纹理关键帧，请先点击“离线重建”完成姿态优化和纹理帧准备"));
-        return false;
-    }
-
     auto* model = activeModel();
     if (!model || !model->cloud) {
         if (finished)
@@ -4389,9 +4383,17 @@ bool PointCloudWidget::startScanTextureMappingAsync(JMEngine::texture::Backend b
         return false;
     }
 
+    const bool hasTextureFrames = textureFrames_ && !textureFrames_->empty();
+
     // Already a mesh: texture directly.
-    if (model->meshMode && model->mesh)
+    if (model->meshMode && model->mesh) {
+        if (!hasTextureFrames) {
+            if (finished)
+                finished(true, QString::fromUtf8("当前已是网格；没有纹理关键帧，已跳过纹理映射"));
+            return true;
+        }
         return startTextureMappingAsync(backend, std::move(finished));
+    }
 
     // A normal scan finishes as a point cloud.  TextureMapper requires triangles, therefore
     // build a surface first.  Use the same data-driven defaults shown by ProcessingDialog so
@@ -4429,12 +4431,18 @@ bool PointCloudWidget::startScanTextureMappingAsync(JMEngine::texture::Backend b
     QPointer<PointCloudWidget> self(this);
     return startProcessingOperation(
         "poisson_octree", std::move(params), std::move(progress),
-        [self, backend, finished = std::move(finished)](bool ok, const QString& message) mutable {
+        [self, backend, hasTextureFrames, finished = std::move(finished)](bool ok, const QString& message) mutable {
             if (!self)
                 return;
             if (!ok) {
                 if (finished)
                     finished(false, QString::fromUtf8("纹理映射前的网格重建失败：") + message);
+                return;
+            }
+
+            if (!hasTextureFrames) {
+                if (finished)
+                    finished(true, message + QString::fromUtf8("；没有纹理关键帧，已完成网格重建并跳过纹理映射"));
                 return;
             }
 

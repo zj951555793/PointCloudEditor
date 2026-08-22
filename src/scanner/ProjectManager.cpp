@@ -44,7 +44,12 @@ bool ProjectManager::readProjectJson(const std::filesystem::path& file,
     std::string s((std::istreambuf_iterator<char>(in)), {});
     auto p=s.find("\"frameCount\":");
     if(p!=std::string::npos) info.frameCount=std::atoi(s.c_str()+p+14);
-    info.optimized = s.find("\"optimized\":true") != std::string::npos;
+    p = s.find("\"optimized\"");
+    if (p != std::string::npos) {
+        const auto end = s.find_first_of(",}", p);
+        const auto value = s.substr(p, end == std::string::npos ? std::string::npos : end - p);
+        info.optimized = value.find("true") != std::string::npos;
+    }
     return true;
 }
 
