@@ -38,29 +38,16 @@ add_library(JMEngine STATIC
     "${JMENGINE_ROOT}/src/PointCloudIO.cpp"
     "${JMENGINE_ROOT}/src/scanner/FrameQueue.cpp"
     "${JMENGINE_ROOT}/src/scanner/JMScanner.cpp"
-    "${JMENGINE_ROOT}/src/scanner/RulerMvsSlam.cpp"
+    "${JMENGINE_ROOT}/src/scanner/AndroidNullSlam.cpp"
     "${JMENGINE_ROOT}/src/scanner/CameraSource.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/AndroidSlamStub.cpp"
 )
 target_include_directories(JMEngine PUBLIC "${JMENGINE_ROOT}/include")
 target_compile_features(JMEngine PUBLIC cxx_std_17)
 
-# Optional Android RulerMVS SDK layout:
-#   <root>/include/{rulermvs.hpp,DBoW3/...}
-#   <root>/lib/arm64-v8a/*.so
-#   <root>/opencv/sdk/native/{jni/include,libs/arm64-v8a/*.so}
-set(JMENGINE_ANDROID_RULERMVS_ROOT "" CACHE PATH "Android RulerMVS SDK root")
-if(JMENGINE_ANDROID_RULERMVS_ROOT)
-    set(_ruler_inc "${JMENGINE_ANDROID_RULERMVS_ROOT}/include")
-    set(_opencv_inc "${JMENGINE_ANDROID_RULERMVS_ROOT}/opencv/sdk/native/jni/include")
-    file(GLOB _ruler_so CONFIGURE_DEPENDS "${JMENGINE_ANDROID_RULERMVS_ROOT}/lib/${ANDROID_ABI}/*.so")
-    file(GLOB _opencv_so CONFIGURE_DEPENDS "${JMENGINE_ANDROID_RULERMVS_ROOT}/opencv/sdk/native/libs/${ANDROID_ABI}/*.so")
-    if(NOT EXISTS "${_ruler_inc}/rulermvs.hpp" OR NOT _ruler_so)
-        message(FATAL_ERROR "Incomplete Android RulerMVS SDK: ${JMENGINE_ANDROID_RULERMVS_ROOT}")
-    endif()
-    target_include_directories(JMEngine PRIVATE "${_ruler_inc}" "${_opencv_inc}")
-    target_compile_definitions(JMEngine PRIVATE JMENGINE_HAS_RULERMVS=1)
-    target_link_libraries(JMEngine PRIVATE ${_ruler_so} ${_opencv_so})
-endif()
+# Android build intentionally excludes the real RulerMVS/OpenCV backend.
+# AndroidNullSlam.cpp only satisfies the shared JMScanner ABI and always reports
+# that SLAM is disabled. Camera acquisition/preview is handled by Camera2.
 
 add_library(JMEngine_android SHARED
     JMEngineAndroidJni.cpp

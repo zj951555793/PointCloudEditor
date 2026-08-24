@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Realtek USB UVC camera A: VID=0BDA PID=300A -->
+    <usb-device vendor-id="3034" product-id="12298" />
+    <!-- Realtek USB UVC camera B: VID=0BDA PID=300B -->
+    <usb-device vendor-id="3034" product-id="12299" />
+</resources>

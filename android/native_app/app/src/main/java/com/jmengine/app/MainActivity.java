@@ -2,15 +2,19 @@ package com.jmengine.app;
 
 import com.jmengine.sdk.JMEngineGlesView;
 import com.jmengine.sdk.JMEngineNative;
-import com.jmengine.sdk.JMEngineCameraScanner;
+import com.jmengine.sdk.CameraCapture;
+import com.jmengine.sdk.CameraPreviewView;
+import com.jmengine.sdk.UsbCameraDevices;
 
 import android.app.Activity;
 import android.content.Intent;
 import android.database.Cursor;
 import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
-import android.Manifest;
-import android.content.pm.PackageManager;
+import android.content.BroadcastReceiver;
+import android.content.Context;
+import android.content.IntentFilter;
 import android.provider.OpenableColumns;
 import android.view.Gravity;
 import android.view.View;
@@ -26,17 +30,41 @@ import java.io.OutputStream;
 
 public final class MainActivity extends Activity {
     private static final int REQUEST_OPEN_POINT_CLOUD = 1001;
-
+    private static final int USB_SCAN_MAX_RETRIES = 12;
+    private static final long USB_SCAN_RETRY_DELAY_MS = 500;
     private JMEngineNative engine;
     private JMEngineGlesView glView;
     private TextView status;
-    private JMEngineCameraScanner cameraScanner;
+    private CameraCapture cameraACapture;
+    private CameraCapture cameraBCapture;
+    private CameraPreviewView cameraAPreview;
+    private CameraPreviewView cameraBPreview;
+    private boolean startCameraAfterPermission;
+    private int usbScanAttempt;
+    private final BroadcastReceiver usbPermissionReceiver = new BroadcastReceiver() {
+        @Override public void onReceive(Context context, Intent intent) {
+            if (UsbCameraDevices.ACTION_USB_PERMISSION.equals(intent.getAction())) {
+                updateStatus("USB permission result\n" + UsbCameraDevices.describe(MainActivity.this));
+                if (startCameraAfterPermission && UsbCameraDevices.hasBothTargetCameraPermissions(MainActivity.this)) {
+                    startCameraAfterPermission = false;
+                    openUsbCameras();
+                }
+            }
+        }
+    };
 
     @Override protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         engine = new JMEngineNative();
+        IntentFilter filter = new IntentFilter(UsbCameraDevices.ACTION_USB_PERMISSION);
+        if (Build.VERSION.SDK_INT >= 33) {
+            registerReceiver(usbPermissionReceiver, filter, Context.RECEIVER_NOT_EXPORTED);
+        } else {
+            registerReceiver(usbPermissionReceiver, filter);
+        }
         setContentView(createUi());
         updateStatus("JMEngine loaded\n" + JMEngineNative.version());
+        handleUsbAttachIntent(getIntent());
     }
 
     private View createUi() {
@@ -47,6 +75,17 @@ public final class MainActivity extends Activity {
         status.setTextSize(13f);
         status.setPadding(dp(10), dp(6), dp(10), dp(6));
         root.addView(status, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
+
+        LinearLayout previewRow = new LinearLayout(this);
+        previewRow.setOrientation(LinearLayout.HORIZONTAL);
+        cameraAPreview = new CameraPreviewView(this);
+        cameraBPreview = new CameraPreviewView(this);
+        previewRow.addView(cameraAPreview, new LinearLayout.LayoutParams(
+                0, dp(180), 1.0f));
+        previewRow.addView(cameraBPreview, new LinearLayout.LayoutParams(
+                0, dp(180), 1.0f));
+        root.addView(previewRow, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
 
         LinearLayout modeRow = new LinearLayout(this);
@@ -100,34 +139,96 @@ public final class MainActivity extends Activity {
                 LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
 
         LinearLayout scanRow = new LinearLayout(this);
-        addButton(scanRow, "开始扫描", v -> startEngineScan());
+        addButton(scanRow, "开始相机", v -> startCamera());
         addButton(scanRow, "停止", v -> { stopEngineScan(); updateScanStatus("scan stopped"); });
-        addButton(scanRow, "离线重建", v -> { boolean ok=engine.reconstructScan(); glView.notifyModelChanged(); updateScanStatus(ok?"reconstructed":"reconstruct failed: "+engine.lastError()); });
+        addButton(scanRow, "USB检查", v -> checkUsbCameras());
         root.addView(scanRow, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
 
         return root;
     }
 
-    private void startEngineScan() {
-        if (checkSelfPermission(Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) { requestPermissions(new String[]{Manifest.permission.CAMERA}, 2001); return; }
+    private void startCamera() {
+        if (cameraAPreview == null || cameraBPreview == null ||
+                cameraAPreview.getSurface() == null || cameraBPreview.getSurface() == null ||
+                !cameraAPreview.getSurface().isValid() || !cameraBPreview.getSurface().isValid()) {
+            updateStatus("USB camera preview surfaces not ready");
+            return;
+        }
+
         stopEngineScan();
+        usbScanAttempt = 0;
+        scanUsbThenOpen();
+    }
+
+    private void scanUsbThenOpen() {
+        int found = UsbCameraDevices.targetCameraCount(this);
+        int requested = UsbCameraDevices.requestVideoPermissions(this);
+        if (found < 2) {
+            if (usbScanAttempt < USB_SCAN_MAX_RETRIES) {
+                ++usbScanAttempt;
+                updateStatus("正在搜索 USB 相机 " + usbScanAttempt + "/" + USB_SCAN_MAX_RETRIES
+                        + "\n" + UsbCameraDevices.targetSummary(this)
+                        + "\n" + UsbCameraDevices.describe(this));
+                status.postDelayed(this::scanUsbThenOpen, USB_SCAN_RETRY_DELAY_MS);
+                return;
+            }
+            updateStatus("未稳定检测到两路 USB 相机 found=" + found
+                    + "\n请重新插拔相机/换 OTG Hub/确认外接供电。\n"
+                    + UsbCameraDevices.describe(this));
+            return;
+        }
+
+        if (requested > 0 || !UsbCameraDevices.hasBothTargetCameraPermissions(this)) {
+            startCameraAfterPermission = true;
+            if (usbScanAttempt < USB_SCAN_MAX_RETRIES) {
+                ++usbScanAttempt;
+                updateStatus("已请求 USB 相机权限，等待授权/系统刷新 "
+                        + usbScanAttempt + "/" + USB_SCAN_MAX_RETRIES
+                        + "\n" + UsbCameraDevices.targetSummary(this)
+                        + "\n" + UsbCameraDevices.describe(this));
+                status.postDelayed(this::scanUsbThenOpen, USB_SCAN_RETRY_DELAY_MS);
+                return;
+            }
+            updateStatus("USB 相机权限未完成。\n请在系统弹窗里允许 cameraA/cameraB；如果没有弹窗，请拔插后再点开始。\n"
+                    + UsbCameraDevices.targetSummary(this)
+                    + "\n" + UsbCameraDevices.describe(this));
+            return;
+        }
+
+        startCameraAfterPermission = false;
+        openUsbCameras();
+    }
+
+    private void openUsbCameras() {
         try {
-            File dir=getExternalFilesDir(null); if(dir==null)dir=getFilesDir();
-            File calibration=new File(dir,"calib.txt"), vocabulary=new File(dir,"vocab.yml.gz");
-            if(!engine.initializeScan(calibration.getAbsolutePath(),vocabulary.getAbsolutePath(),1,6)){updateScanStatus("init failed: "+engine.lastError());return;}
-            cameraScanner=new JMEngineCameraScanner(this,engine,new JMEngineCameraScanner.Listener(){public void onStatus(String s){runOnUiThread(()->updateScanStatus(s));}public void onFrame(int id){if((id%10)==0)runOnUiThread(()->{glView.notifyModelChanged();updateScanStatus("frame="+id);});}});
-            String[] ids=cameraScanner.cameraIds();if(ids.length<2){updateScanStatus("need two Camera2 devices");cameraScanner.close();cameraScanner=null;return;}
-            if(!engine.startScan()){updateScanStatus("start failed");cameraScanner.close();cameraScanner=null;return;}
-            cameraScanner.start(ids[0],ids[1],1920,1200,50000);
-        } catch(Exception e){stopEngineScan();updateScanStatus("scan exception: "+e.getMessage());}
+            cameraACapture = new CameraCapture(this, CameraCapture.CAMERA_A_PRODUCT_ID,
+                    cameraAPreview.getSurface(), text -> runOnUiThread(() -> updateStatus("A " + text)));
+            cameraBCapture = new CameraCapture(this, CameraCapture.CAMERA_B_PRODUCT_ID,
+                    cameraBPreview.getSurface(), text -> runOnUiThread(() -> updateStatus("B " + text)));
+            cameraACapture.start();
+            cameraBCapture.start();
+            updateStatus("opening USB UVC cameraA=0BDA:300A cameraB=0BDA:300B\n" + UsbCameraDevices.describe(this));
+        } catch (Exception e) {
+            stopEngineScan();
+            updateStatus("USB UVC camera open failed: " + e.getMessage());
+        }
     }
 
     private void stopEngineScan() {
-        if (cameraScanner != null) { cameraScanner.close(); cameraScanner = null; }
-        if (engine != null && engine.scanState() == JMEngineNative.SCAN_SCANNING) engine.stopScan();
+        if (status != null) {
+            status.removeCallbacks(this::scanUsbThenOpen);
+        }
+        startCameraAfterPermission = false;
+        if (cameraACapture != null) { cameraACapture.close(); cameraACapture = null; }
+        if (cameraBCapture != null) { cameraBCapture.close(); cameraBCapture = null; }
     }
 
-    private void updateScanStatus(String action){long[]s=engine.scanStatistics();status.setText(action+"\nstate="+engine.scanState()+" submitted="+s[0]+" processed="+s[1]+" replaced="+s[2]+" points="+s[4]);}
+    private void checkUsbCameras() {
+        int requested = UsbCameraDevices.requestVideoPermissions(this);
+        updateStatus("USB camera permission requested=" + requested + "\n" + UsbCameraDevices.describe(this));
+    }
+
+    private void updateScanStatus(String action){ updateStatus(action); }
 
     private void addButton(LinearLayout row, String text, View.OnClickListener listener) {
         Button button = new Button(this);
@@ -199,5 +300,27 @@ public final class MainActivity extends Activity {
 
     @Override protected void onResume() { super.onResume(); if (glView != null) glView.onResume(); }
     @Override protected void onPause() { if (glView != null) glView.onPause(); super.onPause(); }
-    @Override protected void onDestroy() { stopEngineScan(); if (engine != null) engine.close(); super.onDestroy(); }
+    @Override protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        handleUsbAttachIntent(intent);
+    }
+
+    private void handleUsbAttachIntent(Intent intent) {
+        if (intent != null && "android.hardware.usb.action.USB_DEVICE_ATTACHED".equals(intent.getAction())) {
+            int requested = UsbCameraDevices.requestVideoPermissions(this);
+            updateStatus("USB camera attached, permission requested=" + requested + "\n" + UsbCameraDevices.describe(this));
+            if (cameraAPreview != null && cameraBPreview != null) {
+                usbScanAttempt = 0;
+                status.postDelayed(this::scanUsbThenOpen, USB_SCAN_RETRY_DELAY_MS);
+            }
+        }
+    }
+
+    @Override protected void onDestroy() {
+        stopEngineScan();
+        unregisterReceiver(usbPermissionReceiver);
+        if (engine != null) engine.close();
+        super.onDestroy();
+    }
 }

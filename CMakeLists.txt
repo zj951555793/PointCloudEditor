@@ -107,7 +107,6 @@ set(JMENGINE_SOURCES
     src/Measurement.cpp
     src/JMEngine.cpp
     src/scanner/JMScanner.cpp
-    src/scanner/RulerMvsSlam.cpp
     src/scanner/ScanProject.cpp
     src/scanner/ProjectManager.cpp
     src/scanner/CameraSource.cpp
@@ -128,7 +127,17 @@ set(JMENGINE_SOURCES
     src/processing/Diagnostics.cpp
     src/processing/Operations.cpp
     src/processing/IndustrialPoisson.cpp
+
 )
+
+# Keep the real RulerMVS/OpenCV scan backend completely out of Android.
+# Android gets a tiny ABI-compatible placeholder so common Engine/JMScanner
+# code can still link while Camera2 owns image acquisition and preview.
+if(ANDROID)
+    list(APPEND JMENGINE_SOURCES src/scanner/AndroidNullSlam.cpp)
+else()
+    list(APPEND JMENGINE_SOURCES src/scanner/RulerMvsSlam.cpp)
+endif()
 
 
 # -----------------------------
