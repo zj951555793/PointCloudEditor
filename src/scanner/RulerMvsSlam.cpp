@@ -203,7 +203,9 @@ class RulerMvsBackend final : public ISlam {
         {
             std::lock_guard<std::mutex> lock(inputMutex_);
             pendingFrames_.clear();
+            lastLostModeSubmitTime_.reset();
         }
+        trackingLost_.store(false, std::memory_order_release);
         {
             std::lock_guard<std::mutex> lock(stateMutex_);
             lastValidFramePose_.release();
@@ -238,6 +240,10 @@ class RulerMvsBackend final : public ISlam {
         std::lock_guard<std::mutex> lock(inputMutex_);
         if (!accepting_.load(std::memory_order_acquire))
             return false;
+        if (shouldThrottleLostTrackingInputLocked()) {
+            pendingReplaced_.fetch_add(1, std::memory_order_relaxed);
+            return false;
+        }
 
         const int maxInflight = std::max(1, config_.maxInflightFrames);
         if (inflight_.load(std::memory_order_acquire) >= maxInflight) {
@@ -342,7 +348,9 @@ class RulerMvsBackend final : public ISlam {
         {
             std::lock_guard<std::mutex> lock(inputMutex_);
             pendingFrames_.clear();
+            lastLostModeSubmitTime_.reset();
         }
+        trackingLost_.store(false, std::memory_order_release);
 
         stopResultWorkers();
         if (fusion_)
@@ -552,6 +560,16 @@ class RulerMvsBackend final : public ISlam {
                 rulermvs::Imagef depthImage;
                 rulermvs::SimpleTriMesh mesh;
                 oneshot_->decode(codeImage, mesh, decode);
+
+                // rasterDepth() leaves the output untouched when decode() returns an
+                // empty mesh.  That is exactly what happens when the structured-light
+                // camera is lost or its code frame is invalid.  Passing the still-empty
+                // image to RGBDFusion produces "Wrong size of input depth".  Allocate
+                // the contract-sized depth image first; an empty mesh then becomes a
+                // zero-depth frame, which RGBDFusion can correctly classify as tracking
+                // lost without rejecting the input dimensions.
+                depthImage.create(depthSize_.width, depthSize_.height);
+                depthImage.memsetZero();
                 rulermvs::rasterDepth(
                     mesh, camera_.nodistor().noskew() / kDepthScale, depthImage);
                 depth = depthImage.to<cv::Mat>().clone();
@@ -598,7 +616,11 @@ class RulerMvsBackend final : public ISlam {
             if (inflight_.load(std::memory_order_relaxed) > 0)
                 inflight_.fetch_sub(1, std::memory_order_acq_rel);
 
-            if (accepting_.load(std::memory_order_acquire) && !pendingFrames_.empty()) {
+            if (trackingLost_.load(std::memory_order_acquire) &&
+                shouldThrottleLostTrackingInputLocked()) {
+                pendingFrames_.clear();
+                hasNext = false;
+            } else if (accepting_.load(std::memory_order_acquire) && !pendingFrames_.empty()) {
                 const int maxInflight = std::max(1, config_.maxInflightFrames);
                 if (inflight_.load(std::memory_order_acquire) < maxInflight) {
                     next = std::move(pendingFrames_.front());
@@ -610,6 +632,36 @@ class RulerMvsBackend final : public ISlam {
         }
         if (hasNext)
             submitFrame(next);
+    }
+
+    bool shouldThrottleLostTrackingInputLocked() {
+        if (!trackingLost_.load(std::memory_order_acquire))
+            return false;
+
+        constexpr auto kLostModeMinSubmitGap = std::chrono::milliseconds(200);
+        const auto now = std::chrono::steady_clock::now();
+        if (!lastLostModeSubmitTime_ ||
+            now - *lastLostModeSubmitTime_ >= kLostModeMinSubmitGap) {
+            lastLostModeSubmitTime_ = now;
+            return false;
+        }
+        return true;
+    }
+
+    void updateLostTrackingInputLimit(bool trackingOk) {
+        if (trackingOk) {
+            if (trackingLost_.exchange(false, std::memory_order_acq_rel)) {
+                std::lock_guard<std::mutex> lock(inputMutex_);
+                lastLostModeSubmitTime_.reset();
+            }
+            return;
+        }
+
+        if (!trackingLost_.exchange(true, std::memory_order_acq_rel)) {
+            std::lock_guard<std::mutex> lock(inputMutex_);
+            pendingFrames_.clear();
+            lastLostModeSubmitTime_.reset();
+        }
     }
 
     void detectAndPublishMarkers(int frameId, const cv::Mat& grayFull,
@@ -908,6 +960,8 @@ class RulerMvsBackend final : public ISlam {
     }
 
     void convertAndPublishFusionResult(RawFusionResult raw) {
+        updateLostTrackingInputLimit(raw.trackingOk);
+
         cv::Mat measuredPose = std::move(raw.measuredPose);
         if (!baseRtInv_.empty())
             measuredPose = baseRtInv_ * measuredPose;
@@ -1124,12 +1178,14 @@ class RulerMvsBackend final : public ISlam {
 
     std::mutex inputMutex_;
     std::deque<CameraFrame> pendingFrames_;
+    std::optional<std::chrono::steady_clock::time_point> lastLostModeSubmitTime_;
     std::atomic<int> inflight_{0};
     std::atomic<int> submitted_{0};
     std::atomic<int> completed_{0};
     std::atomic<int> converted_{0};
     std::atomic<unsigned long long> pendingReplaced_{0};
     std::atomic<bool> accepting_{false};
+    std::atomic<bool> trackingLost_{false};
 
     mutable std::mutex stateMutex_;
     Pose pose_;
