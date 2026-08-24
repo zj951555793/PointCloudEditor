@@ -559,7 +559,6 @@ class RulerMvsBackend final : public ISlam {
                 cv::Mat mapX = mapX_.to<cv::Mat>();
                 cv::Mat mapY = mapY_.to<cv::Mat>();
                 cv::remap(rgb, color, mapX, mapY, cv::INTER_LINEAR);
-                cacheDecodedFrameCloud(frameIndex, mesh, color);
                 cv::cvtColor(color, gray, cv::COLOR_BGR2GRAY);
 
                 if (config_.registrationMode == ScanRegistrationMode::Marker)
@@ -707,6 +706,24 @@ class RulerMvsBackend final : public ISlam {
         std::vector<cv::Point3f> normals;
         std::vector<cv::Vec3b> colors;
     };
+
+    std::shared_ptr<PointCloud> makeFusionFrameCloud(const RawFusionResult& raw) const {
+        if (raw.points.empty())
+            return {};
+
+        PointCloud::Container points;
+        points.reserve(raw.points.size());
+        for (std::size_t i = 0; i < raw.points.size(); ++i) {
+            Point point;
+            point.position = {raw.points[i].x, raw.points[i].y, raw.points[i].z};
+            if (i < raw.normals.size())
+                point.normal = {raw.normals[i].x, raw.normals[i].y, raw.normals[i].z};
+            if (i < raw.colors.size())
+                point.rgba = packBgr(raw.colors[i]);
+            points.push_back(point);
+        }
+        return std::make_shared<PointCloud>(std::move(points));
+    }
 
     void startResultWorkers() {
         stopResultWorkers();
@@ -950,12 +967,14 @@ class RulerMvsBackend final : public ISlam {
         const Pose measured = poseFromCv(measuredPose);
         const Pose displayed = poseFromCv(framePose);
 
-        // ScanProject persistence saves the per-frame OneShot decode result.
-        // RGBDFusion/SLAM contributes only the measured pose used to place that raw frame.
+        // ScanProject persistence saves the same local coordinate frame RGBDFusion
+        // gives to live preview. Pairing
+        // an IOneShot-side mesh with an optimized RGBDFusion pose can mix coordinate bases
+        // and make the rebuilt offline cloud explode after optimization.
         if (project_ && raw.trackingOk) {
-            auto decodedCloud = takeDecodedFrameCloud(raw.frameId);
-            if (decodedCloud && !decodedCloud->empty())
-                project_->saveFrame(raw.frameId, measured, *decodedCloud);
+            auto frameCloud = makeFusionFrameCloud(raw);
+            if (frameCloud && !frameCloud->empty())
+                project_->saveFrame(raw.frameId, measured, *frameCloud);
         }
 
         UpdateCallback update;
