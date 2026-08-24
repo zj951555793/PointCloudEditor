@@ -18,7 +18,5 @@ dependencyResolutionManagement {
 rootProject.name = "JMEngineNativeApp"
 include(":libuvccommon")
 include(":libuvc")
-include(":libnative")
-include(":libausbc")
 include(":jmengine")
 include(":app")

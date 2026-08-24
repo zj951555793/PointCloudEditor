@@ -32,6 +32,7 @@ public final class MainActivity extends Activity {
     private static final int REQUEST_OPEN_POINT_CLOUD = 1001;
     private static final int USB_SCAN_MAX_RETRIES = 12;
     private static final long USB_SCAN_RETRY_DELAY_MS = 500;
+    private static final long USB_OPEN_CAMERA_B_DELAY_MS = 0;
     private JMEngineNative engine;
     private JMEngineGlesView glView;
     private TextView status;
@@ -39,16 +40,21 @@ public final class MainActivity extends Activity {
     private CameraCapture cameraBCapture;
     private CameraPreviewView cameraAPreview;
     private CameraPreviewView cameraBPreview;
-    private boolean startCameraAfterPermission;
+    private boolean scanningUsbCameras;
     private int usbScanAttempt;
+    private final Runnable scanUsbRunnable = this::scanUsbOnly;
+    private final Runnable openCameraBRunnable = this::openCameraB;
     private final BroadcastReceiver usbPermissionReceiver = new BroadcastReceiver() {
         @Override public void onReceive(Context context, Intent intent) {
-            if (UsbCameraDevices.ACTION_USB_PERMISSION.equals(intent.getAction())) {
-                updateStatus("USB permission result\n" + UsbCameraDevices.describe(MainActivity.this));
-                if (startCameraAfterPermission && UsbCameraDevices.hasBothTargetCameraPermissions(MainActivity.this)) {
-                    startCameraAfterPermission = false;
-                    openUsbCameras();
+            try {
+                if (UsbCameraDevices.ACTION_USB_PERMISSION.equals(intent.getAction())) {
+                    updateStatus("USB permission result\n" + UsbCameraDevices.describe(MainActivity.this));
+                    if (scanningUsbCameras && status != null) {
+                        status.postDelayed(scanUsbRunnable, USB_SCAN_RETRY_DELAY_MS);
+                    }
                 }
+            } catch (Throwable t) {
+                updateStatus("USB permission receiver failed: " + t.getMessage());
             }
         }
     };
@@ -139,7 +145,8 @@ public final class MainActivity extends Activity {
                 LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
 
         LinearLayout scanRow = new LinearLayout(this);
-        addButton(scanRow, "开始相机", v -> startCamera());
+        addButton(scanRow, "搜索相机", v -> startCamera());
+        addButton(scanRow, "打开相机", v -> openCameraNow());
         addButton(scanRow, "停止", v -> { stopEngineScan(); updateScanStatus("scan stopped"); });
         addButton(scanRow, "USB检查", v -> checkUsbCameras());
         root.addView(scanRow, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
@@ -148,84 +155,130 @@ public final class MainActivity extends Activity {
     }
 
     private void startCamera() {
+        stopEngineScan();
+        scanningUsbCameras = true;
+        usbScanAttempt = 0;
+        scanUsbOnly();
+    }
+
+    private void scanUsbOnly() {
+        try {
+            if (!scanningUsbCameras) {
+                return;
+            }
+            int found = UsbCameraDevices.targetCameraCount(this);
+            int requested = UsbCameraDevices.requestVideoPermissions(this);
+            if (found < 2) {
+                if (usbScanAttempt < USB_SCAN_MAX_RETRIES) {
+                    ++usbScanAttempt;
+                    updateStatus("正在搜索 USB 相机 " + usbScanAttempt + "/" + USB_SCAN_MAX_RETRIES
+                            + "\n" + UsbCameraDevices.targetSummary(this)
+                            + "\n" + UsbCameraDevices.describe(this));
+                    postScanRetry();
+                    return;
+                }
+                scanningUsbCameras = false;
+                updateStatus("未稳定检测到两路 USB 相机 found=" + found
+                        + "\n请重新插拔相机/换 OTG Hub/确认外接供电。\n"
+                        + UsbCameraDevices.describe(this));
+                return;
+            }
+
+            if (requested > 0 || !UsbCameraDevices.hasBothTargetCameraPermissions(this)) {
+                if (usbScanAttempt < USB_SCAN_MAX_RETRIES) {
+                    ++usbScanAttempt;
+                    updateStatus("已请求 USB 相机权限，等待授权/系统刷新 "
+                            + usbScanAttempt + "/" + USB_SCAN_MAX_RETRIES
+                            + "\n" + UsbCameraDevices.targetSummary(this)
+                            + "\n" + UsbCameraDevices.describe(this));
+                    postScanRetry();
+                    return;
+                }
+                scanningUsbCameras = false;
+                updateStatus("USB 相机权限未完成。\n请在系统弹窗里允许 cameraA/cameraB；如果没有弹窗，请拔插后再点开始。\n"
+                        + UsbCameraDevices.targetSummary(this)
+                        + "\n" + UsbCameraDevices.describe(this));
+                return;
+            }
+
+            scanningUsbCameras = false;
+            updateStatus("已找到两路 USB 相机，并且权限已允许。\n请点击“打开相机”开始预览。\n"
+                    + UsbCameraDevices.targetSummary(this)
+                    + "\n" + UsbCameraDevices.describe(this));
+        } catch (Throwable t) {
+            scanningUsbCameras = false;
+            updateStatus("搜索 USB 相机失败，但 App 已保护不崩溃："
+                    + t.getClass().getSimpleName() + ": " + t.getMessage()
+                    + "\n" + UsbCameraDevices.describe(this));
+        }
+    }
+
+    private void postScanRetry() {
+        if (status != null && scanningUsbCameras) {
+            status.removeCallbacks(scanUsbRunnable);
+            status.postDelayed(scanUsbRunnable, USB_SCAN_RETRY_DELAY_MS);
+        }
+    }
+
+    private void openCameraNow() {
         if (cameraAPreview == null || cameraBPreview == null ||
                 cameraAPreview.getSurface() == null || cameraBPreview.getSurface() == null ||
                 !cameraAPreview.getSurface().isValid() || !cameraBPreview.getSurface().isValid()) {
             updateStatus("USB camera preview surfaces not ready");
             return;
         }
-
-        stopEngineScan();
-        usbScanAttempt = 0;
-        scanUsbThenOpen();
-    }
-
-    private void scanUsbThenOpen() {
         int found = UsbCameraDevices.targetCameraCount(this);
         int requested = UsbCameraDevices.requestVideoPermissions(this);
-        if (found < 2) {
-            if (usbScanAttempt < USB_SCAN_MAX_RETRIES) {
-                ++usbScanAttempt;
-                updateStatus("正在搜索 USB 相机 " + usbScanAttempt + "/" + USB_SCAN_MAX_RETRIES
-                        + "\n" + UsbCameraDevices.targetSummary(this)
-                        + "\n" + UsbCameraDevices.describe(this));
-                status.postDelayed(this::scanUsbThenOpen, USB_SCAN_RETRY_DELAY_MS);
-                return;
-            }
-            updateStatus("未稳定检测到两路 USB 相机 found=" + found
-                    + "\n请重新插拔相机/换 OTG Hub/确认外接供电。\n"
-                    + UsbCameraDevices.describe(this));
-            return;
-        }
-
-        if (requested > 0 || !UsbCameraDevices.hasBothTargetCameraPermissions(this)) {
-            startCameraAfterPermission = true;
-            if (usbScanAttempt < USB_SCAN_MAX_RETRIES) {
-                ++usbScanAttempt;
-                updateStatus("已请求 USB 相机权限，等待授权/系统刷新 "
-                        + usbScanAttempt + "/" + USB_SCAN_MAX_RETRIES
-                        + "\n" + UsbCameraDevices.targetSummary(this)
-                        + "\n" + UsbCameraDevices.describe(this));
-                status.postDelayed(this::scanUsbThenOpen, USB_SCAN_RETRY_DELAY_MS);
-                return;
-            }
-            updateStatus("USB 相机权限未完成。\n请在系统弹窗里允许 cameraA/cameraB；如果没有弹窗，请拔插后再点开始。\n"
+        if (found < 2 || requested > 0 || !UsbCameraDevices.hasBothTargetCameraPermissions(this)) {
+            updateStatus("相机还没准备好，先点“搜索相机”等待完成。\n"
                     + UsbCameraDevices.targetSummary(this)
                     + "\n" + UsbCameraDevices.describe(this));
             return;
         }
-
-        startCameraAfterPermission = false;
-        openUsbCameras();
-    }
-
-    private void openUsbCameras() {
+        stopEngineScan();
         try {
             cameraACapture = new CameraCapture(this, CameraCapture.CAMERA_A_PRODUCT_ID,
                     cameraAPreview.getSurface(), text -> runOnUiThread(() -> updateStatus("A " + text)));
-            cameraBCapture = new CameraCapture(this, CameraCapture.CAMERA_B_PRODUCT_ID,
-                    cameraBPreview.getSurface(), text -> runOnUiThread(() -> updateStatus("B " + text)));
             cameraACapture.start();
-            cameraBCapture.start();
-            updateStatus("opening USB UVC cameraA=0BDA:300A cameraB=0BDA:300B\n" + UsbCameraDevices.describe(this));
+            updateStatus("opening USB UVC cameraA=0BDA:300A，稍后打开 cameraB\n" + UsbCameraDevices.describe(this));
+            status.postDelayed(openCameraBRunnable, USB_OPEN_CAMERA_B_DELAY_MS);
         } catch (Exception e) {
             stopEngineScan();
             updateStatus("USB UVC camera open failed: " + e.getMessage());
         }
     }
 
+    private void openCameraB() {
+        if (cameraACapture == null || cameraBCapture != null) {
+            return;
+        }
+        try {
+            cameraBCapture = new CameraCapture(this, CameraCapture.CAMERA_B_PRODUCT_ID,
+                    cameraBPreview.getSurface(), text -> runOnUiThread(() -> updateStatus("B " + text)));
+            cameraBCapture.start();
+            updateStatus("opening USB UVC cameraB=0BDA:300B\n" + UsbCameraDevices.describe(this));
+        } catch (Exception e) {
+            updateStatus("USB UVC cameraB open failed: " + e.getMessage());
+        }
+    }
+
     private void stopEngineScan() {
         if (status != null) {
-            status.removeCallbacks(this::scanUsbThenOpen);
+            status.removeCallbacks(scanUsbRunnable);
+            status.removeCallbacks(openCameraBRunnable);
         }
-        startCameraAfterPermission = false;
+        scanningUsbCameras = false;
         if (cameraACapture != null) { cameraACapture.close(); cameraACapture = null; }
         if (cameraBCapture != null) { cameraBCapture.close(); cameraBCapture = null; }
     }
 
     private void checkUsbCameras() {
-        int requested = UsbCameraDevices.requestVideoPermissions(this);
-        updateStatus("USB camera permission requested=" + requested + "\n" + UsbCameraDevices.describe(this));
+        try {
+            int requested = UsbCameraDevices.requestVideoPermissions(this);
+            updateStatus("USB camera permission requested=" + requested + "\n" + UsbCameraDevices.describe(this));
+        } catch (Throwable t) {
+            updateStatus("USB check failed: " + t.getClass().getSimpleName() + ": " + t.getMessage());
+        }
     }
 
     private void updateScanStatus(String action){ updateStatus(action); }
@@ -307,13 +360,17 @@ public final class MainActivity extends Activity {
     }
 
     private void handleUsbAttachIntent(Intent intent) {
-        if (intent != null && "android.hardware.usb.action.USB_DEVICE_ATTACHED".equals(intent.getAction())) {
-            int requested = UsbCameraDevices.requestVideoPermissions(this);
-            updateStatus("USB camera attached, permission requested=" + requested + "\n" + UsbCameraDevices.describe(this));
-            if (cameraAPreview != null && cameraBPreview != null) {
-                usbScanAttempt = 0;
-                status.postDelayed(this::scanUsbThenOpen, USB_SCAN_RETRY_DELAY_MS);
+        try {
+            if (intent != null && "android.hardware.usb.action.USB_DEVICE_ATTACHED".equals(intent.getAction())) {
+                int requested = UsbCameraDevices.requestVideoPermissions(this);
+                updateStatus("USB camera attached, permission requested=" + requested + "\n" + UsbCameraDevices.describe(this));
+                if (scanningUsbCameras && cameraAPreview != null && cameraBPreview != null && status != null) {
+                    usbScanAttempt = 0;
+                    status.postDelayed(scanUsbRunnable, USB_SCAN_RETRY_DELAY_MS);
+                }
             }
+        } catch (Throwable t) {
+            updateStatus("USB attach handling failed: " + t.getMessage());
         }
     }
 
