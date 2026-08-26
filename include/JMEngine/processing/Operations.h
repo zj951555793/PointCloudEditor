@@ -20,5 +20,6 @@ JMENGINE_DECLARE_OP(TaubinSmoothOperation)
 JMENGINE_DECLARE_OP(QemDecimateOperation)
 JMENGINE_DECLARE_OP(HoleFillOperation)
 JMENGINE_DECLARE_OP(OctreePoissonOperation)
+JMENGINE_DECLARE_OP(ScanPostProcessOperation)
 #undef JMENGINE_DECLARE_OP
 } // namespace JMEngine::processing

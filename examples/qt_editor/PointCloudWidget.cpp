@@ -29,6 +29,7 @@
 #include <QPainter>
 #include <QPointer>
 #include <QTimer>
+#include <QThread>
 #include <QTouchEvent>
 #include <QWheelEvent>
 
@@ -846,10 +847,21 @@ PointCloudWidget::PointCloudWidget(QWidget* parent) : QOpenGLWidget(parent) {
     setMouseTracking(true);
     setMinimumSize(800, 480);
     workerPool_.setMaxThreadCount(2);
+    const int idealThreads = std::max(2, QThread::idealThreadCount());
+    // Pose application is CPU-bound but must leave headroom for RGBDFusion, OneShot and Qt.
+    // Half the logical cores, clamped to 2..4, works well on RK3588 and desktop CPUs.
+    livePoseWorkerPool_.setMaxThreadCount(std::clamp(idealThreads / 2, 2, 4));
     statusText_ = QString::fromUtf8("空场景：打开 OBJ / PLY / TXT / ASC");
 }
 
 PointCloudWidget::~PointCloudWidget() {
+    livePoseWorkersStopping_.store(true, std::memory_order_release);
+    livePoseWorkerPool_.clear();
+    livePoseWorkerPool_.waitForDone();
+    {
+        std::lock_guard<std::mutex> lock(livePoseReadyMutex_);
+        livePoseReady_.clear();
+    }
     workerPool_.waitForDone();
     makeCurrent();
     for (auto& m : models_)
@@ -968,12 +980,18 @@ QString PointCloudWidget::beginScanPreview(std::size_t reservePoints) {
     // 使用稳定的绝对路径作为模型 key；它只是场景标识，不会实际写文件。
     scanPreviewPath_ = QDir(QDir::tempPath()).absoluteFilePath(QStringLiteral("JMEngine_live_scan.ply"));
     auto cloud = std::make_shared<JMEngine::PointCloud>();
-    cloud->points().reserve(reservePoints);
+    // previewPointLimit is a hard ceiling, not an instruction to allocate the whole scan
+    // up front.  With the 20k-frame default the UI limit is 20M points; reserving that on
+    // both CPU and GPU at scan start creates a large memory spike before frame_0 arrives.
+    constexpr std::size_t kInitialLivePreviewReserve = 2000000u;
+    const std::size_t initialReserve = std::min(reservePoints, kInitialLivePreviewReserve);
+    cloud->points().reserve(initialReserve);
     JMEngine::ObjMeshData emptyMesh;
     auto model = std::make_unique<Model>(scanPreviewPath_, cloud, std::move(emptyMesh), false);
+    model->livePoseEpoch = livePoseEpochCounter_.fetch_add(1, std::memory_order_relaxed);
     model->displayMode = DisplayMode::Points;
-    model->gpuReservedPointCapacity = reservePoints;
-    model->selectionMask.reserve(reservePoints);
+    model->gpuReservedPointCapacity = initialReserve;
+    model->selectionMask.reserve(initialReserve);
     models_.push_back(std::move(model));
     activeModelIndex_ = static_cast<int>(models_.size()) - 1;
     statusText_ = QString::fromUtf8("实时扫描预览");
@@ -1097,11 +1115,16 @@ void PointCloudWidget::appendScanPreview(const std::shared_ptr<std::vector<JMEng
 
     // 正常情况下 beginScanPreview 已一次性预留足够 GPU 空间。若调用方提高 pointLimit，
     // 仅在真正越界时重建一次，之后仍按 paintGL 的固定 byte budget 分块上传。
-    if (model.glCreated && dst.size() > model.gpuReservedPointCapacity) {
-        // 容量不足也不销毁正在显示的 front，交给 back VBO 完整建立后切换。
-        model.gpuReservedPointCapacity = std::max(dst.size(), model.gpuReservedPointCapacity * 2u);
+    const std::size_t effectiveCapacity = std::max(
+        model.gpuReservedPointCapacity, model.liveRequestedPointCapacity);
+    if (model.glCreated && dst.size() > effectiveCapacity) {
+        // Keep the visible front capacity truthful while a larger back buffer is prepared.
+        // Any points already queued after an older snapshot are included in this new snapshot.
+        model.liveRequestedPointCapacity = std::max(
+            dst.size(), std::max<std::size_t>(1u, effectiveCapacity) * 2u);
         model.liveBackCloud = std::make_shared<JMEngine::PointCloud>(model.cloud->points());
         model.liveBackUploadCursor = 0;
+        model.livePostSwapPoints.clear();
     }
     // Do not touch the GL context from the SLAM/UI callback. Real-camera mode is rendered
     // by the camera preview clock; virtual mode can request a repaint here. The incremental
@@ -1136,21 +1159,31 @@ void PointCloudWidget::appendScanLocalFrame(
     }
 
     auto& dst = model.cloud->points();
+    const bool appendToPendingBack = bool(model.liveBackCloud);
     const std::size_t first = dst.size();
     const std::size_t count = localPoints->size();
 
     // Render history is stored in WORLD coordinates so the complete scan is one draw call.
-    // Keep the tiny frame-local tail separately for later pose-only optimization.
-    std::vector<JMEngine::Point> worldPoints;
-    worldPoints.reserve(count);
-    for (const auto& local : *localPoints)
-        worldPoints.push_back(worldPointFromLocal(local, pose));
-    dst.insert(dst.end(), worldPoints.begin(), worldPoints.end());
+    // For future pose-only optimization retain only local position+normal.  RGBA/flags already
+    // exist in the world cloud and do not change when RT changes, so duplicating full Points
+    // costs hundreds of MB on a 20k-frame scan for no benefit.
+    auto compactLocal = std::make_shared<std::vector<Model::LiveLocalPoint>>();
+    compactLocal->reserve(count);
+    for (const auto& local : *localPoints) {
+        compactLocal->push_back({local.position, local.normal});
+        dst.push_back(worldPointFromLocal(local, pose));
+    }
+    if (appendToPendingBack) {
+        model.livePostSwapPoints.insert(
+            model.livePostSwapPoints.end(),
+            dst.begin() + static_cast<std::ptrdiff_t>(first),
+            dst.begin() + static_cast<std::ptrdiff_t>(first + count));
+    }
 
     model.selectionMask.resize(dst.size(), 0u);
     model.liveFramePoseMode = true;
     model.liveFrameIndex[frameId] = model.liveFrames.size();
-    model.liveFrames.push_back({frameId, first, count, pose, localPoints});
+    model.liveFrames.push_back({frameId, first, count, pose, std::move(compactLocal)});
 
     const double appendMs = double(appendPerf.nsecsElapsed()) / 1000000.0;
     if (appendMs > 8.0) {
@@ -1162,10 +1195,11 @@ void PointCloudWidget::appendScanLocalFrame(
                    .arg(appendMs, 0, 'f', 2);
     }
 
-    // First valid frame establishes clipping using the already world-baked preview tail.
-    if (!scanPreviewViewInitialized_ && !worldPoints.empty()) {
-        JMEngine::PointCloud tmp(std::move(worldPoints));
-        camera_.fit(tmp);
+    // First valid frame establishes clipping. At this point the live model contains only
+    // the first frame (plus at most tiny marker overlays), so fitting the model avoids another
+    // temporary full Point vector.
+    if (!scanPreviewViewInitialized_ && count > 0) {
+        camera_.fit(*model.cloud);
         scanPreviewViewInitialized_ = true;
         activeModelIndex_ = index;
         if (scanCameraPose_ && scanCameraPose_->trackingOk) {
@@ -1174,14 +1208,18 @@ void PointCloudWidget::appendScanLocalFrame(
         }
     }
 
-    if (model.glCreated && first + count > model.gpuReservedPointCapacity) {
-        model.gpuReservedPointCapacity =
-            std::max(first + count, std::max<std::size_t>(1, model.gpuReservedPointCapacity) * 2u);
+    const std::size_t effectiveCapacity = std::max(
+        model.gpuReservedPointCapacity, model.liveRequestedPointCapacity);
+    if (model.glCreated && first + count > effectiveCapacity) {
+        model.liveRequestedPointCapacity = std::max(
+            first + count, std::max<std::size_t>(1u, effectiveCapacity) * 2u);
         model.liveBackCloud = std::make_shared<JMEngine::PointCloud>(model.cloud->points());
         model.liveBackUploadCursor = 0;
+        model.livePostSwapPoints.clear();
         qWarning().noquote()
-            << QStringLiteral("[SCAN VBO] capacity miss deferred: need=%1 reserved=%2")
+            << QStringLiteral("[SCAN VBO] capacity miss deferred: need=%1 target=%2 front=%3")
                    .arg(qulonglong(first + count))
+                   .arg(qulonglong(model.liveRequestedPointCapacity))
                    .arg(qulonglong(model.gpuReservedPointCapacity));
     }
 
@@ -1243,22 +1281,30 @@ void PointCloudWidget::setScanFrameMarkers(
     }
 
     auto& dst = model.cloud->points();
+    const bool appendMarkersToPendingBack = bool(model.liveBackCloud);
     const std::size_t first = dst.size();
     for (const auto& local : *markerLocalPoints)
         dst.push_back(worldPointFromLocal(local, frame.pose));
 
     const std::size_t count = dst.size() - first;
+    if (appendMarkersToPendingBack && count > 0) {
+        model.livePostSwapPoints.insert(
+            model.livePostSwapPoints.end(),
+            dst.begin() + static_cast<std::ptrdiff_t>(first),
+            dst.begin() + static_cast<std::ptrdiff_t>(first + count));
+    }
     model.selectionMask.resize(dst.size(), 0u);
     model.liveMarkerIndex[frameId] = model.liveMarkerRanges.size();
     model.liveMarkerRanges.push_back({frameId, first, count, markerLocalPoints});
 
-    if (first + count > model.gpuReservedPointCapacity) {
-        model.gpuReservedPointCapacity =
-            std::max(first + count, std::max<std::size_t>(1, model.gpuReservedPointCapacity) * 2u);
-        if (model.glCreated) {
-            model.liveBackCloud = std::make_shared<JMEngine::PointCloud>(model.cloud->points());
-            model.liveBackUploadCursor = 0;
-        }
+    const std::size_t effectiveCapacity = std::max(
+        model.gpuReservedPointCapacity, model.liveRequestedPointCapacity);
+    if (model.glCreated && first + count > effectiveCapacity) {
+        model.liveRequestedPointCapacity = std::max(
+            first + count, std::max<std::size_t>(1u, effectiveCapacity) * 2u);
+        model.liveBackCloud = std::make_shared<JMEngine::PointCloud>(model.cloud->points());
+        model.liveBackUploadCursor = 0;
+        model.livePostSwapPoints.clear();
     }
 }
 
@@ -1274,44 +1320,247 @@ void PointCloudWidget::updateScanFramePoses(
     if (!model.liveFramePoseMode || !model.cloud)
         return;
 
-    auto& world = model.cloud->points();
+    // Keep this UI callback cheap. A loop-closure refresh can change thousands of historical
+    // poses at once; transforming all their points synchronously here blocks event processing
+    // and makes the *current* frame look jittery even though its pose is protected. Coalesce
+    // repeated updates by frame id and let paintGL consume them under a fixed point budget.
     for (const auto& u : *updates) {
-        const auto it = model.liveFrameIndex.find(u.frameId);
-        if (it == model.liveFrameIndex.end())
+        if (model.liveFrameIndex.find(u.frameId) == model.liveFrameIndex.end())
             continue;
-
-        auto& frame = model.liveFrames[it->second];
         JMEngine::Mat4f nextPose;
         nextPose.m = u.pose;
-        frame.pose = nextPose;
-
-        if (frame.localPoints && frame.first < world.size()) {
-            const std::size_t count =
-                std::min(frame.count, std::min(frame.localPoints->size(), world.size() - frame.first));
-            for (std::size_t i = 0; i < count; ++i)
-                world[frame.first + i] = worldPointFromLocal((*frame.localPoints)[i], nextPose);
-            if (count > 0)
-                model.livePoseDirtyRanges.push_back({frame.first, count});
+        if (model.livePoseInFlight.find(u.frameId) != model.livePoseInFlight.end()) {
+            // The worker already owns an immutable local-point snapshot. Keep only the newest
+            // RT; once that worker result is consumed the frame is queued exactly once again.
+            model.pendingLivePoseUpdates[u.frameId] = nextPose;
+            continue;
         }
-
-        const auto markerIt = model.liveMarkerIndex.find(u.frameId);
-        if (markerIt != model.liveMarkerIndex.end()) {
-            auto& marker = model.liveMarkerRanges[markerIt->second];
-            if (marker.localPoints && marker.first < world.size()) {
-                const std::size_t count = std::min(
-                    marker.count, std::min(marker.localPoints->size(), world.size() - marker.first));
-                for (std::size_t i = 0; i < count; ++i)
-                    world[marker.first + i] = worldPointFromLocal((*marker.localPoints)[i], nextPose);
-                if (count > 0)
-                    model.livePoseDirtyRanges.push_back({marker.first, count});
-            }
+        auto [it, inserted] = model.pendingLivePoseUpdates.emplace(u.frameId, nextPose);
+        if (!inserted) {
+            it->second = nextPose;
+        } else {
+            model.pendingLivePoseOrder.push_back(u.frameId);
         }
     }
+    update();
+}
 
-    model.pickBlocks.clear();
-    model.pickGridIds.clear();
-    model.pickIndexedCloud = nullptr;
-    model.pickIndexedPointCount = 0;
+void PointCloudWidget::schedulePendingLivePoseUpdates(Model& model) {
+    if (!model.cloud || model.liveBackCloud || model.pendingLivePoseOrder.empty() ||
+        livePoseWorkersStopping_.load(std::memory_order_acquire))
+        return;
+
+    const int maxJobs = std::max(2, livePoseWorkerPool_.maxThreadCount() * 2);
+    {
+        std::lock_guard<std::mutex> lock(livePoseReadyMutex_);
+        // Bound transformed staging memory. The renderer will drain this queue on subsequent
+        // paints; producing thousands of completed ranges ahead of GL only wastes RAM.
+        if (livePoseReady_.size() >= std::size_t(maxJobs * 2))
+            return;
+    }
+    while (!model.pendingLivePoseOrder.empty() &&
+           livePoseJobsInFlight_.load(std::memory_order_acquire) < maxJobs) {
+        const int frameId = model.pendingLivePoseOrder.front();
+        model.pendingLivePoseOrder.pop_front();
+
+        auto poseIt = model.pendingLivePoseUpdates.find(frameId);
+        if (poseIt == model.pendingLivePoseUpdates.end())
+            continue;
+        if (model.livePoseInFlight.find(frameId) != model.livePoseInFlight.end())
+            continue;
+
+        const auto frameIndexIt = model.liveFrameIndex.find(frameId);
+        if (frameIndexIt == model.liveFrameIndex.end()) {
+            model.pendingLivePoseUpdates.erase(poseIt);
+            continue;
+        }
+        const auto& frame = model.liveFrames[frameIndexIt->second];
+        if (!frame.localPoints) {
+            model.pendingLivePoseUpdates.erase(poseIt);
+            continue;
+        }
+
+        const JMEngine::Mat4f nextPose = poseIt->second;
+        model.pendingLivePoseUpdates.erase(poseIt);
+        model.livePoseInFlight.insert(frameId);
+
+        const QString modelPath = model.path;
+        const std::uint64_t modelEpoch = model.livePoseEpoch;
+        const std::size_t first = frame.first;
+        const std::size_t frameCount = frame.count;
+        auto localPoints = frame.localPoints;
+
+        std::size_t markerFirst = 0;
+        std::size_t markerCount = 0;
+        std::shared_ptr<std::vector<JMEngine::Point>> markerLocalPoints;
+        const auto markerIt = model.liveMarkerIndex.find(frameId);
+        if (markerIt != model.liveMarkerIndex.end()) {
+            const auto& marker = model.liveMarkerRanges[markerIt->second];
+            markerFirst = marker.first;
+            markerCount = marker.count;
+            markerLocalPoints = marker.localPoints;
+        }
+
+        livePoseJobsInFlight_.fetch_add(1, std::memory_order_acq_rel);
+        PointCloudWidget* owner = this;
+        livePoseWorkerPool_.start(
+            [owner, modelPath, modelEpoch, frameId, first, frameCount, nextPose,
+             localPoints = std::move(localPoints), markerFirst, markerCount,
+             markerLocalPoints = std::move(markerLocalPoints)]() mutable {
+                LivePoseTransformResult result;
+                result.modelPath = modelPath;
+                result.modelEpoch = modelEpoch;
+                result.frameId = frameId;
+                result.first = first;
+                result.pose = nextPose;
+                result.localToken = localPoints;
+
+                const std::size_t count = localPoints
+                    ? std::min(frameCount, localPoints->size())
+                    : 0u;
+                result.transformedPoints.resize(count);
+                for (std::size_t i = 0; i < count; ++i) {
+                    const auto& src = (*localPoints)[i];
+                    auto& dst = result.transformedPoints[i];
+                    dst.position = JMEngine::transformPoint(nextPose, src.position);
+                    dst.normal = transformNormalByPose(nextPose, src.normal);
+                }
+
+                result.markerFirst = markerFirst;
+                result.markerToken = markerLocalPoints;
+                const std::size_t markers = markerLocalPoints
+                    ? std::min(markerCount, markerLocalPoints->size())
+                    : 0u;
+                result.transformedMarkers.resize(markers);
+                for (std::size_t i = 0; i < markers; ++i)
+                    result.transformedMarkers[i] =
+                        worldPointFromLocal((*markerLocalPoints)[i], nextPose);
+
+                if (!owner->livePoseWorkersStopping_.load(std::memory_order_acquire)) {
+                    {
+                        std::lock_guard<std::mutex> lock(owner->livePoseReadyMutex_);
+                        owner->livePoseReady_.push_back(std::move(result));
+                    }
+                    QMetaObject::invokeMethod(owner, [owner] {
+                        if (!owner->livePoseWorkersStopping_.load(std::memory_order_acquire))
+                            owner->update();
+                    }, Qt::QueuedConnection);
+                }
+                owner->livePoseJobsInFlight_.fetch_sub(1, std::memory_order_acq_rel);
+            });
+    }
+}
+
+void PointCloudWidget::applyReadyLivePoseUpdates(std::size_t& pointBudget) {
+    bool anyChanged = false;
+    bool appliedAny = false;
+
+    while (pointBudget > 0) {
+        LivePoseTransformResult result;
+        {
+            std::lock_guard<std::mutex> lock(livePoseReadyMutex_);
+            if (livePoseReady_.empty())
+                break;
+            result = std::move(livePoseReady_.front());
+            livePoseReady_.pop_front();
+        }
+
+        const int modelIndex = findModel(result.modelPath);
+        if (modelIndex < 0)
+            continue;
+        auto& model = *models_[static_cast<std::size_t>(modelIndex)];
+        if (model.livePoseEpoch != result.modelEpoch)
+            continue;
+
+        // During VBO growth the back snapshot still represents an older CPU cloud. Applying a
+        // ready optimized range now would be overwritten by the subsequent swap, so defer it.
+        if (model.liveBackCloud) {
+            std::lock_guard<std::mutex> lock(livePoseReadyMutex_);
+            livePoseReady_.push_front(std::move(result));
+            break;
+        }
+
+        const auto frameIndexIt = model.liveFrameIndex.find(result.frameId);
+        if (frameIndexIt == model.liveFrameIndex.end()) {
+            model.livePoseInFlight.erase(result.frameId);
+            continue;
+        }
+        auto& frame = model.liveFrames[frameIndexIt->second];
+        const bool sameFrameStorage =
+            frame.first == result.first && frame.localPoints == result.localToken;
+        if (!sameFrameStorage) {
+            model.livePoseInFlight.erase(result.frameId);
+            continue;
+        }
+
+        // If another optimization update arrived while this job was running, this result is
+        // already obsolete. Drop it before touching CPU/GPU history and immediately make the
+        // coalesced newest pose schedulable.
+        if (model.pendingLivePoseUpdates.find(result.frameId) !=
+            model.pendingLivePoseUpdates.end()) {
+            model.livePoseInFlight.erase(result.frameId);
+            model.pendingLivePoseOrder.push_back(result.frameId);
+            continue;
+        }
+
+        const std::size_t work = result.transformedPoints.size() + result.transformedMarkers.size();
+        if (appliedAny && work > pointBudget) {
+            std::lock_guard<std::mutex> lock(livePoseReadyMutex_);
+            livePoseReady_.push_front(std::move(result));
+            break;
+        }
+
+        auto& world = model.cloud->points();
+        const std::size_t pointCount = result.first < world.size()
+            ? std::min(result.transformedPoints.size(), world.size() - result.first)
+            : 0u;
+        for (std::size_t i = 0; i < pointCount; ++i) {
+            auto& dst = world[result.first + i];
+            const auto& src = result.transformedPoints[i];
+            dst.position = src.position;
+            dst.normal = src.normal;
+        }
+        if (pointCount > 0)
+            model.livePoseDirtyRanges.push_back({result.first, pointCount});
+
+        if (result.markerToken) {
+            const auto markerIndexIt = model.liveMarkerIndex.find(result.frameId);
+            if (markerIndexIt != model.liveMarkerIndex.end()) {
+                auto& marker = model.liveMarkerRanges[markerIndexIt->second];
+                if (marker.first == result.markerFirst && marker.localPoints == result.markerToken &&
+                    marker.first < world.size()) {
+                    const std::size_t markerCount = std::min(
+                        result.transformedMarkers.size(), world.size() - marker.first);
+                    for (std::size_t i = 0; i < markerCount; ++i)
+                        world[marker.first + i] = result.transformedMarkers[i];
+                    if (markerCount > 0)
+                        model.livePoseDirtyRanges.push_back({marker.first, markerCount});
+                }
+            }
+        }
+
+        frame.pose = result.pose;
+        model.livePoseInFlight.erase(result.frameId);
+        // A newer optimized RT may have arrived while this worker was running. updateScanFramePoses
+        // coalesces it in the map but intentionally does not enqueue a second concurrent job.
+        if (model.pendingLivePoseUpdates.find(result.frameId) !=
+            model.pendingLivePoseUpdates.end()) {
+            model.pendingLivePoseOrder.push_back(result.frameId);
+        }
+
+        pointBudget = work >= pointBudget ? 0u : pointBudget - work;
+        appliedAny = true;
+        anyChanged = anyChanged || pointCount > 0 || !result.transformedMarkers.empty();
+    }
+
+    if (anyChanged) {
+        for (auto& model : models_) {
+            model->pickBlocks.clear();
+            model->pickGridIds.clear();
+            model->pickIndexedCloud = nullptr;
+            model->pickIndexedPointCount = 0;
+        }
+    }
 }
 
 void PointCloudWidget::uploadScanStatusFrame(ScanStatusGpu& layer) {
@@ -1462,109 +1711,49 @@ void PointCloudWidget::updateScanCameraPose(const ScanCameraViewPose& pose) {
         return;
     }
 
-    // There is exactly ONE visual camera pose during scanning. Both the drawn scanner frustum
-    // and the observer use this same pose. Do not use a second observer-side filter.
-    //
-    // A fixed EMA (the previous implementation) still visibly oscillates when SLAM alternates
-    // around the true pose: it simply follows the jitter more slowly. Instead use an adaptive
-    // dead-band filter here: tiny pose changes are treated as tracking noise, while larger real
-    // camera motion quickly approaches alpha=1. The dead-band is measured against the *displayed*
-    // pose, so genuine slow motion accumulates and is eventually followed rather than being lost.
-    ScanCameraViewPose filtered = pose;
-    const auto rawRight = JMEngine::example::normalize(pose.right);
-    const auto rawUp = JMEngine::example::normalize(pose.up);
-    const auto rawForward = JMEngine::example::normalize(pose.forward);
-    auto visualQ = quatFromBasis(rawRight, rawUp, JMEngine::example::mul(rawForward, -1.0f));
+    // IMPORTANT: do not smooth/filter the chase camera independently from the current green
+    // frame. The current frame is already transformed to world coordinates with the exact
+    // callback-time tracking RT. If the observer uses an EMA/dead-band pose while the green frame
+    // uses the raw RT, the two coordinate systems differ every frame and the *current frame* looks
+    // like it is continuously shaking. Use one tracking pose for all live visuals: current frame,
+    // scanner frustum and observer. Online optimization only rewrites historical frames.
+    ScanCameraViewPose displayPose = pose;
+    displayPose.right = JMEngine::example::normalize(pose.right);
+    displayPose.up = JMEngine::example::normalize(pose.up);
+    displayPose.forward = JMEngine::example::normalize(pose.forward);
 
-    if (lastValidScanCameraPose_ && lastValidScanCameraPose_->trackingOk) {
-        const auto& prev = *lastValidScanCameraPose_;
-        const auto prevQ = quatFromBasis(
-            JMEngine::example::normalize(prev.right),
-            JMEngine::example::normalize(prev.up),
-            JMEngine::example::mul(JMEngine::example::normalize(prev.forward), -1.0f));
-
-        const JMEngine::Vec3f delta = JMEngine::example::sub(pose.position, prev.position);
-        const float positionDelta = JMEngine::example::length(delta);
-        const float base = std::max(camera_.sceneRadius, 1.0f);
-        // Keep the threshold scale-relative instead of assuming millimetres. About 0.3% of the
-        // current scene radius rejects sub-pixel/SLAM pose noise but still follows deliberate
-        // hand motion quickly. The tiny absolute floor only protects degenerate test scenes.
-        const float positionDeadBand = std::max(1.0e-4f, base * 0.0030f);
-        const float positionFullFollow = std::max(positionDeadBand * 8.0f, base * 0.020f);
-        if (positionDelta <= positionDeadBand) {
-            filtered.position = prev.position;
-        } else {
-            const float motion = std::clamp(
-                (positionDelta - positionDeadBand) /
-                    std::max(positionFullFollow - positionDeadBand, 1.0e-6f),
-                0.0f, 1.0f);
-            const float alpha = 0.20f + 0.80f * motion;
-            filtered.position = JMEngine::example::add(prev.position,
-                JMEngine::example::mul(delta, alpha));
-        }
-
-        auto alignedRawQ = visualQ;
-        float qDot = prevQ.w * alignedRawQ.w + prevQ.x * alignedRawQ.x +
-                     prevQ.y * alignedRawQ.y + prevQ.z * alignedRawQ.z;
-        if (qDot < 0.0f) {
-            alignedRawQ = {-alignedRawQ.w, -alignedRawQ.x, -alignedRawQ.y, -alignedRawQ.z};
-            qDot = -qDot;
-        }
-        qDot = std::clamp(qDot, -1.0f, 1.0f);
-        const float rotationDelta = 2.0f * std::acos(qDot);
-        constexpr float kPi = 3.14159265358979323846f;
-        constexpr float rotationDeadBand = 0.35f * kPi / 180.0f;
-        constexpr float rotationFullFollow = 3.0f * kPi / 180.0f;
-        if (rotationDelta <= rotationDeadBand) {
-            visualQ = prevQ;
-        } else {
-            const float motion = std::clamp(
-                (rotationDelta - rotationDeadBand) /
-                    (rotationFullFollow - rotationDeadBand),
-                0.0f, 1.0f);
-            const float alpha = 0.16f + 0.84f * motion;
-            visualQ = slerpQuat(prevQ, alignedRawQ, alpha);
-        }
-    }
-
-    // Rebuild an orthonormal basis from the single filtered quaternion.  Blending forward/up
-    // independently can make the basis breathe and is visible as small observer roll/yaw jitter.
-    filtered.right = JMEngine::example::normalize(
+    // Build one orthonormal orientation from the same exact tracking basis. This fixes numerical
+    // non-orthogonality without introducing temporal filtering or lag.
+    const auto visualQ = quatFromBasis(
+        displayPose.right,
+        displayPose.up,
+        JMEngine::example::mul(displayPose.forward, -1.0f));
+    displayPose.right = JMEngine::example::normalize(
         JMEngine::example::OrbitCamera::rotate(visualQ, {1.0f, 0.0f, 0.0f}));
-    filtered.up = JMEngine::example::normalize(
+    displayPose.up = JMEngine::example::normalize(
         JMEngine::example::OrbitCamera::rotate(visualQ, {0.0f, 1.0f, 0.0f}));
-    filtered.forward = JMEngine::example::normalize(JMEngine::example::mul(
+    displayPose.forward = JMEngine::example::normalize(JMEngine::example::mul(
         JMEngine::example::OrbitCamera::rotate(visualQ, {0.0f, 0.0f, 1.0f}), -1.0f));
 
-    lastValidScanCameraPose_ = filtered;
-    scanCameraPose_ = filtered;
+    lastValidScanCameraPose_ = displayPose;
+    scanCameraPose_ = displayPose;
 
     // SLAM pose can arrive before the first realtime point chunk. Fit the first cloud before
     // driving the observer so sceneRadius / clipping are valid for scan units.
     if (!scanPreviewViewInitialized_ || !scanCameraFollowEnabled_)
         return;
 
-    // Scanner chase view: keep exactly the same orientation as the displayed scanner camera,
-    // but place the observer a small, fixed distance behind it.  Do NOT add another pose filter
-    // here; the rigid offset is derived from the same filtered displayPose every frame.
-    //
-    // target   = scannerPosition + forward * lookDistance
-    // distance = lookDistance + behindDistance
-    // eye      = target - forward * distance
-    //          = scannerPosition - forward * behindDistance
-    //
-    // This gives a stable view slightly behind the physical/SLAM camera while preserving the
-    // exact scanner viewing direction.
+    // Scanner chase view: exactly the same orientation/RT source as the displayed current frame,
+    // with only a rigid backwards translation for visibility. There is intentionally no temporal
+    // filter here; filtering only the observer is what caused the persistent relative jitter.
     const float base = std::max(camera_.sceneRadius, 1.0f);
     const float lookDistance = std::max(base * 0.24f, 1.0f);
     const float behindDistance = std::max(base * 0.08f, 0.5f);
     scanFollowTarget_ = JMEngine::example::add(
-        filtered.position, JMEngine::example::mul(filtered.forward, lookDistance));
+        displayPose.position, JMEngine::example::mul(displayPose.forward, lookDistance));
     scanFollowDistance_ = lookDistance + behindDistance;
     scanFollowOrientation_ = visualQ;
 
-    // Apply the same display orientation immediately.  The only observer/scanner difference is
-    // the fixed backwards translation above; there is intentionally no second EMA or follow lag.
     camera_.target = scanFollowTarget_;
     camera_.distance = scanFollowDistance_;
     camera_.orientation = scanFollowOrientation_;
@@ -1590,9 +1779,9 @@ void PointCloudWidget::advanceScanCameraFollow() {
         return;
 
     // Keep the observer rigidly attached just behind the displayed scanner-camera pose.
-    // updateScanCameraPose() performs the only filtering step; paintGL() must not introduce a
-    // second delay.  Orientation is identical to the scanner camera and the fixed behind offset
-    // is already encoded in scanFollowDistance_.
+    // updateScanCameraPose() already selects the single exact live tracking pose; paintGL() must
+    // not introduce filtering or lag. Orientation is identical to the scanner camera and the
+    // fixed behind offset is already encoded in scanFollowDistance_.
     camera_.target = scanFollowTarget_;
     camera_.distance = scanFollowDistance_;
     camera_.orientation = scanFollowOrientation_;
@@ -1621,8 +1810,13 @@ void PointCloudWidget::replaceScanPreview(const std::shared_ptr<JMEngine::PointC
         doneCurrent();
     }
     model.liveFramePoseMode = false;
+    model.livePoseEpoch = livePoseEpochCounter_.fetch_add(1, std::memory_order_relaxed);
     model.liveFrames.clear();
     model.liveFrameIndex.clear();
+    model.pendingLivePoseOrder.clear();
+    model.pendingLivePoseUpdates.clear();
+    model.livePoseInFlight.clear();
+    model.livePoseDirtyRanges.clear();
     model.liveMarkerRanges.clear();
     model.liveMarkerIndex.clear();
     model.pendingLiveMarkers.clear();
@@ -2098,6 +2292,7 @@ void PointCloudWidget::destroyModelGl(Model& m) {
     // 主模型销毁时后台 Live RT VBO 也必须释放。
     destroyLiveBackGl(m);
     m.liveBackCloud.reset();
+    m.liveRequestedPointCapacity = 0;
     m.livePostSwapPoints.clear();
 }
 
@@ -2152,7 +2347,10 @@ void PointCloudWidget::uploadPointRangeNow(Model& m, std::size_t first, std::siz
 void PointCloudWidget::uploadLiveBackIncremental(Model& m, std::size_t& budget) {
     if (!m.liveBackCloud || m.liveBackCloud->empty() || !backend_ || budget == 0)
         return;
-    const std::size_t required = std::max<std::size_t>(m.liveBackCloud->size(), scanPreviewPointLimit_);
+    const std::size_t requested = m.liveRequestedPointCapacity > 0
+        ? m.liveRequestedPointCapacity
+        : m.gpuReservedPointCapacity;
+    const std::size_t required = std::max<std::size_t>(m.liveBackCloud->size(), requested);
     if (!m.liveBackCreated || m.liveBackCapacity < required) {
         if (m.liveBackCreated)
             destroyLiveBackGl(m);
@@ -2213,10 +2411,15 @@ void PointCloudWidget::uploadLiveBackIncremental(Model& m, std::size_t& budget) 
 
     if (m.liveBackUploadCursor >= m.liveBackCloud->size()) {
         // Back 已完整：同一帧内交换。front 从未被部分覆盖，所以没有半新半旧闪烁。
+        // Track the two physical capacities independently: the old front becomes the reusable
+        // back, while the newly built back becomes the real front capacity.
+        const std::size_t oldFrontCapacity = m.gpuReservedPointCapacity;
+        const std::size_t newFrontCapacity = m.liveBackCapacity;
         std::swap(m.gpu, m.liveBackGpu);
         m.liveBackCreated = true; // 交换后的 liveBackGpu 是旧 front，继续作为下一轮 back 复用。
-        m.liveBackCapacity = m.gpuReservedPointCapacity;
-        m.gpuReservedPointCapacity = std::max<std::size_t>(m.liveBackCloud->size(), scanPreviewPointLimit_);
+        m.liveBackCapacity = oldFrontCapacity;
+        m.gpuReservedPointCapacity = newFrontCapacity;
+        m.liveRequestedPointCapacity = 0;
         m.cloud = m.liveBackCloud;
         m.editor.setPointCloud(m.cloud);
         m.selectionMask.assign(m.cloud->size(), 0u);
@@ -2372,6 +2575,14 @@ void PointCloudWidget::paintGL() {
     // incremental upload policy and byte budget.
     // One uploader and one byte budget for both real and virtual scanning.
     std::size_t budget = 4u * 1024u * 1024u;
+    // Historical pose math runs on a dedicated worker pool. paintGL only schedules immutable
+    // frame jobs and consumes already-transformed ranges under a bounded copy/upload budget.
+    // This keeps loop closure CPU work parallel while OpenGL remains strictly on this thread.
+    for (auto& m : models_)
+        schedulePendingLivePoseUpdates(*m);
+    std::size_t livePosePointBudget = 250000u;
+    applyReadyLivePoseUpdates(livePosePointBudget);
+
     for (auto& m : models_) {
         uploadModelIncremental(*m, budget);
         uploadLiveBackIncremental(*m, budget);
@@ -2425,6 +2636,7 @@ void PointCloudWidget::paintGL() {
     }
 
     bool uploading = false;
+    bool poseSchedulingPending = false;
     for (const auto& m : models_) {
         if (!m->cloud)
             continue;
@@ -2433,10 +2645,13 @@ void PointCloudWidget::paintGL() {
             (m->liveBackCloud && m->liveBackUploadCursor < m->liveBackCloud->size())) {
             uploading = true;
         }
+        if (!m->liveBackCloud && !m->pendingLivePoseOrder.empty())
+            poseSchedulingPending = true;
     }
-    // If a non-scan/editor upload exceeds the per-paint budget, continue identically
-    // for both scan sources. Live scan tails normally finish in the first paint.
-    if (uploading)
+    // If a non-scan/editor upload exceeds the per-paint budget, or applying one worker result
+    // exposed a newer coalesced pose for that frame, schedule another paint. Finished workers
+    // independently post update() when their ready result enters the queue.
+    if (uploading || poseSchedulingPending)
         update();
 }
 
@@ -4627,76 +4842,67 @@ bool PointCloudWidget::startScanTextureMappingAsync(JMEngine::texture::Backend b
     }
 
     const bool hasTextureFrames = textureFrames_ && !textureFrames_->empty();
+    QPointer<PointCloudWidget> self(this);
 
-    // Already a mesh: texture directly.
-    if (model->meshMode && model->mesh) {
+    auto finishWithTexture = [self, backend, hasTextureFrames, finished = std::move(finished)]
+                             (bool ok, const QString& message) mutable {
+        if (!self)
+            return;
+        if (!ok) {
+            if (finished)
+                finished(false, QString::fromUtf8("一键几何处理失败：") + message);
+            return;
+        }
         if (!hasTextureFrames) {
             if (finished)
-                finished(true, QString::fromUtf8("当前已是网格；没有纹理关键帧，已跳过纹理映射"));
-            return true;
+                finished(true, message + QString::fromUtf8("；没有纹理关键帧，已跳过纹理映射"));
+            return;
         }
-        return startTextureMappingAsync(backend, std::move(finished));
+        if (!self->startTextureMappingAsync(backend, std::move(finished)))
+            return;
+    };
+
+    // If the operator invokes one-click on an existing mesh, still run the mesh-denoise stage
+    // before texture mapping.  A normal scan ends as a point cloud and takes the full pipeline.
+    if (model->meshMode && model->mesh) {
+        auto op = JMEngine::processing::createOperation("mesh_denoise");
+        if (!op) {
+            finishWithTexture(false, QString::fromUtf8("网格去噪模块不可用"));
+            return false;
+        }
+        JMEngine::processing::ProcessInput input;
+        input.cloud = model->cloud;
+        input.mesh = model->mesh;
+        const auto desc = JMEngine::processing::estimateOperationDescriptor(*op, input);
+        JMEngine::processing::ParameterMap params;
+        for (const auto& spec : desc.parameters) {
+            switch (spec.kind) {
+            case JMEngine::processing::ParameterKind::Integer:
+            case JMEngine::processing::ParameterKind::Choice:
+                params[spec.key] = static_cast<std::int64_t>(std::llround(spec.defaultValue)); break;
+            case JMEngine::processing::ParameterKind::Boolean:
+                params[spec.key] = spec.defaultValue >= 0.5; break;
+            case JMEngine::processing::ParameterKind::Real:
+                params[spec.key] = spec.defaultValue; break;
+            }
+        }
+        return startProcessingOperation("mesh_denoise", std::move(params),
+            [progress](float p, const QString& stage) {
+                if (progress) progress(p * 0.15f, QString::fromUtf8("网格去噪：") + stage);
+            }, std::move(finishWithTexture));
     }
 
-    // A normal scan finishes as a point cloud.  TextureMapper requires triangles, therefore
-    // build a surface first.  Use the same data-driven defaults shown by ProcessingDialog so
-    // the scan button does not hide a second parameter dialog from the operator.
-    auto operation = JMEngine::processing::createOperation("poisson_octree");
+    // Full production scan post-process runs as ONE background processing job over an immutable
+    // snapshot, so the original scan point cloud remains untouched.  Only the final mesh is
+    // added to the model manager; intermediate denoised clouds are not exposed as extra models.
+    auto operation = JMEngine::processing::createOperation("scan_postprocess");
     if (!operation) {
-        if (finished)
-            finished(false, QString::fromUtf8("工业泊松重建模块不可用，无法从扫描点云生成纹理网格"));
+        finishWithTexture(false, QString::fromUtf8("扫描一键后处理模块不可用"));
         return false;
     }
-
-    JMEngine::processing::ProcessInput input;
-    input.cloud = model->cloud;
-    input.mesh = model->mesh;
-    const auto desc = JMEngine::processing::estimateOperationDescriptor(*operation, input);
-    JMEngine::processing::ParameterMap params;
-    for (const auto& spec : desc.parameters) {
-        switch (spec.kind) {
-        case JMEngine::processing::ParameterKind::Integer:
-            params[spec.key] = static_cast<std::int64_t>(std::llround(spec.defaultValue));
-            break;
-        case JMEngine::processing::ParameterKind::Boolean:
-            params[spec.key] = spec.defaultValue >= 0.5;
-            break;
-        case JMEngine::processing::ParameterKind::Real:
-            params[spec.key] = spec.defaultValue;
-            break;
-        case JMEngine::processing::ParameterKind::Choice:
-            // Choice defaults are represented by their numeric index in the generic descriptor.
-            params[spec.key] = static_cast<std::int64_t>(std::llround(spec.defaultValue));
-            break;
-        }
-    }
-
-    QPointer<PointCloudWidget> self(this);
-    return startProcessingOperation(
-        "poisson_octree", std::move(params), std::move(progress),
-        [self, backend, hasTextureFrames, finished = std::move(finished)](bool ok, const QString& message) mutable {
-            if (!self)
-                return;
-            if (!ok) {
-                if (finished)
-                    finished(false, QString::fromUtf8("纹理映射前的网格重建失败：") + message);
-                return;
-            }
-
-            if (!hasTextureFrames) {
-                if (finished)
-                    finished(true, message + QString::fromUtf8("；没有纹理关键帧，已完成网格重建并跳过纹理映射"));
-                return;
-            }
-
-            // startProcessingOperation activates the newly-created Poisson mesh before this
-            // callback, so mapping can safely start immediately without polling or a timer.
-            if (!self->startTextureMappingAsync(backend, std::move(finished))) {
-                // startTextureMappingAsync reports the concrete reason through finished().
-                return;
-            }
-        });
+    return startProcessingOperation("scan_postprocess", {}, std::move(progress), std::move(finishWithTexture));
 }
+
 #endif
 
 bool PointCloudWidget::startProcessingOperation(const std::string& operationId,
@@ -4762,7 +4968,7 @@ bool PointCloudWidget::startProcessingOperation(const std::string& operationId,
     // meshes used to force a neutral gray display override, so the RGB existed in Core but was
     // never visible. Carry this display intent to the UI-thread result application.
     bool preferResultVertexColors = false;
-    if (operationId == "poisson_octree") {
+    if (operationId == "poisson_octree" || operationId == "scan_postprocess") {
         preferResultVertexColors = true;
         const auto it = params.find("use_input_color");
         if (it != params.end()) {
@@ -4806,7 +5012,7 @@ bool PointCloudWidget::startProcessingOperation(const std::string& operationId,
 
         QMetaObject::invokeMethod(
             self,
-            [self, path, sourceCloud, sourceMesh, outputPolicy, preferResultVertexColors, result = std::move(result), finished]() mutable {
+            [self, path, sourceCloud, sourceMesh, operationId, outputPolicy, preferResultVertexColors, result = std::move(result), finished]() mutable {
                 if (!self)
                     return;
                 self->processingBusy_ = false;
@@ -4846,12 +5052,14 @@ bool PointCloudWidget::startProcessingOperation(const std::string& operationId,
                     QString base = srcInfo.completeBaseName();
                     if (base.isEmpty())
                         base = QString::fromUtf8("model");
-                    QString generated =
-                        srcInfo.absolutePath() + QLatin1Char('/') + base + QString::fromUtf8("_poisson_mesh");
+                    const QString generatedSuffix = operationId == "scan_postprocess"
+                                                        ? QString::fromUtf8("_processed_mesh")
+                                                        : QString::fromUtf8("_poisson_mesh");
+                    QString generated = srcInfo.absolutePath() + QLatin1Char('/') + base + generatedSuffix;
                     int suffix = 2;
                     while (self->findModel(generated) >= 0)
-                        generated = srcInfo.absolutePath() + QLatin1Char('/') + base +
-                                    QString::fromUtf8("_poisson_mesh_%1").arg(suffix++);
+                        generated = srcInfo.absolutePath() + QLatin1Char('/') + base + generatedSuffix +
+                                    QString::fromUtf8("_%1").arg(suffix++);
 
                     auto newModel = std::make_unique<Model>(generated, result.mesh);
                     newModel->modelTransform = model.modelTransform;

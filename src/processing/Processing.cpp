@@ -1,5 +1,7 @@
 #include <JMEngine/processing/Processing.h>
 #include <JMEngine/processing/Operations.h>
+#include <JMEngine/processing/Parallel.h>
+#include "ScaleUtils.h"
 #include <cmath>
 namespace JMEngine::processing {
 std::unique_ptr<IProcessingOperation> createOperation(const std::string& id) {
@@ -27,6 +29,8 @@ std::unique_ptr<IProcessingOperation> createOperation(const std::string& id) {
         return std::make_unique<HoleFillOperation>();
     if (id == "poisson_octree")
         return std::make_unique<OctreePoissonOperation>();
+    if (id == "scan_postprocess")
+        return std::make_unique<ScanPostProcessOperation>();
     return {};
 }
 std::vector<OperationDescriptor> builtinOperations() {
@@ -51,6 +55,7 @@ struct ModelStatistics {
     double averageEdge{0.001};
     std::size_t points{0};
     std::size_t triangles{0};
+    double unitsPerMillimeter{0.001};
 };
 
 ModelStatistics computeStatistics(const ProcessInput& input) {
@@ -59,37 +64,11 @@ ModelStatistics computeStatistics(const ProcessInput& input) {
     if (!cloud || cloud->empty())
         return s;
 
-    bool initialized = false;
-    Vec3f mn{}, mx{};
-    std::size_t active = 0;
-    for (const auto& p : cloud->points()) {
-        if (p.flags & PointDeleted)
-            continue;
-        if (!initialized) {
-            mn = mx = p.position;
-            initialized = true;
-        } else {
-            mn.x = std::min(mn.x, p.position.x);
-            mn.y = std::min(mn.y, p.position.y);
-            mn.z = std::min(mn.z, p.position.z);
-            mx.x = std::max(mx.x, p.position.x);
-            mx.y = std::max(mx.y, p.position.y);
-            mx.z = std::max(mx.z, p.position.z);
-        }
-        ++active;
-    }
-    if (!initialized)
-        return s;
-
-    const double dx = double(mx.x) - mn.x;
-    const double dy = double(mx.y) - mn.y;
-    const double dz = double(mx.z) - mn.z;
-    s.diagonal = std::max(1e-9, std::sqrt(dx * dx + dy * dy + dz * dz));
-    s.points = active;
-    // 点云是 2D 表面采样，不应使用 cbrt(volume/N) 的体采样公式。
-    // 用包围盒表面积/N 的平方根得到更合理的邻域尺度，尤其适合大件扫描。
-    const double area = std::max(1e-18, 2.0 * (dx * dy + dx * dz + dy * dz));
-    s.spacing = std::max(s.diagonal * 1e-7, std::sqrt(area / double(std::max<std::size_t>(1, active))));
+    const auto scale = detail::estimateCloudScale(*cloud);
+    s.diagonal = scale.diagonal;
+    s.spacing = scale.spacing;
+    s.points = scale.estimatedActivePoints;
+    s.unitsPerMillimeter = scale.unitsPerMillimeter;
 
     if (input.mesh && input.mesh->triangleCount() > 0) {
         s.triangles = input.mesh->activeTriangleCount();
@@ -119,11 +98,7 @@ ModelStatistics computeStatistics(const ProcessInput& input) {
             edge(ix[b + 1], ix[b + 2]);
             edge(ix[b + 2], ix[b]);
         }
-        if (count)
-            s.averageEdge = sum / double(count);
-        else
-            s.averageEdge = s.spacing;
-        s.spacing = std::min(std::max(s.spacing, s.averageEdge * 0.25), s.averageEdge * 2.0);
+        s.averageEdge = count ? sum / double(count) : s.spacing;
     } else {
         s.averageEdge = s.spacing;
     }
@@ -150,25 +125,29 @@ void setDefault(OperationDescriptor& d, const char* key, double value, double mi
 OperationDescriptor estimateOperationDescriptor(const IProcessingOperation& operation, const ProcessInput& input) {
     auto d = operation.descriptor();
 
-    // Poisson 的主要参数现在是用户直接输入的“目标精度(mm)”。
-    // 打开参数窗口时不再为了猜 Depth 在 UI 线程遍历整份百万/千万点云。
-    if (d.id == "poisson_octree") {
-        // Poisson 直接采用 MeshLab 风格参数，不在打开对话框时遍历点云自动猜 Depth。
-        setDefault(d, "resolution_mm", 5.0);
-        setDefault(d, "max_depth", 11);
-        setDefault(d, "full_depth", 5);
-        setDefault(d, "samples_per_node", 0.5);
-        setDefault(d, "point_weight", 4.0);
-        setDefault(d, "iterations", 8);
-        setDefault(d, "threads", 16);
-        return d;
-    }
-
     const auto s = computeStatistics(input);
-    // 工程兼容 m 坐标与 mm 坐标。大型扫描（对角线 >= 50）直接认为模型单位就是 mm。
-    const double unitToMm = s.diagonal >= 50.0 ? 1.0 : 1000.0;
+    const double unitToMm = 1.0 / std::max(1e-12, s.unitsPerMillimeter);
+    const double diagonalMm = std::max(1e-5, s.diagonal * unitToMm);
     const double spacingMm = std::max(1e-5, s.spacing * unitToMm);
     const double edgeMm = std::max(1e-5, s.averageEdge * unitToMm);
+
+    if (d.id == "poisson_octree") {
+        // Physical resolution should follow the scanner's real sampling pitch.  A fixed 5 mm
+        // default was far too coarse for small objects.  Do not promise resolution finer than
+        // the maximum octree depth can represent either.
+        const int maxDepth = 11;
+        const double depthFloorMm = diagonalMm / double(1u << maxDepth);
+        const double resolutionMm = std::clamp(std::max(spacingMm * 1.25, depthFloorMm * 1.10), 0.1, 10.0);
+        const int desiredDepth = static_cast<int>(std::ceil(std::log2(std::max(1.0, diagonalMm / resolutionMm))));
+        setDefault(d, "resolution_mm", resolutionMm, 0.1, std::max(10.0, diagonalMm * 0.1), 0.1);
+        setDefault(d, "max_depth", std::clamp(desiredDepth + 1, 8, 12));
+        setDefault(d, "full_depth", std::clamp(desiredDepth - 4, 4, 6));
+        setDefault(d, "samples_per_node", 1.5);
+        setDefault(d, "point_weight", 4.0);
+        setDefault(d, "iterations", 8);
+        setDefault(d, "threads", static_cast<double>(processingThreadCount()), 1.0, 64.0, 1.0);
+        return d;
+    }
 
     if (d.id == "voxel") {
         setDefault(d, "voxel_mm", spacingMm * 1.5, spacingMm * 0.1, spacingMm * 20.0, spacingMm * 0.1);

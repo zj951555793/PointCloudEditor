@@ -40,6 +40,9 @@ class MainWindow final : public QMainWindow {
         int cvIndex{-1};
         QString deviceId, friendlyName, vid, pid, modelName, fourcc{QStringLiteral("MJPG")};
         int width{1920}, height{1200};
+        // OpenCV cv::flip code from camera_models.json. 2 means disabled.
+        int rotate{2};
+        bool modelConfigured{false};
         double fps{10.0};
         CameraRange exposure;
         CameraRange backlight{5.0, 25.0, 1.0, 25.0};

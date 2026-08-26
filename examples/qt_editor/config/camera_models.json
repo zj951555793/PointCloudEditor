@@ -1,10 +1,11 @@
 {
-  "version": 1,
+  "version": 5,
   "cameras": [
     {
       "vid": "0BDA",
       "pid": "300A",
-      "model": "JMC1",
+      "model": "JMC1S",
+      "rotate": null,
       "width": 1920,
       "height": 1200,
       "fps": 10,
@@ -25,7 +26,96 @@
     {
       "vid": "0BDA",
       "pid": "300B",
-      "model": "JMC1",
+      "model": "JMC1S",
+      "rotate": null,
+      "width": 1920,
+      "height": 1200,
+      "fps": 10,
+      "fourcc": "MJPG",
+      "exposure": {
+        "min": -12,
+        "max": -7,
+        "step": 1,
+        "default": -6
+      },
+      "backlight": {
+        "min": 5,
+        "max": 25,
+        "step": 1,
+        "default": 25
+      }
+    },
+    {
+      "vid": "0BDA",
+      "pid": "300A",
+      "model": "JMC1M",
+      "rotate": null,
+      "width": 1920,
+      "height": 1200,
+      "fps": 10,
+      "fourcc": "MJPG",
+      "exposure": {
+        "min": -12,
+        "max": -7,
+        "step": 1,
+        "default": -6
+      },
+      "backlight": {
+        "min": 5,
+        "max": 25,
+        "step": 1,
+        "default": 25
+      }
+    },
+    {
+      "vid": "0BDA",
+      "pid": "300B",
+      "model": "JMC1M",
+      "rotate": null,
+      "width": 1920,
+      "height": 1200,
+      "fps": 10,
+      "fourcc": "MJPG",
+      "exposure": {
+        "min": -12,
+        "max": -7,
+        "step": 1,
+        "default": -6
+      },
+      "backlight": {
+        "min": 5,
+        "max": 25,
+        "step": 1,
+        "default": 25
+      }
+    },
+    {
+      "vid": "0BDA",
+      "pid": "300A",
+      "model": "JMC1L",
+      "rotate": -1,
+      "width": 1920,
+      "height": 1200,
+      "fps": 10,
+      "fourcc": "MJPG",
+      "exposure": {
+        "min": -12,
+        "max": -7,
+        "step": 1,
+        "default": -6
+      },
+      "backlight": {
+        "min": 5,
+        "max": 25,
+        "step": 1,
+        "default": 25
+      }
+    },
+    {
+      "vid": "0BDA",
+      "pid": "300B",
+      "model": "JMC1L",
+      "rotate": -1,
       "width": 1920,
       "height": 1200,
       "fps": 10,

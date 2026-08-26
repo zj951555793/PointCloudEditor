@@ -23,6 +23,7 @@ option(JMENGINE_BUILD_RK3588_GLES_EXAMPLE "Build native EGL/GLES backend test" O
 option(JMENGINE_ENABLE_OPENMP "Enable OpenMP acceleration when available" ON)
 option(JMENGINE_ENABLE_TEXTURE_MAPPING "Build CPU/CUDA texture mapping library" ON)
 option(JMENGINE_ENABLE_TEXTURE_CUDA "Enable optional CUDA backend for texture mapping when a CUDA compiler is available" ON)
+option(JMENGINE_DEPLOY_CUDA_RUNTIME "Deploy the minimal CUDA runtime beside Windows executables" ON)
 option(JMENGINE_ENABLE_POISSONRECON "Enable industrial Kazhdan Poisson reconstruction" ON)
 option(JMENGINE_FETCH_POISSONRECON "Developer fallback: fetch PoissonRecon 18.76 when no bundled/local source exists" OFF)
 option(JMENGINE_REQUIRE_POISSONRECON "Fail configure when the industrial Poisson backend is unavailable" OFF)
@@ -366,6 +367,8 @@ if(JMENGINE_ENABLE_TEXTURE_MAPPING)
             find_package(CUDAToolkit QUIET)
             if(CUDAToolkit_FOUND)
                 target_sources(JMEngine_texture PRIVATE src/texture/TextureMapperCuda.cu)
+                # Keep cudart dynamic on Windows so the application can ship a tiny
+                # self-contained CUDA user-mode runtime beside the executable.
                 target_link_libraries(JMEngine_texture PRIVATE CUDA::cudart)
                 target_compile_definitions(JMEngine_texture PRIVATE JMENGINE_TEXTURE_HAS_CUDA=1)
                 set_target_properties(JMEngine_texture PROPERTIES
@@ -373,6 +376,34 @@ if(JMENGINE_ENABLE_TEXTURE_MAPPING)
                     CUDA_STANDARD_REQUIRED YES
                     CUDA_SEPARABLE_COMPILATION OFF
                 )
+
+                # Current JMEngine CUDA code directly depends only on cudart. Do not
+                # package the full Toolkit and do not package nvcuda.dll (it belongs
+                # to the NVIDIA display driver installed on the target machine).
+                if(WIN32 AND JMENGINE_DEPLOY_CUDA_RUNTIME)
+                    set(_JMENGINE_CUDA_RUNTIME_DLLS "")
+                    if(CUDAToolkit_BIN_DIR)
+                        file(GLOB _JMENGINE_CUDA_RUNTIME_DLLS CONFIGURE_DEPENDS
+                            "${CUDAToolkit_BIN_DIR}/cudart64_*.dll")
+                    endif()
+                    if(NOT _JMENGINE_CUDA_RUNTIME_DLLS)
+                        # Fallback for older FindCUDAToolkit layouts.
+                        get_filename_component(_JMENGINE_CUDA_ROOT_FROM_LIB
+                            "${CUDAToolkit_LIBRARY_DIR}" DIRECTORY)
+                        file(GLOB _JMENGINE_CUDA_RUNTIME_DLLS CONFIGURE_DEPENDS
+                            "${_JMENGINE_CUDA_ROOT_FROM_LIB}/bin/cudart64_*.dll")
+                    endif()
+                    if(_JMENGINE_CUDA_RUNTIME_DLLS)
+                        list(SORT _JMENGINE_CUDA_RUNTIME_DLLS)
+                        list(GET _JMENGINE_CUDA_RUNTIME_DLLS -1 _JMENGINE_CUDART_DLL)
+                        message(STATUS "JMEngine: CUDA runtime deployment: ${_JMENGINE_CUDART_DLL}")
+                    else()
+                        message(WARNING
+                            "JMEngine: CUDA backend is enabled but cudart64_*.dll was not found. "
+                            "The build can continue, but the deployment bin directory will not be self-contained.")
+                    endif()
+                endif()
+
                 message(STATUS "JMEngine: texture mapping CUDA backend enabled")
             else()
                 message(STATUS "JMEngine: CUDA toolkit not found; texture mapping uses CPU backend")
@@ -876,6 +907,17 @@ if(JMENGINE_BUILD_QT_EDITOR)
                     VERBATIM)
             endif()
 
+            # Minimal CUDA deployment: keep cudart beside the executable in bin/.
+            # The target machine still needs a compatible NVIDIA display driver.
+            if(WIN32 AND JMENGINE_DEPLOY_CUDA_RUNTIME AND _JMENGINE_CUDART_DLL)
+                add_custom_command(TARGET JMEngine_qt_editor POST_BUILD
+                    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                            "${_JMENGINE_CUDART_DLL}"
+                            "$<TARGET_FILE_DIR:JMEngine_qt_editor>"
+                    COMMENT "Copying minimal CUDA runtime (cudart)"
+                    VERBATIM)
+            endif()
+
             # Camera VID/PID -> model profile used by the scan UI and capture worker.
             add_custom_command(TARGET JMEngine_qt_editor POST_BUILD
                 COMMAND ${CMAKE_COMMAND} -E make_directory
@@ -1014,6 +1056,11 @@ if(TARGET JMEngine_render)
         RUNTIME DESTINATION bin
     )
 endif()
+# Install the same minimal CUDA runtime into the application bin directory.
+if(WIN32 AND JMENGINE_DEPLOY_CUDA_RUNTIME AND _JMENGINE_CUDART_DLL)
+    install(FILES "${_JMENGINE_CUDART_DLL}" DESTINATION bin)
+endif()
+
 install(DIRECTORY include/ DESTINATION include)
 
 # Keep the official SurfaceTrimmer beside runtime editors/tools as a deployment fallback.

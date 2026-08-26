@@ -165,17 +165,37 @@ paintGL follow EMA were removed, so observer eye/forward/up no longer lag the sc
 
 ## CUDA runtime deployment
 
-The application package should ship CUDA runtime DLLs only, not the full CUDA Toolkit.
-Place runtime libraries under `cuda/` next to the application executable:
+On Windows, when the CUDA texture backend is enabled, CMake automatically deploys
+the **minimal CUDA user-mode runtime** beside `JMEngine_qt_editor.exe`. The current
+CUDA implementation directly links only `CUDA::cudart`, so the application `bin/`
+contains only the matching `cudart64_*.dll` instead of a full CUDA Toolkit copy:
 
 ```
 app/
   bin/
-    JMScanner.exe
-  cuda/
+    JMEngine_qt_editor.exe
     cudart64_*.dll
-    cublas64_*.dll
-    cublasLt64_*.dll
 ```
 
-The NVIDIA driver remains a prerequisite on the target machine.
+The same DLL is installed by `cmake --install ...` into the install prefix `bin/`.
+Set `-DJMENGINE_DEPLOY_CUDA_RUNTIME=OFF` to disable this deployment. `nvcuda.dll`
+is never copied because it is supplied by the NVIDIA display driver, which remains
+a prerequisite on the target machine. If future CUDA code directly links cuBLAS,
+cuFFT, etc., add only those actually linked runtime DLLs to the deployment list.
+
+### Camera model image orientation
+
+`examples/qt_editor/config/camera_models.json` keeps separate A/B profiles. A
+profile is valid only when its `model`, VID and PID all match the selected DirectShow
+device. The optional `rotate` value is independent for each A/B profile and follows
+OpenCV `cv::flip` semantics:
+
+- `-1`: flip horizontally and vertically
+- `0`: flip vertically
+- `1`: flip horizontally
+- `null` or omitted: no image transform
+
+The transform is applied immediately after capture, before preview, camera
+pairing, SLAM input, and raw scan recording. Camera-mode scanning refuses to
+start when A/B has no matched model profile, when A/B selects the same device,
+or when the two selected cameras resolve to different models. A/B `rotate` values may differ.

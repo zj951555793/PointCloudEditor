@@ -8,6 +8,7 @@
 #include <condition_variable>
 #include <cstdint>
 #include <deque>
+#include <iostream>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -96,12 +97,32 @@ cv::Mat rulerPoseToCv(const rulermvs::Pose& pose) {
     return rt;
 }
 
-bool poseChanged(const Pose& a, const Pose& b, float epsilon = 1.0e-5f) {
-    for (std::size_t i = 0; i < a.matrix.size(); ++i) {
-        if (std::fabs(a.matrix[i] - b.matrix[i]) > epsilon)
-            return true;
+float poseTranslationDelta(const Pose& a, const Pose& b) {
+    const float dx = a.matrix[12] - b.matrix[12];
+    const float dy = a.matrix[13] - b.matrix[13];
+    const float dz = a.matrix[14] - b.matrix[14];
+    return std::sqrt(dx * dx + dy * dy + dz * dz);
+}
+
+float poseRotationDeltaRadians(const Pose& a, const Pose& b) {
+    // Pose matrices are column-major. Compute trace(Ra^T * Rb) without constructing
+    // temporary matrices; this is invariant to translation and gives a physical angle.
+    float trace = 0.0f;
+    for (int c = 0; c < 3; ++c) {
+        for (int r = 0; r < 3; ++r) {
+            const std::size_t i = std::size_t(c) * 4u + std::size_t(r);
+            trace += a.matrix[i] * b.matrix[i];
+        }
     }
-    return false;
+    const float cosine = std::clamp((trace - 1.0f) * 0.5f, -1.0f, 1.0f);
+    return std::acos(cosine);
+}
+
+bool poseChangedMeaningfully(const Pose& a, const Pose& b,
+                             float translationEpsilon,
+                             float rotationEpsilonRadians) {
+    return poseTranslationDelta(a, b) > translationEpsilon ||
+           poseRotationDeltaRadians(a, b) > rotationEpsilonRadians;
 }
 
 class RulerMvsBackend final : public ISlam {
@@ -466,11 +487,57 @@ class RulerMvsBackend final : public ISlam {
     static constexpr int kDepthScale = 16;
     static constexpr int kRectifyScale = 4;
     static constexpr int kLivePoseRefreshInterval = 120;
+    // Never rewrite the live frontier with loop/local-optimization poses. The newest
+    // frames are also the green current-frame/reference shown by the UI; moving them
+    // while acquisition is still advancing creates a visible one-frame jump. Once
+    // newer frames arrive these protected frames become history and are optimized by
+    // the next refresh.
+    static constexpr int kLivePoseGuardFrames = 3;
     static constexpr std::size_t kMaxRawResultQueue = 4;
 
     static void setError(std::string* error, const std::string& message) {
         if (error)
             *error = message;
+    }
+
+    std::shared_ptr<PointCloud> buildDecodedFrameCloud(
+        const rulermvs::SimpleTriMesh& mesh, const cv::Mat& rectifiedColor,
+        std::size_t pointLimit) const {
+        PointCloud::Container points;
+        if (mesh.points.empty())
+            return std::make_shared<PointCloud>(std::move(points));
+
+        const auto colorCamera = camera_.nodistor().noskew() / kRectifyScale;
+        const bool canSampleColor = !rectifiedColor.empty() && rectifiedColor.type() == CV_8UC3;
+        const std::size_t stride = pointLimit > 0 && mesh.points.size() > pointLimit
+            ? std::max<std::size_t>(1u, (mesh.points.size() + pointLimit - 1u) / pointLimit)
+            : 1u;
+        const std::size_t reserveCount = pointLimit > 0
+            ? std::min(pointLimit, (mesh.points.size() + stride - 1u) / stride)
+            : mesh.points.size();
+        points.reserve(reserveCount);
+
+        for (std::size_t i = 0; i < mesh.points.size(); i += stride) {
+            const auto& src = mesh.points[i];
+            Point point;
+            point.position = {src.x, src.y, src.z};
+            if (i < mesh.normals.size()) {
+                const auto& normal = mesh.normals[i];
+                point.normal = {normal.x, normal.y, normal.z};
+            }
+            if (canSampleColor && src.z > 1.0e-6f) {
+                const double u = colorCamera.fx * src.x / src.z + colorCamera.cx;
+                const double v = colorCamera.fy * src.y / src.z + colorCamera.cy;
+                const int x = int(std::lround(u));
+                const int y = int(std::lround(v));
+                if (x >= 0 && y >= 0 && x < rectifiedColor.cols && y < rectifiedColor.rows)
+                    point.rgba = packBgr(rectifiedColor.at<cv::Vec3b>(y, x));
+            }
+            points.push_back(point);
+            if (pointLimit > 0 && points.size() >= pointLimit)
+                break;
+        }
+        return std::make_shared<PointCloud>(std::move(points));
     }
 
     void cacheDecodedFrameCloud(int frameId, const rulermvs::SimpleTriMesh& mesh, const cv::Mat& rectifiedColor) {
@@ -503,9 +570,12 @@ class RulerMvsBackend final : public ISlam {
 
         auto cloud = std::make_shared<PointCloud>(std::move(points));
         std::lock_guard<std::mutex> lock(decodedFrameCloudMutex_);
+        // Do not evict the oldest decoded frame here. RGBDFusion may publish a frame
+        // result several input frames later; evicting by a small fixed window can
+        // specifically remove frame_0 before its pose arrives and silently fall back
+        // to a non-OneShot project frame. Each result consumes its matching entry in
+        // takeDecodedFrameCloud(), and reset() clears any unmatched tail frames.
         decodedFrameClouds_[frameId] = std::move(cloud);
-        while (decodedFrameClouds_.size() > std::size_t(std::max(8, config_.maxInflightFrames * 4)))
-            decodedFrameClouds_.erase(decodedFrameClouds_.begin());
     }
 
     std::shared_ptr<PointCloud> takeDecodedFrameCloud(int frameId) {
@@ -577,6 +647,13 @@ class RulerMvsBackend final : public ISlam {
                 cv::Mat mapX = mapX_.to<cv::Mat>();
                 cv::Mat mapY = mapY_.to<cv::Mat>();
                 cv::remap(rgb, color, mapX, mapY, cv::INTER_LINEAR);
+
+                // Scan-project frame_x/cloud.ply must be the point cloud produced by
+                // IOneShot::decode() for that exact camera frame.  Keep it in the
+                // OneShot/color-camera local coordinate system here; RGBDFusion only
+                // supplies the frame pose later when its result becomes available.
+                cacheDecodedFrameCloud(frameIndex, mesh, color);
+
                 cv::cvtColor(color, gray, cv::COLOR_BGR2GRAY);
 
                 if (config_.registrationMode == ScanRegistrationMode::Marker)
@@ -748,6 +825,8 @@ class RulerMvsBackend final : public ISlam {
 
     struct ResultSignal {
         int frameId{-1};
+        bool trackingOk{false};
+        cv::Mat trackingPose;
     };
 
     struct RawFusionResult {
@@ -759,23 +838,6 @@ class RulerMvsBackend final : public ISlam {
         std::vector<cv::Vec3b> colors;
     };
 
-    std::shared_ptr<PointCloud> makeFusionFrameCloud(const RawFusionResult& raw) const {
-        if (raw.points.empty())
-            return {};
-
-        PointCloud::Container points;
-        points.reserve(raw.points.size());
-        for (std::size_t i = 0; i < raw.points.size(); ++i) {
-            Point point;
-            point.position = {raw.points[i].x, raw.points[i].y, raw.points[i].z};
-            if (i < raw.normals.size())
-                point.normal = {raw.normals[i].x, raw.normals[i].y, raw.normals[i].z};
-            if (i < raw.colors.size())
-                point.rgba = packBgr(raw.colors[i]);
-            points.push_back(point);
-        }
-        return std::make_shared<PointCloud>(std::move(points));
-    }
 
     void startResultWorkers() {
         stopResultWorkers();
@@ -788,19 +850,27 @@ class RulerMvsBackend final : public ISlam {
             std::lock_guard<std::mutex> lock(resultConvertMutex_);
             pendingRawResults_.clear();
         }
+        {
+            std::lock_guard<std::mutex> lock(poseRefreshMutex_);
+            poseRefreshRequested_ = false;
+        }
         resultWorkersRunning_.store(true, std::memory_order_release);
         resultConsumerThread_ = std::thread([this] { resultConsumerLoop(); });
         resultConvertThread_ = std::thread([this] { resultConvertLoop(); });
+        livePoseRefreshThread_ = std::thread([this] { livePoseRefreshLoop(); });
     }
 
     void stopResultWorkers() {
         resultWorkersRunning_.store(false, std::memory_order_release);
         resultSignalCv_.notify_all();
         resultConvertCv_.notify_all();
+        poseRefreshCv_.notify_all();
         if (resultConsumerThread_.joinable())
             resultConsumerThread_.join();
         if (resultConvertThread_.joinable())
             resultConvertThread_.join();
+        if (livePoseRefreshThread_.joinable())
+            livePoseRefreshThread_.join();
         {
             std::lock_guard<std::mutex> lock(resultSignalMutex_);
             pendingResultSignals_.clear();
@@ -813,10 +883,12 @@ class RulerMvsBackend final : public ISlam {
     }
 
     // This callback runs on RGBDFusion's worker thread(s). Keep it deliberately tiny.
-    // IRGBDResult is received by const reference and its lifetime is not documented as extending
-    // past the callback, so never queue the reference/pointer itself. Queue only frame metadata.
-    // The consumer snapshots BOTH RT and cloud from the same getResults() result so the pose can
-    // never be an older callback-time RT paired with a newer/optimized point cloud.
+    // IRGBDResult itself must not cross the callback boundary, but the tracking RT is small and
+    // MUST be cloned here. getResults() is allowed to expose a later online-optimized RT for the
+    // same frame; using that RT as the live/current-frame pose makes the green frame and chase
+    // camera oscillate continuously while optimization is active. The consumer later snapshots
+    // only the owning cloud data from getResults(); live display always uses this callback-time
+    // tracking pose. Historical frames can still receive optimized RT through poseUpdateCallback_.
     void handleFusionResult(const rgbdslam::IRGBDResult& result) {
         completed_.fetch_add(1, std::memory_order_relaxed);
         if (!resultWorkersRunning_.load(std::memory_order_acquire))
@@ -824,6 +896,8 @@ class RulerMvsBackend final : public ISlam {
 
         ResultSignal signal;
         signal.frameId = result.getFrameID();
+        signal.trackingOk = result.getFlag() == 0;
+        signal.trackingPose = result.getRT().clone();
 
         {
             std::lock_guard<std::mutex> lock(resultSignalMutex_);
@@ -888,10 +962,10 @@ class RulerMvsBackend final : public ISlam {
             std::vector<RawFusionResult> ready;
             ready.reserve(wanted.size());
             {
-                // getResults()/toCloud() are deliberately off RGBDFusion callback threads.
-                // IRGBDResult itself cannot safely cross the callback boundary, so this worker
-                // snapshots owning vectors; the next worker performs the expensive coordinate
-                // conversion / PointCloud construction.
+                // LIVE DISPLAY SOURCE: IRGBDResult::toCloud(). Keep this work off RGBDFusion's
+                // trace callback thread. IRGBDResult itself cannot safely cross the callback
+                // boundary, so this worker snapshots owning point/normal/color vectors.
+                // OneShot data is intentionally NOT used here; it is reserved for project save.
                 std::lock_guard<std::mutex> resultsLock(fusionResultsMutex_);
                 fusion_->getResults([&wanted, &ready](const rgbdslam::IRGBDResult& result) {
                     auto it = wanted.find(result.getFrameID());
@@ -900,12 +974,16 @@ class RulerMvsBackend final : public ISlam {
 
                     RawFusionResult raw;
                     raw.frameId = result.getFrameID();
-                    raw.trackingOk = result.getFlag() == 0;
-                    // IMPORTANT: RT and point cloud must come from this same getResults()
-                    // snapshot. Callback-time RT may already have been changed by live
-                    // optimization by the time getResults() exposes the frame.
-                    raw.measuredPose = result.getRT().clone();
+                    // The current/live pose comes from the trace callback, not getResults().
+                    // getResults() may already contain an online-optimized RT and therefore is
+                    // intentionally used only as the owning point-cloud snapshot here.
+                    raw.trackingOk = it->second.trackingOk;
+                    raw.measuredPose = it->second.trackingPose.clone();
                     result.toCloud(raw.points, raw.normals, raw.colors);
+                    if (raw.frameId == 0) {
+                        std::cout << "[LIVE PREVIEW] frame_0 source=IRGBDResult::toCloud points="
+                                  << raw.points.size() << std::endl;
+                    }
                     ready.push_back(std::move(raw));
                     wanted.erase(it);
                 });
@@ -936,6 +1014,36 @@ class RulerMvsBackend final : public ISlam {
                     pendingRawResults_.push_back(std::move(raw));
             }
             resultConvertCv_.notify_all();
+        }
+    }
+
+    void requestLivePoseRefresh() {
+        if (!config_.liveOptimizationEnabled ||
+            config_.registrationMode != ScanRegistrationMode::Texture)
+            return;
+        {
+            std::lock_guard<std::mutex> lock(poseRefreshMutex_);
+            poseRefreshRequested_ = true; // coalesce repeated requests while one refresh runs
+        }
+        poseRefreshCv_.notify_one();
+    }
+
+    void livePoseRefreshLoop() {
+        while (true) {
+            {
+                std::unique_lock<std::mutex> lock(poseRefreshMutex_);
+                poseRefreshCv_.wait(lock, [this] {
+                    return !resultWorkersRunning_.load(std::memory_order_acquire) ||
+                           poseRefreshRequested_;
+                });
+                if (!resultWorkersRunning_.load(std::memory_order_acquire))
+                    break;
+                poseRefreshRequested_ = false;
+            }
+            // getResults() may become progressively more expensive as history grows. Keep it
+            // completely off the live result-conversion thread; at most one refresh runs and
+            // requests arriving meanwhile are coalesced into one subsequent pass.
+            refreshLiveOptimizedPreview();
         }
     }
 
@@ -1021,14 +1129,29 @@ class RulerMvsBackend final : public ISlam {
         const Pose measured = poseFromCv(measuredPose);
         const Pose displayed = poseFromCv(framePose);
 
-        // ScanProject persistence saves the same local coordinate frame RGBDFusion
-        // gives to live preview. Pairing
-        // an IOneShot-side mesh with an optimized RGBDFusion pose can mix coordinate bases
-        // and make the rebuilt offline cloud explode after optimization.
-        if (project_ && raw.trackingOk) {
-            auto frameCloud = makeFusionFrameCloud(raw);
-            if (frameCloud && !frameCloud->empty())
-                project_->saveFrame(raw.frameId, measured, *frameCloud);
+        // A scan project stores the original per-frame OneShot cloud plus the pose
+        // estimated by RGBDFusion.  Do not replace frame_0 (or any later frame) with
+        // result.toCloud(): that cloud is a SLAM-side representation and is not the
+        // original OneShot measurement the project is expected to preserve.
+        if (project_) {
+            auto frameCloud = takeDecodedFrameCloud(raw.frameId);
+            if (raw.trackingOk) {
+                if (frameCloud && !frameCloud->empty()) {
+                    if (!project_->saveFrame(raw.frameId, measured, *frameCloud)) {
+                        std::cerr << "[SCAN PROJECT] failed to save OneShot frame="
+                                  << raw.frameId << std::endl;
+                    } else if (raw.frameId == 0) {
+                        std::cout << "[SCAN PROJECT] frame_0 source=OneShot points="
+                                  << frameCloud->size() << std::endl;
+                    }
+                } else {
+                    // Never fall back to RGBDFusion::toCloud() here. A missing
+                    // OneShot frame is better reported/skipped than silently writing
+                    // a project frame with the wrong data source.
+                    std::cerr << "[SCAN PROJECT] missing OneShot cloud for frame="
+                              << raw.frameId << "; frame not saved" << std::endl;
+                }
+            }
         }
 
         UpdateCallback update;
@@ -1054,9 +1177,16 @@ class RulerMvsBackend final : public ISlam {
         }
 
         const int convertedNow = converted_.fetch_add(1, std::memory_order_relaxed) + 1;
-        if (config_.registrationMode == ScanRegistrationMode::Texture &&
-            config_.maxFrames > 0 && convertedNow % kLivePoseRefreshInterval == 0) {
-            refreshLiveOptimizedPreview();
+        // Historical optimized-pose refresh stays asynchronous. Live geometry itself is always
+        // sourced from IRGBDResult::toCloud(); OneShot remains project-save-only.
+        const int poseRefreshInterval = convertedNow < 3000
+            ? kLivePoseRefreshInterval
+            : (convertedNow < 8000 ? kLivePoseRefreshInterval * 2
+                                   : kLivePoseRefreshInterval * 3);
+        if (config_.liveOptimizationEnabled &&
+            config_.registrationMode == ScanRegistrationMode::Texture &&
+            config_.maxFrames > 0 && convertedNow % poseRefreshInterval == 0) {
+            requestLivePoseRefresh();
         }
     }
 
@@ -1066,39 +1196,65 @@ class RulerMvsBackend final : public ISlam {
             return;
 
         PoseUpdateCallback callback;
+        int newestPublishedFrame = -1;
         {
             std::lock_guard<std::mutex> lock(stateMutex_);
             callback = poseUpdateCallback_;
+            newestPublishedFrame = lastStateFrameId_;
         }
         if (!callback)
             return;
 
-        std::vector<FramePoseUpdate> updates;
+        // Keep the current live frame and a tiny asynchronous frontier on the tracking
+        // pose. RGBDFusion may optimize those RTs before getResults() is read; feeding
+        // them straight back into the live VBO makes the current green frame visibly
+        // jump. Older frames remain fully eligible for online optimization.
+        const int optimizeThroughFrame = newestPublishedFrame - kLivePoseGuardFrames;
+        if (optimizeThroughFrame < 0)
+            return;
+
+        struct PoseCandidate {
+            int frameId{-1};
+            Pose pose;
+        };
+        std::vector<PoseCandidate> candidates;
+        candidates.reserve(std::size_t(std::max(0, optimizeThroughFrame + 1)));
+
         const auto getResultsStart = std::chrono::steady_clock::now();
         {
             std::lock_guard<std::mutex> resultsLock(fusionResultsMutex_);
-            fusion_->getResults([this, &updates](const rgbdslam::IRGBDResult& result) {
-                if (result.getFlag() != 0)
+            fusion_->getResults([this, &candidates, optimizeThroughFrame](const rgbdslam::IRGBDResult& result) {
+                if (result.getFlag() != 0 || result.getFrameID() > optimizeThroughFrame)
                     return;
-
                 cv::Mat pose = result.getRT();
                 if (!baseRtInv_.empty())
                     pose = baseRtInv_ * pose;
-                const Pose next = poseFromCv(pose);
-
-                std::lock_guard<std::mutex> lock(stateMutex_);
-                auto it = lastPublishedPoseByFrame_.find(result.getFrameID());
-                if (it == lastPublishedPoseByFrame_.end() || !poseChanged(it->second, next))
-                    return;
-                it->second = next;
-
-                FramePoseUpdate framePose;
-                framePose.frameId = result.getFrameID();
-                framePose.pose = next;
-                updates.push_back(std::move(framePose));
+                candidates.push_back({(int)result.getFrameID(), poseFromCv(pose)});
             });
         }
         const auto getResultsEnd = std::chrono::steady_clock::now();
+
+        // Compare/update the published-pose table under ONE mutex acquisition. The previous
+        // implementation locked stateMutex_ once per historical frame, which becomes visible
+        // overhead at 10k-20k frames even when almost no poses actually changed.
+        constexpr float kPi = 3.14159265358979323846f;
+        const float translationEpsilon = std::max(
+            1.0e-6f, float(std::fabs(config_.offlineVoxel)) * 0.01f);
+        constexpr float rotationEpsilon = 0.03f * kPi / 180.0f;
+        std::vector<FramePoseUpdate> updates;
+        updates.reserve(candidates.size() / 8u + 8u);
+        {
+            std::lock_guard<std::mutex> lock(stateMutex_);
+            for (const auto& candidate : candidates) {
+                auto it = lastPublishedPoseByFrame_.find(candidate.frameId);
+                if (it == lastPublishedPoseByFrame_.end() ||
+                    !poseChangedMeaningfully(it->second, candidate.pose,
+                                              translationEpsilon, rotationEpsilon))
+                    continue;
+                it->second = candidate.pose;
+                updates.push_back({candidate.frameId, candidate.pose});
+            }
+        }
 
         const std::size_t updateCount = updates.size();
         const auto callbackStart = std::chrono::steady_clock::now();
@@ -1187,6 +1343,10 @@ class RulerMvsBackend final : public ISlam {
     std::atomic<bool> resultWorkersRunning_{false};
     std::thread resultConsumerThread_;
     std::thread resultConvertThread_;
+    std::thread livePoseRefreshThread_;
+    std::mutex poseRefreshMutex_;
+    std::condition_variable poseRefreshCv_;
+    bool poseRefreshRequested_{false};
     std::mutex resultSignalMutex_;
     std::condition_variable resultSignalCv_;
     std::map<int, ResultSignal> pendingResultSignals_;
@@ -1218,6 +1378,7 @@ class RulerMvsBackend final : public ISlam {
     std::mutex textureMutex_;
     std::unordered_map<int, cv::Mat> textureImages_;
     std::mutex decodedFrameCloudMutex_;
+    // Full OneShot clouds are retained only for scan-project persistence.
     std::map<int, std::shared_ptr<PointCloud>> decodedFrameClouds_;
 };
 

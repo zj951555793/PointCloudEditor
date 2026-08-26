@@ -2,6 +2,7 @@
 #include <JMEngine/MeshUtils.h>
 #include <JMEngine/processing/Parallel.h>
 #include <JMEngine/processing/Diagnostics.h>
+#include "ScaleUtils.h"
 
 #include <algorithm>
 #include <array>
@@ -733,10 +734,10 @@ OperationDescriptor OctreePoissonOperation::descriptor() const {
         ModelKind::PointCloud,
         {
          // meshRecon 风格：用户控制物理分辨率，Depth/Scale 在 worker 内按输入 BBox 自动计算。
-         {"resolution_mm", "目标重建精度", ParameterKind::Real, 5.0, 0.1, 100.0, 0.1, "mm"},
+         {"resolution_mm", "目标重建精度", ParameterKind::Real, 1.0, 0.1, 100.0, 0.1, "mm"},
          {"max_depth", "最大八叉树深度", ParameterKind::Integer, 11, 7, 12, 1, ""},
          {"full_depth", "自适应八叉树深度", ParameterKind::Integer, 5, 3, 8, 1, ""},
-         {"samples_per_node", "每节点最少样本", ParameterKind::Real, 0.5, 0.1, 20.0, 0.1, ""},
+         {"samples_per_node", "每节点最少样本", ParameterKind::Real, 1.5, 0.1, 20.0, 0.1, ""},
          {"point_weight", "插值权重", ParameterKind::Real, 4.0, 0.0, 20.0, 0.25, ""},
          {"iterations", "每层松弛迭代", ParameterKind::Integer, 8, 1, 32, 1, ""},
          {"cg_depth", "CG 深度", ParameterKind::Integer, 0, 0, 8, 1, ""},
@@ -779,9 +780,11 @@ ProcessResult OctreePoissonOperation::run(const ProcessInput& input, const Param
     if (progress)
         progress({0.14f, "2/6 初始化 PoissonRecon"});
 
-    // 官方 ThreadPool 默认使用全部 hardware_concurrency。构建系统会给官方头文件加入 SetNumThreads，
-    // 这里统一使用整个工程的 CPU-1 策略。
-    PoissonRecon::ThreadPool::SetNumThreads(static_cast<unsigned int>(processingThreadCount()));
+    // Honor the Poisson panel's thread count.  V4 exposed this parameter but still forced
+    // processingThreadCount(), so changing the UI value had no effect.
+    const int poissonThreads =
+        static_cast<int>(std::clamp<std::int64_t>(intParam(params, "threads", processingThreadCount()), 1, 64));
+    PoissonRecon::ThreadPool::SetNumThreads(static_cast<unsigned int>(poissonThreads));
 #ifdef _OPENMP
     PoissonRecon::ThreadPool::ParallelizationType = PoissonRecon::ThreadPool::ParallelType::OPEN_MP;
 #else
@@ -805,8 +808,9 @@ ProcessResult OctreePoissonOperation::run(const ProcessInput& input, const Param
         result.message = "Poisson 输入包围盒无效";
         return result;
     }
-    const double unitPerMm = extent >= 50.0 ? 1.0 : 0.001; // 兼容 mm / m 坐标工程
-    const double resolutionMm = std::max(0.1, realParam(params, "resolution_mm", 5.0));
+    const auto scaleEstimate = detail::estimateCloudScale(*cloud);
+    const double unitPerMm = scaleEstimate.unitsPerMillimeter;
+    const double resolutionMm = std::max(0.1, realParam(params, "resolution_mm", 1.0));
     const double resolutionModel = std::max(extent * 1e-7, resolutionMm * unitPerMm);
     const int maxDepth = static_cast<int>(std::clamp<std::int64_t>(intParam(params, "max_depth", 11), 7, 12));
 
@@ -819,16 +823,13 @@ ProcessResult OctreePoissonOperation::run(const ProcessInput& input, const Param
 
     solverParams.depth = static_cast<unsigned int>(requestedDepth);
     solverParams.fullDepth = static_cast<unsigned int>(std::min(requestedDepth, requestedFullDepth));
-    solverParams.samplesPerNode = static_cast<PoissonReal>(realParam(params, "samples_per_node", 0.5));
+    solverParams.samplesPerNode = static_cast<PoissonReal>(realParam(params, "samples_per_node", 1.5));
     solverParams.pointWeight = static_cast<PoissonReal>(realParam(params, "point_weight", 4.0));
     solverParams.scale = static_cast<PoissonReal>(autoScale);
     solverParams.iters =
         static_cast<unsigned int>(std::clamp<std::int64_t>(intParam(params, "iterations", 8), 1, 32));
  
     solverParams.verbose = false;
-    const int poissonThreads =
-        static_cast<int>(std::clamp<std::int64_t>(intParam(params, "threads", 16), 1, 64));
-    (void)poissonThreads; // PoissonRecon build may use its configured OpenMP/thread pool internally.
 
     CloudOrientedStream sampleStream(*cloud);
     if (progress)

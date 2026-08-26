@@ -201,6 +201,14 @@ class OpenCvDualCamera final : public ICameraSource {
             if (!capture.retrieve(image) || image.empty())
                 continue;
 
+            // Image orientation is model-configured in camera_models.json.
+            // rotate uses cv::flip semantics: -1 = both axes, 0 = vertical,
+            // 1 = horizontal. Any other value means no transform. Apply it
+            // immediately after capture so preview, pairing, SLAM and raw
+            // recording all observe exactly the same orientation.
+            if (cameraConfig.rotate >= -1 && cameraConfig.rotate <= 1)
+                cv::flip(image, image, cameraConfig.rotate);
+
             // Camera B drives the Qt preview and render cadence directly.
             // It must not wait for A/B pairing or for the SLAM worker.
             if (!cameraA)

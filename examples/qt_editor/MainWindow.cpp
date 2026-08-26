@@ -808,7 +808,7 @@ void MainWindow::createScanControl() {
     rawDataDirEdit_->setPlaceholderText(QString::fromUtf8("相机原始扫描保存目录"));
     scanMaxFramesSpin_ = new QSpinBox(panel);
     scanMaxFramesSpin_->setRange(1, 100000);
-    scanMaxFramesSpin_->setValue(2000);
+    scanMaxFramesSpin_->setValue(20000);
 
     auto makePathRow = [panel](QLineEdit* edit, const QString& buttonText, const std::function<void()>& choose) {
         auto* row = new QWidget(panel);
@@ -892,7 +892,7 @@ void MainWindow::createScanControl() {
 #ifdef JMENGINE_HAS_TEXTURE_MAPPING
     scanTextureButton_ = new QPushButton(QString::fromUtf8("一键处理"), panel);
     scanTextureButton_->setToolTip(QString::fromUtf8(
-        "扫描完成并执行离线优化后使用。一键处理会在需要时自动进行网格重建，并继续完成纹理映射。"));
+        "扫描完成并执行离线优化后使用。流程：点云去噪 → 删除小点云 → 泊松重建 → 网格去噪 → 纹理映射（有纹理帧时）。"));
     scanTextureFramesLabel_ = new QLabel(QString::fromUtf8("纹理帧：0"), panel);
     scanTextureFramesLabel_->setMinimumWidth(82);
 #endif
@@ -1028,7 +1028,7 @@ void MainWindow::createScanControl() {
     cameraSyncToleranceSpin_->setRange(0.1, 100.0);
     cameraSyncToleranceSpin_->setDecimals(1);
     cameraSyncToleranceSpin_->setSingleStep(1.0);
-    cameraSyncToleranceSpin_->setValue(50.0);
+    cameraSyncToleranceSpin_->setValue(10.0);
     advancedGrid->addWidget(new QLabel(QString::fromUtf8("最大帧"), advancedWidget), 3, 0);
     advancedGrid->addWidget(scanMaxFramesSpin_, 3, 1);
     advancedGrid->addWidget(new QLabel(QString::fromUtf8("同步(ms)"), advancedWidget), 3, 2);
@@ -1067,7 +1067,7 @@ void MainWindow::createScanControl() {
         if (!vocabFiles.isEmpty()) defaultVocabulary = appDir.filePath(vocabFiles.first());
     }
     scanVocabEdit_->setText(defaultVocabulary);
-    scanMaxFramesSpin_->setValue(2000);
+    scanMaxFramesSpin_->setValue(20000);
     if (liveOptimizationCheck_) liveOptimizationCheck_->setChecked(true);
     cameraModelJsonEdit_->setText(defaultCameraModelJsonPath());
     {
@@ -1081,7 +1081,7 @@ void MainWindow::createScanControl() {
     cameraABacklightSlider_->setValue(25);
     cameraBBacklightSpin_->setValue(25.0);
     cameraBBacklightSlider_->setValue(25);
-    cameraSyncToleranceSpin_->setValue(50.0);
+    cameraSyncToleranceSpin_->setValue(10.0);
     if (rawDataDirEdit_)
         rawDataDirEdit_->setText(QDir(QCoreApplication::applicationDirPath()).filePath(QStringLiteral("scan_raw")));
     if (scanSourceModeCombo_->currentData().toInt() == int(ScanSourceMode::Virtual) &&
@@ -1178,6 +1178,35 @@ void MainWindow::createScanControl() {
             return;
         }
         ScanUiConfig cfg = scanConfigFromUi();
+        if (cfg.sourceMode == ScanSourceMode::Camera) {
+            const CameraDeviceInfo* cameraAInfo = nullptr;
+            const CameraDeviceInfo* cameraBInfo = nullptr;
+            for (const auto& d : cameraInfos_) {
+                if (d.deviceId == cfg.cameraADeviceId) cameraAInfo = &d;
+                if (d.deviceId == cfg.cameraBDeviceId) cameraBInfo = &d;
+            }
+            if (!cameraAInfo || !cameraBInfo) {
+                statusBar()->showMessage(QString::fromUtf8("请选择有效的 A/B 相机"), 8000);
+                return;
+            }
+            if (cameraAInfo->deviceId == cameraBInfo->deviceId) {
+                statusBar()->showMessage(QString::fromUtf8("A/B 不能选择同一个相机设备"), 8000);
+                return;
+            }
+            if (!cameraAInfo->modelConfigured || !cameraBInfo->modelConfigured) {
+                const QString missing = !cameraAInfo->modelConfigured
+                    ? cameraAInfo->friendlyName : cameraBInfo->friendlyName;
+                statusBar()->showMessage(
+                    QString::fromUtf8("相机未匹配 camera_models.json 的 model + VID + PID：%1").arg(missing), 10000);
+                return;
+            }
+            if (cameraAInfo->modelName.compare(cameraBInfo->modelName, Qt::CaseInsensitive) != 0) {
+                statusBar()->showMessage(
+                    QString::fromUtf8("A/B 相机型号不一致：%1 / %2")
+                        .arg(cameraAInfo->modelName, cameraBInfo->modelName), 10000);
+                return;
+            }
+        }
         // Virtual mode always derives <dataDir>/calib.txt. Camera mode keeps the
         // last calibration path in camera_models.json.
         if (cfg.sourceMode == ScanSourceMode::Camera && !cfg.cameraModelJsonPath.isEmpty()) {
@@ -1283,7 +1312,7 @@ void MainWindow::createScanControl() {
     connect(scanTextureButton_, &QPushButton::clicked, this, [this] {
         if (!view_) return;
         scanTextureButton_->setEnabled(false);
-        statusBar()->showMessage(QString::fromUtf8("正在一键处理：准备扫描网格并执行纹理映射..."));
+        statusBar()->showMessage(QString::fromUtf8("正在一键处理：点云去噪 → 小点云去除 → 泊松 → 网格去噪 → 纹理..."));
         const bool started = view_->startScanTextureMappingAsync(
             JMEngine::texture::Backend::Auto,
             [this](float progress, const QString& stage) {
@@ -1457,7 +1486,7 @@ MainWindow::ScanUiConfig MainWindow::scanConfigFromUi() const {
     cfg.dataDir = scanDataDirEdit_ ? scanDataDirEdit_->text().trimmed() : QString{};
     cfg.engine.calibrationPath = scanCalibEdit_ ? scanCalibEdit_->text().trimmed().toStdString() : std::string{};
     cfg.engine.vocabularyPath = scanVocabEdit_ ? scanVocabEdit_->text().trimmed().toStdString() : std::string{};
-    cfg.engine.maxFrames = scanMaxFramesSpin_ ? scanMaxFramesSpin_->value() : 2000;
+    cfg.engine.maxFrames = scanMaxFramesSpin_ ? scanMaxFramesSpin_->value() : 20000;
     cfg.engine.maxInflightFrames = 6;
     // Live preview is bounded but must represent the whole scan. PointCloudWidget compacts
     // old preview samples when this budget is reached instead of dropping all later frames.
@@ -1467,6 +1496,7 @@ MainWindow::ScanUiConfig MainWindow::scanConfigFromUi() const {
     cfg.engine.offlineVoxel = 3.0;
     cfg.engine.offlineIterations = 30;
     cfg.liveOptimizationEnabled = liveOptimizationCheck_ ? liveOptimizationCheck_->isChecked() : true;
+    cfg.engine.liveOptimizationEnabled = cfg.liveOptimizationEnabled;
     cfg.engine.saveScanProject = projectSaveScanCheck_ && projectSaveScanCheck_->isChecked() &&
                                  !currentProjectPath_.isEmpty();
     cfg.engine.scanProjectPath = cfg.engine.saveScanProject ? currentProjectPath_.toStdString() : std::string{};
@@ -1479,14 +1509,21 @@ MainWindow::ScanUiConfig MainWindow::scanConfigFromUi() const {
     cfg.cameras.cameraB.exposure = cameraBExposureSpin_ ? cameraBExposureSpin_->value() : -6.0;
     cfg.cameras.cameraA.backlight = cameraABacklightSpin_ ? cameraABacklightSpin_->value() : 25.0;
     cfg.cameras.cameraB.backlight = cameraBBacklightSpin_ ? cameraBBacklightSpin_->value() : 25.0;
-    cfg.cameras.syncToleranceMs = cameraSyncToleranceSpin_ ? cameraSyncToleranceSpin_->value() : 50.0;
+    cfg.cameras.syncToleranceMs = cameraSyncToleranceSpin_ ? cameraSyncToleranceSpin_->value() : 10.0;
     cfg.cameras.queueDepth = 3;
     cfg.cameras.recordRawData = cfg.sourceMode == ScanSourceMode::Camera && cfg.recordRawData;
     cfg.cameras.rawDataDirectory = cfg.rawDataDir.toStdString();
     cfg.cameras.calibrationPath = cfg.engine.calibrationPath;
     auto applyCamera = [this](const QString& id, JMEngine::CameraDeviceConfig& out) {
         for (const auto& d : cameraInfos_) if (d.deviceId == id) {
-            out.index = d.cvIndex; out.width = d.width; out.height = d.height; out.fps = int(std::lround(d.fps)); out.fourcc = d.fourcc.toStdString(); return;
+            out.index = d.cvIndex;
+            out.width = d.width;
+            out.height = d.height;
+            out.fps = int(std::lround(d.fps));
+            out.fourcc = d.fourcc.toStdString();
+            out.model = d.modelName.toStdString();
+            out.rotate = d.rotate;
+            return;
         }
     };
     applyCamera(cfg.cameraADeviceId, cfg.cameras.cameraA);
@@ -1524,30 +1561,75 @@ void MainWindow::refreshCameras() {
             info.vid = QString::fromStdString(native.vid).toUpper();
             info.pid = QString::fromStdString(native.pid).toUpper();
             info.modelName = QString::fromUtf8("未配置型号");
+            // A camera profile is valid only when all three identifiers match:
+            //   1) FriendlyName contains the configured model (JMC1S/JMC1M/JMC1L)
+            //   2) USB VID matches
+            //   3) USB PID matches
+            // Each physical scanner model therefore has two JSON entries, one
+            // for its A endpoint and one for its B endpoint (for example
+            // 0BDA:300A and 0BDA:300B). Never fall back to model-only matching.
+            const QString friendlyUpper = info.friendlyName.toUpper();
+            auto normalizeUsbId = [](QString value) {
+                value = value.trimmed().toUpper();
+                if (value.startsWith(QStringLiteral("0X")))
+                    value.remove(0, 2);
+                return value.rightJustified(4, QLatin1Char('0')).right(4);
+            };
+            const QString deviceVid = normalizeUsbId(info.vid);
+            const QString devicePid = normalizeUsbId(info.pid);
+            QJsonObject matchedProfile;
+            QString matchedModel;
+            int matchedModelLength = -1;
             for (const auto& value : profiles) {
                 const auto profile = value.toObject();
-                QString vid = profile.value(QStringLiteral("vid")).toString().toUpper();
-                QString pid = profile.value(QStringLiteral("pid")).toString().toUpper();
-                if (vid.startsWith(QStringLiteral("0X"))) vid.remove(0, 2);
-                if (pid.startsWith(QStringLiteral("0X"))) pid.remove(0, 2);
-                if (vid.rightJustified(4, QLatin1Char('0')).right(4) != info.vid ||
-                    pid.rightJustified(4, QLatin1Char('0')).right(4) != info.pid) continue;
-                info.modelName = profile.value(QStringLiteral("model")).toString(info.modelName);
-                info.width = profile.value(QStringLiteral("width")).toInt(info.width);
-                info.height = profile.value(QStringLiteral("height")).toInt(info.height);
-                info.fps = profile.value(QStringLiteral("fps")).toDouble(info.fps);
-                info.fourcc = profile.value(QStringLiteral("fourcc")).toString(info.fourcc);
-                const auto exposure = profile.value(QStringLiteral("exposure")).toObject();
+                const QString model = profile.value(QStringLiteral("model")).toString().trimmed();
+                const QString profileVidRaw = profile.value(QStringLiteral("vid")).toString().trimmed();
+                const QString profilePidRaw = profile.value(QStringLiteral("pid")).toString().trimmed();
+                if (model.isEmpty() || profileVidRaw.isEmpty() || profilePidRaw.isEmpty())
+                    continue;
+
+                const QString modelUpper = model.toUpper();
+                if (!friendlyUpper.contains(modelUpper))
+                    continue;
+                if (normalizeUsbId(profileVidRaw) != deviceVid ||
+                    normalizeUsbId(profilePidRaw) != devicePid)
+                    continue;
+
+                // Prefer the longest model token if future model names share a
+                // prefix. VID/PID must still match for the selected entry.
+                if (modelUpper.size() <= matchedModelLength)
+                    continue;
+                matchedProfile = profile;
+                matchedModel = model;
+                matchedModelLength = modelUpper.size();
+            }
+
+            if (!matchedProfile.isEmpty()) {
+                info.modelConfigured = true;
+                info.modelName = matchedModel;
+                info.width = matchedProfile.value(QStringLiteral("width")).toInt(info.width);
+                info.height = matchedProfile.value(QStringLiteral("height")).toInt(info.height);
+                info.fps = matchedProfile.value(QStringLiteral("fps")).toDouble(info.fps);
+                info.fourcc = matchedProfile.value(QStringLiteral("fourcc")).toString(info.fourcc);
+                // `rotate` deliberately follows cv::flip semantics. JSON null or
+                // an omitted field means no transform.
+                info.rotate = 2;
+                const auto rotateValue = matchedProfile.value(QStringLiteral("rotate"));
+                if (rotateValue.isDouble()) {
+                    const int rotate = rotateValue.toInt(2);
+                    if (rotate >= -1 && rotate <= 1)
+                        info.rotate = rotate;
+                }
+                const auto exposure = matchedProfile.value(QStringLiteral("exposure")).toObject();
                 info.exposure = {exposure.value(QStringLiteral("min")).toDouble(-13.0),
                                  exposure.value(QStringLiteral("max")).toDouble(0.0),
                                  exposure.value(QStringLiteral("step")).toDouble(1.0),
                                  exposure.value(QStringLiteral("default")).toDouble(-6.0)};
-                const auto backlight = profile.value(QStringLiteral("backlight")).toObject();
+                const auto backlight = matchedProfile.value(QStringLiteral("backlight")).toObject();
                 info.backlight = {backlight.value(QStringLiteral("min")).toDouble(0.0),
                                   backlight.value(QStringLiteral("max")).toDouble(25.0),
                                   backlight.value(QStringLiteral("step")).toDouble(1.0),
                                   backlight.value(QStringLiteral("default")).toDouble(25.0)};
-                break;
             }
             devices.push_back(std::move(info));
         }
@@ -1584,8 +1666,13 @@ void MainWindow::updateCameraSelectionUi() {
         const QString id = combo->currentData().toString();
         for (const auto& d : cameraInfos_) {
             if (d.deviceId != id) continue;
-            label->setText(QStringLiteral("%1  VID=%2 PID=%3  %4x%5@%6")
-                           .arg(d.modelName, d.vid, d.pid).arg(d.width).arg(d.height).arg(d.fps, 0, 'f', 1));
+            const QString orientation = (d.rotate >= -1 && d.rotate <= 1)
+                ? QStringLiteral("rotate=%1").arg(d.rotate)
+                : QStringLiteral("rotate=null");
+            label->setText(QStringLiteral("%1  VID=%2 PID=%3  %4x%5@%6  %7")
+                           .arg(d.modelName, d.vid, d.pid)
+                           .arg(d.width).arg(d.height).arg(d.fps, 0, 'f', 1)
+                           .arg(orientation));
             const QSignalBlocker blocker(exposure);
             exposure->setRange(d.exposure.minimum, d.exposure.maximum);
             exposure->setSingleStep(d.exposure.step);

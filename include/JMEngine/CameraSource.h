@@ -23,6 +23,11 @@ struct CameraDeviceConfig {
     int height{1200};
     int fps{10};
     std::string fourcc{"MJPG"};
+    std::string model;
+    // OpenCV cv::flip code loaded from camera_models.json:
+    //   -1 = horizontal + vertical, 0 = vertical, 1 = horizontal.
+    // Any other value means no image transform.
+    int rotate{2};
     double exposure{-6.0};
     double backlight{25.0};
 };
@@ -30,7 +35,7 @@ struct CameraDeviceConfig {
 struct DualCameraConfig {
     CameraDeviceConfig cameraA;
     CameraDeviceConfig cameraB;
-    double syncToleranceMs{50.0};
+    double syncToleranceMs{10.0};
     int queueDepth{3};
     bool recordRawData{false};
     std::string rawDataDirectory;

@@ -441,10 +441,18 @@ static void testProcessingOperations() {
     auto nr = normalOp->run({plane, {}}, np, {}, {});
     assert(nr.success && nr.cloud);
     bool hasNormal = false;
+    Vec3f referenceNormal{};
     for (const auto& p : nr.cloud->points()) {
         const float n2 = p.normal.x * p.normal.x + p.normal.y * p.normal.y + p.normal.z * p.normal.z;
-        if (n2 > 0.5f)
+        if (n2 > 0.5f) {
+            if (!hasNormal) referenceNormal = p.normal;
+            else {
+                const float d = referenceNormal.x * p.normal.x + referenceNormal.y * p.normal.y +
+                                referenceNormal.z * p.normal.z;
+                assert(d > 0.5f); // PCA 法向符号必须经过邻域一致化，不能逐点随机翻转。
+            }
             hasNormal = true;
+        }
     }
     assert(hasNormal);
 
@@ -457,6 +465,22 @@ static void testProcessingOperations() {
     auto cleanup = createOperation("mesh_cleanup");
     auto clr = cleanup->run({meshCloud, dirtyMesh}, {}, {}, {});
     assert(clr.success && clr.mesh && clr.outputTriangles == 1);
+
+    // Mesh denoise：两个相连三角形为主体，单独三角形为小岛；DSU 连通域实现应只删小岛。
+    auto denoiseCloud = std::make_shared<PointCloud>(PointCloud::Container{
+        {{0, 0, 0}, 0xffffffffu, PointValid}, {{1, 0, 0}, 0xffffffffu, PointValid},
+        {{0, 1, 0}, 0xffffffffu, PointValid}, {{1, 1, 0}, 0xffffffffu, PointValid},
+        {{10, 0, 0}, 0xffffffffu, PointValid}, {{11, 0, 0}, 0xffffffffu, PointValid},
+        {{10, 1, 0}, 0xffffffffu, PointValid}});
+    auto noisyMesh = std::make_shared<TriangleMesh>(
+        denoiseCloud, std::vector<std::uint32_t>{0, 1, 2, 1, 3, 2, 4, 5, 6});
+    auto meshDenoise = createOperation("mesh_denoise");
+    ParameterMap mdp;
+    mdp["remove_small_components"] = true;
+    mdp["min_component_triangles"] = std::int64_t(2);
+    mdp["remove_spike_triangles"] = false;
+    auto mdr = meshDenoise->run({denoiseCloud, noisyMesh}, mdp, {}, {});
+    assert(mdr.success && mdr.mesh && mdr.outputTriangles == 2);
 
     // 量产诊断：原 dirtyMesh 包含一个退化三角形，且单个有效三角形具有 3 条边界边。
     const auto diagnostics = analyzeModel({meshCloud, dirtyMesh});

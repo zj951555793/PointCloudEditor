@@ -1,4 +1,5 @@
 #include <JMEngine/processing/Operations.h>
+#include "ScaleUtils.h"
 #include <JMEngine/MeshUtils.h>
 #include <JMEngine/processing/Parallel.h>
 #include <algorithm>
@@ -62,30 +63,14 @@ inline Vec3f norm(Vec3f v) {
     return l > 1e-20f ? mul(v, 1.0f / l) : Vec3f{};
 }
 
-// 工程历史数据同时存在“坐标单位=m”和“坐标单位=mm”。
-// 大型扫描模型（包围盒对角线 >= 50）按 mm 坐标处理，避免 UI 的 mm 参数被错误缩小 1000 倍。
-double cloudDiagonal(const PointCloud& c) {
-    bool valid = false;
-    Vec3f lo{}, hi{};
-    for (const auto& p : c.points()) {
-        if (p.flags & PointDeleted)
-            continue;
-        if (!std::isfinite(p.position.x) || !std::isfinite(p.position.y) || !std::isfinite(p.position.z))
-            continue;
-        if (!valid) { lo = hi = p.position; valid = true; }
-        else {
-            lo.x = std::min(lo.x, p.position.x); lo.y = std::min(lo.y, p.position.y); lo.z = std::min(lo.z, p.position.z);
-            hi.x = std::max(hi.x, p.position.x); hi.y = std::max(hi.y, p.position.y); hi.z = std::max(hi.z, p.position.z);
-        }
-    }
-    if (!valid) return 0.0;
-    const double x = double(hi.x) - lo.x, y = double(hi.y) - lo.y, z = double(hi.z) - lo.z;
-    return std::sqrt(x*x + y*y + z*z);
+// UI parameters are expressed in millimetres while historical projects may store either
+// metres or millimetres.  Use the same scale inference as Poisson/default estimation so
+// a small (e.g. 30 mm) object is not mistaken for a 30 metre cloud.
+float millimetersToCloudUnits(const PointCloud& c, double mm) {
+    const auto scale = detail::estimateCloudScale(c);
+    return static_cast<float>(detail::millimetersToCloudUnits(scale, mm));
 }
 
-float millimetersToCloudUnits(const PointCloud& c, double mm) {
-    return static_cast<float>(cloudDiagonal(c) >= 50.0 ? mm : mm * 0.001);
-}
 inline void prog(const ProgressCallback& cb, float p, const char* s) {
     if (cb)
         cb({p, s});
@@ -168,12 +153,12 @@ class PointKdTree {
         root_ = build(0, indices_.size(), 0);
     }
 
-    template <std::size_t MaxK>
+    static constexpr std::size_t kMaxK = 256;
     std::size_t knn(std::uint32_t queryId, std::size_t k, float maxDistance,
-                    std::array<std::uint32_t, MaxK>& outIds, std::array<float, MaxK>& outD2) const {
+                    std::array<std::uint32_t, kMaxK>& outIds, std::array<float, kMaxK>& outD2) const {
         if (root_ < 0 || k == 0)
             return 0;
-        k = std::min<std::size_t>(k, MaxK);
+        k = std::min<std::size_t>(k, kMaxK);
         const float maxD2 = maxDistance > 0.0f ? maxDistance * maxDistance : std::numeric_limits<float>::infinity();
         std::size_t count = 0;
         query(root_, queryId, cloud_.points()[queryId].position, k, maxD2, outIds, outD2, count);
@@ -212,9 +197,8 @@ class PointKdTree {
         return nodeId;
     }
 
-    template <std::size_t MaxK>
     void query(int nodeId, std::uint32_t queryId, const Vec3f& target, std::size_t k, float maxD2,
-               std::array<std::uint32_t, MaxK>& ids, std::array<float, MaxK>& d2s, std::size_t& count) const {
+               std::array<std::uint32_t, kMaxK>& ids, std::array<float, kMaxK>& d2s, std::size_t& count) const {
         if (nodeId < 0)
             return;
         const Node& node = nodes_[static_cast<std::size_t>(nodeId)];
@@ -607,8 +591,8 @@ ProcessResult StatisticalOutlierOperation::run(const ProcessInput& i, const Para
         const auto& point = i.cloud->points()[static_cast<std::size_t>(id)];
         if (point.flags & PointDeleted)
             continue;
-        std::array<std::uint32_t, 256> ids{};
-        std::array<float, 256> d2{};
+        std::array<std::uint32_t, PointKdTree::kMaxK> ids{};
+        std::array<float, PointKdTree::kMaxK> d2{};
         const auto count = tree.knn(uid, static_cast<std::size_t>(k), 0.0f, ids, d2);
         if (count == 0) {
             meanDistance[static_cast<std::size_t>(id)] = std::numeric_limits<double>::infinity();
@@ -676,37 +660,48 @@ ProcessResult SmallClusterOperation::run(const ProcessInput& i, const ParameterM
     float rad = std::max(1e-9f, millimetersToCloudUnits(*i.cloud, realParam(p, "radius_mm", 3)));
     size_t minp = (size_t)intParam(p, "min_points", 1000);
     auto g = grid(*i.cloud, rad);
-    std::vector<int> comp(i.cloud->size(), -1);
-    std::vector<std::vector<uint32_t>> groups;
-    for (uint32_t s = 0; s < i.cloud->size(); ++s) {
-        if (comp[s] >= 0 || (i.cloud->points()[s].flags & PointDeleted))
+    // Keep only one component id per point plus one size per component.  The previous
+    // vector<vector<pointId>> representation duplicated every point id and created thousands
+    // of small heap allocations on large scans.  This form is materially lighter for 1M+ points.
+    std::vector<std::int32_t> comp(i.cloud->size(), -1);
+    std::vector<std::size_t> compSizes;
+    std::vector<std::uint32_t> queue;
+    queue.reserve(std::min<std::size_t>(i.cloud->activeCount(), 262144));
+    for (std::uint32_t seed = 0; seed < i.cloud->size(); ++seed) {
+        if (comp[seed] >= 0 || (i.cloud->points()[seed].flags & PointDeleted))
             continue;
-        int ci = (int)groups.size();
-        groups.emplace_back();
-        std::queue<uint32_t> q;
-        q.push(s);
-        comp[s] = ci;
-        while (!q.empty()) {
-            auto u = q.front();
-            q.pop();
-            groups.back().push_back(u);
-            forNeighbors(*i.cloud, g, u, rad, [&](uint32_t v) {
+        const auto ci = static_cast<std::int32_t>(compSizes.size());
+        queue.clear();
+        queue.push_back(seed);
+        comp[seed] = ci;
+        std::size_t head = 0;
+        while (head < queue.size()) {
+            const auto u = queue[head++];
+            forNeighbors(*i.cloud, g, u, rad, [&](std::uint32_t v) {
                 if (comp[v] < 0) {
                     comp[v] = ci;
-                    q.push(v);
+                    queue.push_back(v);
                 }
             });
+            if ((head & 0x3fffu) == 0u && ct.cancelled()) {
+                r.cancelled = true;
+                return r;
+            }
         }
+        compSizes.push_back(queue.size());
         if (ct.cancelled()) {
             r.cancelled = true;
             return r;
         }
     }
     PointCloud::Container out;
-    for (auto& gr : groups)
-        if (gr.size() >= minp)
-            for (auto id : gr)
-                out.push_back(i.cloud->points()[id]);
+    out.reserve(i.cloud->activeCount());
+    for (std::size_t id = 0; id < i.cloud->size(); ++id) {
+        const auto ci = comp[id];
+        if (ci >= 0 && static_cast<std::size_t>(ci) < compSizes.size() &&
+            compSizes[static_cast<std::size_t>(ci)] >= minp)
+            out.push_back(i.cloud->points()[id]);
+    }
     r.inputPoints = i.cloud->activeCount();
     r.cloud = std::make_shared<PointCloud>(std::move(out));
     r.outputPoints = r.cloud->size();
@@ -716,6 +711,150 @@ ProcessResult SmallClusterOperation::run(const ProcessInput& i, const ParameterM
     return r;
 }
 
+
+OperationDescriptor ScanPostProcessOperation::descriptor() const {
+    // Internal scan workflow operation.  It intentionally has no generic parameter dialog:
+    // every stage derives defaults from the actual intermediate geometry inside the worker.
+    return {"scan_postprocess", "扫描一键后处理", "扫描", ModelKind::PointCloud, {},
+            OutputPolicy::AddModelOnKindChange};
+}
+
+ProcessResult ScanPostProcessOperation::run(const ProcessInput& i, const ParameterMap&,
+                                            const ProgressCallback& cb, const CancelToken& ct) const {
+    ProcessResult result;
+    if (!i.cloud || i.cloud->empty()) {
+        result.message = "一键处理需要有效扫描点云";
+        return result;
+    }
+    result.inputPoints = i.cloud->activeCount();
+
+    auto defaultsFor = [](const IProcessingOperation& op, const ProcessInput& input) {
+        ParameterMap params;
+        const auto d = estimateOperationDescriptor(op, input);
+        for (const auto& spec : d.parameters) {
+            switch (spec.kind) {
+            case ParameterKind::Integer:
+            case ParameterKind::Choice:
+                params[spec.key] = static_cast<std::int64_t>(std::llround(spec.defaultValue));
+                break;
+            case ParameterKind::Boolean:
+                params[spec.key] = spec.defaultValue >= 0.5;
+                break;
+            case ParameterKind::Real:
+                params[spec.key] = spec.defaultValue;
+                break;
+            }
+        }
+        return params;
+    };
+    auto mappedProgress = [&](float begin, float end, const char* prefix) {
+        return [=](const ProgressInfo& p) {
+            if (!cb) return;
+            ProgressInfo out;
+            out.progress = begin + (end - begin) * std::clamp(p.progress, 0.0f, 1.0f);
+            out.stage = std::string(prefix) + (p.stage.empty() ? std::string{} : std::string("：") + p.stage);
+            cb(out);
+        };
+    };
+
+    std::shared_ptr<PointCloud> cloud = i.cloud;
+    const std::size_t originalPoints = result.inputPoints;
+    std::size_t afterDenoise = originalPoints;
+    std::size_t afterCluster = originalPoints;
+
+    // 1) Statistical outlier removal.  If an unusual scan makes the auto threshold remove
+    // most of the object, keep the previous cloud instead of silently destroying the model.
+    {
+        StatisticalOutlierOperation op;
+        ProcessInput in; in.cloud = cloud;
+        auto p = defaultsFor(op, in);
+        auto r = op.run(in, p, mappedProgress(0.00f, 0.20f, "1/4 点云去噪"), ct);
+        if (ct.cancelled() || r.cancelled) { result.cancelled = true; return result; }
+        if (!r.success || !r.cloud) { result.message = "点云去噪失败：" + r.message; return result; }
+        const std::size_t minSafe = std::min<std::size_t>(originalPoints, std::max<std::size_t>(100, originalPoints / 2));
+        if (r.outputPoints >= minSafe) {
+            cloud = r.cloud;
+            afterDenoise = r.outputPoints;
+        } else {
+            afterDenoise = originalPoints;
+            if (cb) cb({0.20f, "1/4 点云去噪结果过度，已自动保留原点云"});
+        }
+    }
+
+    // 2) Remove disconnected small point clusters before Poisson so flying islands do not
+    // become closed shells.  Apply the same production safety fallback as the denoise stage.
+    {
+        SmallClusterOperation op;
+        ProcessInput in; in.cloud = cloud;
+        auto p = defaultsFor(op, in);
+        auto r = op.run(in, p, mappedProgress(0.20f, 0.34f, "2/4 删除小点云"), ct);
+        if (ct.cancelled() || r.cancelled) { result.cancelled = true; return result; }
+        if (!r.success || !r.cloud) { result.message = "删除小点云失败：" + r.message; return result; }
+        const std::size_t before = cloud->activeCount();
+        const std::size_t minSafe = std::min<std::size_t>(before, std::max<std::size_t>(100, before / 2));
+        if (r.outputPoints >= minSafe) {
+            cloud = r.cloud;
+            afterCluster = r.outputPoints;
+        } else {
+            afterCluster = before;
+            if (cb) cb({0.34f, "2/4 小点云阈值过度，已自动保留去噪后的主体点云"});
+        }
+    }
+
+    // 3) Industrial Poisson.  Defaults are calculated AFTER point cleanup, so spacing and
+    // physical precision are based on the cloud that actually enters the solver.
+    std::shared_ptr<TriangleMesh> mesh;
+    {
+        OctreePoissonOperation op;
+        ProcessInput in; in.cloud = cloud;
+        auto p = defaultsFor(op, in);
+        // One-click is intended to be robust on noisy scans; the dedicated mesh-denoise stage
+        // below handles small components explicitly.
+        p["cleanup"] = true;
+        p["remove_small_components"] = false;
+        auto r = op.run(in, p, mappedProgress(0.34f, 0.88f, "3/4 泊松重建"), ct);
+        if (ct.cancelled() || r.cancelled) { result.cancelled = true; return result; }
+        if (!r.success || !r.mesh || r.mesh->triangleCount() == 0) {
+            result.message = "泊松重建失败：" + r.message;
+            return result;
+        }
+        mesh = r.mesh;
+    }
+
+    // 4) Mesh denoise removes tiny connected shells and spike/long-edge triangles, then
+    // compacts unreferenced vertices and rebuilds final normals.
+    {
+        MeshDenoiseOperation op;
+        ProcessInput in; in.cloud = mesh->vertices(); in.mesh = mesh;
+        auto p = defaultsFor(op, in);
+        const std::size_t poissonTriangles = mesh->activeTriangleCount();
+        auto r = op.run(in, p, mappedProgress(0.88f, 1.00f, "4/4 网格去噪"), ct);
+        if (ct.cancelled() || r.cancelled) { result.cancelled = true; return result; }
+        // Mesh denoise has the same production guard as point cleanup: a default auto-pass is
+        // not allowed to discard most of an otherwise valid reconstruction.
+        const std::size_t minSafe = std::min<std::size_t>(
+            poissonTriangles, std::max<std::size_t>(100, poissonTriangles / 2));
+        if (r.success && r.mesh && r.mesh->activeTriangleCount() >= minSafe) {
+            mesh = r.mesh;
+        } else if (cb) {
+            cb({1.0f, "4/4 网格去噪删除过度，已自动保留泊松网格"});
+        }
+    }
+
+    result.success = true;
+    result.geometryChanged = true;
+    result.topologyChanged = true;
+    result.mesh = mesh;
+    result.cloud = mesh->vertices();
+    result.outputPoints = result.cloud ? result.cloud->activeCount() : 0u;
+    result.outputTriangles = mesh->activeTriangleCount();
+    result.message = "一键后处理完成：点云 " + std::to_string(originalPoints) + " -> " +
+                     std::to_string(afterDenoise) + " -> " + std::to_string(afterCluster) +
+                     "，网格 " + std::to_string(result.outputTriangles) + " 三角形";
+    if (cb) cb({1.0f, "一键后处理完成"});
+    return result;
+}
+
 OperationDescriptor NormalEstimationOperation::descriptor() const {
     return {"normal_estimation",
             "估算法向",
@@ -723,6 +862,7 @@ OperationDescriptor NormalEstimationOperation::descriptor() const {
             ModelKind::PointCloud,
             {{"knn", "KNN 邻居数", ParameterKind::Integer, 24, 6, 64, 1, ""},
              {"max_distance_mm", "最大邻域距离(0=不限制)", ParameterKind::Real, 0, 0, 1000, 0.5, "mm"},
+             {"orient_consistently", "新估计法向邻域一致化", ParameterKind::Boolean, 1, 0, 1, 1, ""},
              {"threads", "法线线程数", ParameterKind::Integer, 0, 0, 64, 1, ""}}};
 }
 ProcessResult NormalEstimationOperation::run(const ProcessInput& i, const ParameterMap& p, const ProgressCallback& cb,
@@ -734,6 +874,16 @@ ProcessResult NormalEstimationOperation::run(const ProcessInput& i, const Parame
     }
 
     auto out = std::make_shared<PointCloud>(i.cloud->points());
+    // Existing scanner/SLAM normals are anchors and must not be re-oriented by this operation.
+    // Only normals synthesized by PCA below may have their sign flipped for local consistency.
+    std::vector<std::uint8_t> fixedNormal(i.cloud->size(), 0u);
+    std::size_t fixedNormalCount = 0;
+    for (std::size_t id = 0; id < i.cloud->size(); ++id) {
+        const auto& src = i.cloud->points()[id];
+        if ((src.flags & PointDeleted) == 0 && std::isfinite(src.normal.x) && std::isfinite(src.normal.y) &&
+            std::isfinite(src.normal.z) && dot(src.normal, src.normal) > 0.25f)
+            fixedNormal[id] = 1u, ++fixedNormalCount;
+    }
     const std::size_t knn = static_cast<std::size_t>(std::clamp<std::int64_t>(intParam(p, "knn", 24), 6, 64));
     const double maxDistanceMm = realParam(p, "max_distance_mm", 0.0);
     const float maxDistance = maxDistanceMm > 0.0 ? millimetersToCloudUnits(*i.cloud, maxDistanceMm) : 0.0f;
@@ -774,8 +924,8 @@ ProcessResult NormalEstimationOperation::run(const ProcessInput& i, const Parame
                 dot(existing, existing) > 0.25f)
                 continue;
 
-            std::array<std::uint32_t, 64> neighborIds{};
-            std::array<float, 64> neighborD2{};
+            std::array<std::uint32_t, PointKdTree::kMaxK> neighborIds{};
+            std::array<float, PointKdTree::kMaxK> neighborD2{};
             const std::size_t nNeighbors = tree.knn(static_cast<std::uint32_t>(id), knn, maxDistance,
                                                      neighborIds, neighborD2);
             if (nNeighbors < 3)
@@ -806,7 +956,91 @@ ProcessResult NormalEstimationOperation::run(const ProcessInput& i, const Parame
             out->points()[idx].normal = smallestEigenVectorSymmetric3x3(c00, c01, c02, c11, c12, c22);
         }
         const float p01 = count > 0 ? static_cast<float>(stop) / static_cast<float>(count) : 1.0f;
-        prog(cb, 0.02f + 0.98f * p01, "并行 KNN PCA 法向估计");
+        prog(cb, 0.02f + 0.76f * p01, "并行 KNN PCA 法向估计");
+    }
+
+    if (ct.cancelled()) {
+        r.cancelled = true;
+        return r;
+    }
+
+    if (boolParam(p, "orient_consistently", true) && fixedNormalCount < out->activeCount()) {
+        prog(cb, 0.80f, "新估计法向邻域一致化");
+        const std::size_t orientK = std::min<std::size_t>(12, knn);
+        std::vector<std::uint8_t> visited(out->size(), 0u);
+        std::vector<std::uint32_t> queue;
+        queue.reserve(std::min<std::size_t>(out->activeCount() - fixedNormalCount, 262144));
+
+        auto validNormal = [&](std::uint32_t id) {
+            if (id >= out->size()) return false;
+            const auto& pt = out->points()[id];
+            return (pt.flags & PointDeleted) == 0 && std::isfinite(pt.normal.x) &&
+                   std::isfinite(pt.normal.y) && std::isfinite(pt.normal.z) && dot(pt.normal, pt.normal) > 0.25f;
+        };
+
+        for (std::uint32_t id = 0; id < out->size(); ++id)
+            if (fixedNormal[id] && validNormal(id)) visited[id] = 1u;
+
+        // When trusted scanner normals exist, orient only the newly estimated points that touch
+        // an anchor.  This avoids querying every already-valid point in a 90%-covered cloud.
+        if (fixedNormalCount > 0) {
+            for (std::uint32_t id = 0; id < out->size(); ++id) {
+                if (fixedNormal[id] || !validNormal(id)) continue;
+                std::array<std::uint32_t, PointKdTree::kMaxK> ids{};
+                std::array<float, PointKdTree::kMaxK> d2{};
+                const auto nCount = tree.knn(id, orientK, maxDistance, ids, d2);
+                std::uint32_t anchor = std::numeric_limits<std::uint32_t>::max();
+                float bestD2 = std::numeric_limits<float>::infinity();
+                for (std::size_t ni = 0; ni < nCount; ++ni) {
+                    const auto v = ids[ni];
+                    if (v < fixedNormal.size() && fixedNormal[v] && validNormal(v) && d2[ni] < bestD2) {
+                        bestD2 = d2[ni];
+                        anchor = v;
+                    }
+                }
+                if (anchor != std::numeric_limits<std::uint32_t>::max()) {
+                    if (dot(out->points()[anchor].normal, out->points()[id].normal) < 0.0f)
+                        out->points()[id].normal = mul(out->points()[id].normal, -1.0f);
+                    visited[id] = 1u;
+                    queue.push_back(id);
+                }
+                if ((id & 0x3fffu) == 0u && ct.cancelled()) { r.cancelled = true; return r; }
+            }
+        }
+
+        auto propagate = [&](std::size_t& head) {
+            std::array<std::uint32_t, PointKdTree::kMaxK> ids{};
+            std::array<float, PointKdTree::kMaxK> d2{};
+            while (head < queue.size()) {
+                const auto u = queue[head++];
+                if (!validNormal(u)) continue;
+                const auto nCount = tree.knn(u, orientK, maxDistance, ids, d2);
+                for (std::size_t ni = 0; ni < nCount; ++ni) {
+                    const auto v = ids[ni];
+                    if (!validNormal(v) || fixedNormal[v] || visited[v]) continue;
+                    if (dot(out->points()[u].normal, out->points()[v].normal) < 0.0f)
+                        out->points()[v].normal = mul(out->points()[v].normal, -1.0f);
+                    visited[v] = 1u;
+                    queue.push_back(v);
+                }
+                if ((head & 0x3fffu) == 0u && ct.cancelled()) return false;
+            }
+            return true;
+        };
+
+        // Spread anchor orientation through estimated-normal regions.
+        std::size_t head = 0;
+        if (!propagate(head)) { r.cancelled = true; return r; }
+
+        // Components with no original normal get one arbitrary seed. Their global sign is
+        // arbitrary, but local consistency is what Poisson requires for stable geometry.
+        for (std::uint32_t seed = 0; seed < out->size(); ++seed) {
+            if (fixedNormal[seed] || visited[seed] || !validNormal(seed)) continue;
+            queue.clear(); head = 0;
+            visited[seed] = 1u; queue.push_back(seed);
+            if (!propagate(head)) { r.cancelled = true; return r; }
+        }
+        prog(cb, 0.99f, "法向一致化完成");
     }
 
     if (ct.cancelled()) {
@@ -1036,38 +1270,57 @@ ProcessResult MeshDenoiseOperation::run(const ProcessInput& i, const ParameterMa
     if (boolParam(p, "remove_small_components", true) && out->triangleCount()) {
         prog(cb, .55f, "删除小连通域");
         const std::size_t triCount = out->triangleCount();
-        std::vector<std::vector<std::uint32_t>> vertexTris(out->vertices()->size());
-        for (std::uint32_t t = 0; t < triCount; ++t)
-            for (int k = 0; k < 3; ++k)
-                vertexTris[out->indices()[3ull * t + k]].push_back(t);
-        std::vector<int> comp(triCount, -1);
-        std::vector<std::vector<std::uint32_t>> groups;
-        for (std::uint32_t seed = 0; seed < triCount; ++seed) {
-            if (comp[seed] >= 0) continue;
-            const int ci = static_cast<int>(groups.size());
-            groups.emplace_back();
-            std::queue<std::uint32_t> q;
-            q.push(seed); comp[seed] = ci;
-            while (!q.empty()) {
-                const auto t = q.front(); q.pop();
-                groups.back().push_back(t);
-                for (int k = 0; k < 3; ++k) {
-                    const auto v = out->indices()[3ull * t + k];
-                    for (const auto nt : vertexTris[v])
-                        if (comp[nt] < 0) { comp[nt] = ci; q.push(nt); }
-                }
+        const std::size_t vertexCount = out->vertices()->size();
+
+        // Union vertices that belong to the same triangle.  Triangle connected-components can
+        // then be counted by the root of any triangle vertex.  This replaces the old
+        // vector<vector<triangleId>> adjacency, whose per-vertex container overhead was large
+        // enough to cause avoidable memory spikes on multi-million-triangle Poisson meshes.
+        std::vector<std::uint32_t> parent(vertexCount);
+        std::vector<std::uint8_t> rank(vertexCount, 0);
+        std::iota(parent.begin(), parent.end(), 0u);
+        auto findRoot = [&](std::uint32_t x) {
+            std::uint32_t r0 = x;
+            while (parent[r0] != r0) r0 = parent[r0];
+            while (parent[x] != x) {
+                const auto next = parent[x];
+                parent[x] = r0;
+                x = next;
             }
-            if (ct.cancelled()) { r.cancelled = true; return r; }
+            return r0;
+        };
+        auto unite = [&](std::uint32_t a, std::uint32_t b) {
+            auto ra = findRoot(a), rb = findRoot(b);
+            if (ra == rb) return;
+            if (rank[ra] < rank[rb]) std::swap(ra, rb);
+            parent[rb] = ra;
+            if (rank[ra] == rank[rb]) ++rank[ra];
+        };
+
+        for (std::size_t t = 0; t < triCount; ++t) {
+            const std::size_t b = 3ull * t;
+            const auto a = out->indices()[b], b0 = out->indices()[b + 1], c = out->indices()[b + 2];
+            if (a >= vertexCount || b0 >= vertexCount || c >= vertexCount) continue;
+            unite(a, b0);
+            unite(b0, c);
+            if ((t & 0x3ffffu) == 0u && ct.cancelled()) { r.cancelled = true; return r; }
         }
-        const std::size_t minTri = static_cast<std::size_t>(std::max<std::int64_t>(1, intParam(p, "min_component_triangles", 100)));
+
+        std::vector<std::uint32_t> componentTriangles(vertexCount, 0u);
+        for (std::size_t t = 0; t < triCount; ++t) {
+            const auto a = out->indices()[3ull * t];
+            if (a < vertexCount) ++componentTriangles[findRoot(a)];
+        }
+
+        const std::size_t minTri = static_cast<std::size_t>(
+            std::max<std::int64_t>(1, intParam(p, "min_component_triangles", 100)));
         std::vector<std::uint32_t> kept;
         kept.reserve(out->indices().size());
-        for (const auto& group : groups) {
-            if (group.size() < minTri) continue;
-            for (const auto t : group) {
-                const std::size_t b = 3ull * t;
-                kept.insert(kept.end(), {out->indices()[b], out->indices()[b + 1], out->indices()[b + 2]});
-            }
+        for (std::size_t t = 0; t < triCount; ++t) {
+            const std::size_t b = 3ull * t;
+            const auto a = out->indices()[b];
+            if (a >= vertexCount || componentTriangles[findRoot(a)] < minTri) continue;
+            kept.insert(kept.end(), {out->indices()[b], out->indices()[b + 1], out->indices()[b + 2]});
         }
         out->setIndices(std::move(kept));
     }

@@ -25,7 +25,7 @@ enum class ScanRegistrationMode : std::uint8_t {
 };
 
 struct ScanConfig {
-    int maxFrames{2000};
+    int maxFrames{20000};
     int maxInflightFrames{6};
     int previewPointsPerFrame{12000};
     int previewPointLimit{500000};
@@ -41,6 +41,9 @@ struct ScanConfig {
     float cx{0.0f};
     float cy{0.0f};
     ScanRegistrationMode registrationMode{ScanRegistrationMode::Texture};
+    // Controls periodic online pose refresh/application. Keeping this in the engine config
+    // avoids running expensive full-history getResults() scans when the UI switch is off.
+    bool liveOptimizationEnabled{true};
     std::string calibrationPath;
     std::string vocabularyPath;
     // Optional scan project persistence: pose/frame cloud are saved without affecting SLAM memory.

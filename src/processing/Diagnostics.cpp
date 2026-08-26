@@ -277,7 +277,7 @@ ProcessingPreflight preflightOperation(const IProcessingOperation& operation, co
         // 预检按用户允许的 max_depth 做保守内存上限估算，避免低估 OOM 风险。
         p.requestedDepth = static_cast<int>(std::clamp<std::int64_t>(intParam(params, "max_depth", 11), 7, 12));
         p.recommendedDepth = p.requestedDepth;
-        const double samples = realParam(params, "samples_per_node", 0.5);
+        const double samples = realParam(params, "samples_per_node", 1.5);
 
         // 前置阶段只按点数给参考值，不扫描法线/包围盒，也不阻止启动。
         p.estimatedWorkingSetBytes = estimatePoissonBytes(p.diagnostics.points, p.requestedDepth, samples);
