@@ -311,7 +311,7 @@ void MainWindow::createActions() {
     lassoAction_ = makeTool(QString::fromUtf8("套索"), PointCloudWidget::InteractionMode::Lasso);
     circleAction_ = makeTool(QString::fromUtf8("圆形"), PointCloudWidget::InteractionMode::Circle);
     brushAction_ = makeTool(QString::fromUtf8("画刷"), PointCloudWidget::InteractionMode::Brush);
-    rectangleAction_->setChecked(true);
+    lassoAction_->setChecked(true);
 
     depthGroup_ = new QActionGroup(this);
     depthGroup_->setExclusive(true);

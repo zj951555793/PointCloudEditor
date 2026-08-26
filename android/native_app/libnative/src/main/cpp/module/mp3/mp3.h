@@ -31,4 +31,4 @@ void lameCloseInternal();
 #ifdef __cplusplus
 };
 #endif
-#endif //ANDROIDUSBCAMERA_MP3_H
+#endif // ANDROIDUSBCAMERA_MP3_H

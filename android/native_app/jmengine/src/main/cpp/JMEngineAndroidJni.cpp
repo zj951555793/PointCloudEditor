@@ -50,44 +50,32 @@ jstring toJString(JNIEnv* env, const std::string& value) {
 
 } // namespace
 
-extern "C" JNIEXPORT jstring JNICALL
-Java_com_jmengine_sdk_JMEngineNative_version(JNIEnv* env, jclass) {
+extern "C" JNIEXPORT jstring JNICALL ava_com_jmengine_sdk_JMEngineNative_version(JNIEnv* env, jclass) {
     return env->NewStringUTF("JMEngine 2.4.0 / Android Native Scan V20");
 }
 
-extern "C" JNIEXPORT jlong JNICALL
-Java_com_jmengine_sdk_JMEngineNative_nativeCreate(JNIEnv*, jclass) {
+extern "C" JNIEXPORT jlong JNICALL ava_com_jmengine_sdk_JMEngineNative_nativeCreate(JNIEnv*, jclass) {
     auto* ctx = new (std::nothrow) AndroidEngineContext();
     if (ctx) {
-        ctx->engine.scanner()->setFrameCallback(
-                [ctx](
-                        int,
-                        const JMEngine::Pose&,
-                        std::shared_ptr<JMEngine::PointCloud> cloud,
-                        std::shared_ptr<JMEngine::PointCloud>,
-                        bool trackingOk) {
-                    std::lock_guard<std::mutex> guard(ctx->mutex);
-                    if (trackingOk && cloud) {
-                        ctx->engine.setPointCloud(std::move(cloud));
-                        ++ctx->revision;
-                    }
-                });
+        ctx->engine.scanner()->setFrameCallback([ctx](int, const JMEngine::Pose&,
+                                                      std::shared_ptr<JMEngine::PointCloud> cloud,
+                                                      std::shared_ptr<JMEngine::PointCloud>, bool trackingOk) {
+            std::lock_guard<std::mutex> guard(ctx->mutex);
+            if (trackingOk && cloud) {
+                ctx->engine.setPointCloud(std::move(cloud));
+                ++ctx->revision;
+            }
+        });
         ctx->engine.scanner()->setMarkerCallback([ctx](const JMEngine::ScanMarkerFrame& frame) {
-            std::lock_guard<std::mutex> guard(ctx->mutex); ctx->markers=frame.markers;
+            std::lock_guard<std::mutex> guard(ctx->mutex);
+            ctx->markers = frame.markers;
         });
     }
     return ctx ? handleOf(ctx) : 0;
 }
 
-extern "C" JNIEXPORT jboolean JNICALL
-Java_com_jmengine_sdk_JMEngineNative_nativeScanInitialize(
-        JNIEnv* env,
-        jclass,
-        jlong handle,
-        jstring calibration,
-        jstring vocabulary,
-        jint mode,
-        jint maxInflight) {
+extern "C" JNIEXPORT jboolean JNICALL ava_com_jmengine_sdk_JMEngineNative_nativeScanInitialize(
+    JNIEnv* env, jclass, jlong handle, jstring calibration, jstring vocabulary, jint mode, jint maxInflight) {
     auto* ctx = context(handle);
     if (!ctx)
         return JNI_FALSE;
@@ -96,8 +84,8 @@ Java_com_jmengine_sdk_JMEngineNative_nativeScanInitialize(
     config.calibrationPath = toUtf8(env, calibration);
     config.vocabularyPath = toUtf8(env, vocabulary);
     config.maxInflightFrames = std::max(1, static_cast<int>(maxInflight));
-    config.registrationMode = static_cast<JMEngine::ScanRegistrationMode>(
-            std::max(0, std::min(2, static_cast<int>(mode))));
+    config.registrationMode =
+        static_cast<JMEngine::ScanRegistrationMode>(std::max(0, std::min(2, static_cast<int>(mode))));
 
     const bool ok = ctx->engine.scanner()->initialize(config);
     if (!ok) {
@@ -107,8 +95,8 @@ Java_com_jmengine_sdk_JMEngineNative_nativeScanInitialize(
     return ok ? JNI_TRUE : JNI_FALSE;
 }
 
-extern "C" JNIEXPORT jboolean JNICALL
-Java_com_jmengine_sdk_JMEngineNative_nativeScanStart(JNIEnv*, jclass, jlong handle) {
+extern "C" JNIEXPORT jboolean JNICALL ava_com_jmengine_sdk_JMEngineNative_nativeScanStart(JNIEnv*, jclass,
+                                                                                           jlong handle) {
     auto* ctx = context(handle);
     if (!ctx || !ctx->engine.scanner()->start())
         return JNI_FALSE;
@@ -119,15 +107,13 @@ Java_com_jmengine_sdk_JMEngineNative_nativeScanStart(JNIEnv*, jclass, jlong hand
     return JNI_TRUE;
 }
 
-extern "C" JNIEXPORT void JNICALL
-Java_com_jmengine_sdk_JMEngineNative_nativeScanStop(JNIEnv*, jclass, jlong handle) {
+extern "C" JNIEXPORT void JNICALL ava_com_jmengine_sdk_JMEngineNative_nativeScanStop(JNIEnv*, jclass, jlong handle) {
     if (auto* ctx = context(handle))
         ctx->engine.scanner()->stop();
 }
 
-extern "C" JNIEXPORT jboolean JNICALL
-Java_com_jmengine_sdk_JMEngineNative_nativeScanReconstruct(
-        JNIEnv*, jclass, jlong handle) {
+extern "C" JNIEXPORT jboolean JNICALL ava_com_jmengine_sdk_JMEngineNative_nativeScanReconstruct(JNIEnv*, jclass,
+                                                                                                 jlong handle) {
     auto* ctx = context(handle);
     if (!ctx)
         return JNI_FALSE;
@@ -145,15 +131,13 @@ Java_com_jmengine_sdk_JMEngineNative_nativeScanReconstruct(
     return ok ? JNI_TRUE : JNI_FALSE;
 }
 
-extern "C" JNIEXPORT jint JNICALL
-Java_com_jmengine_sdk_JMEngineNative_nativeScanState(JNIEnv*, jclass, jlong handle) {
+extern "C" JNIEXPORT jint JNICALL ava_com_jmengine_sdk_JMEngineNative_nativeScanState(JNIEnv*, jclass, jlong handle) {
     auto* ctx = context(handle);
     return ctx ? static_cast<jint>(ctx->engine.scanner()->state()) : -1;
 }
 
-extern "C" JNIEXPORT jlongArray JNICALL
-Java_com_jmengine_sdk_JMEngineNative_nativeScanStatistics(
-        JNIEnv* env, jclass, jlong handle) {
+extern "C" JNIEXPORT jlongArray JNICALL ava_com_jmengine_sdk_JMEngineNative_nativeScanStatistics(JNIEnv* env, jclass,
+                                                                                                  jlong handle) {
     jlongArray result = env->NewLongArray(5);
     jlong values[5]{};
     if (auto* ctx = context(handle)) {
@@ -168,25 +152,16 @@ Java_com_jmengine_sdk_JMEngineNative_nativeScanStatistics(
     return result;
 }
 
-extern "C" JNIEXPORT jboolean JNICALL
-Java_com_jmengine_sdk_JMEngineNative_nativeScanSubmitStructured(
-        JNIEnv* env,
-        jclass,
-        jlong handle,
-        jbyteArray rgb,
-        jbyteArray code,
-        jint width,
-        jint height,
-        jlong timestampUs,
-        jint frameId) {
+extern "C" JNIEXPORT jboolean JNICALL ava_com_jmengine_sdk_JMEngineNative_nativeScanSubmitStructured(
+    JNIEnv* env, jclass, jlong handle, jbyteArray rgb, jbyteArray code, jint width, jint height, jlong timestampUs,
+    jint frameId) {
     auto* ctx = context(handle);
     if (!ctx || !rgb || !code || width <= 0 || height <= 0)
         return JNI_FALSE;
 
-    const std::size_t pixels =
-            static_cast<std::size_t>(width) * static_cast<std::size_t>(height);
-    if (static_cast<std::size_t>(env->GetArrayLength(rgb)) < pixels * 3u
-            || static_cast<std::size_t>(env->GetArrayLength(code)) < pixels) {
+    const std::size_t pixels = static_cast<std::size_t>(width) * static_cast<std::size_t>(height);
+    if (static_cast<std::size_t>(env->GetArrayLength(rgb)) < pixels * 3u ||
+        static_cast<std::size_t>(env->GetArrayLength(code)) < pixels) {
         return JNI_FALSE;
     }
 
@@ -197,30 +172,20 @@ Java_com_jmengine_sdk_JMEngineNative_nativeScanSubmitStructured(
     frame.frameId = frameId;
     frame.rgb = std::make_shared<std::vector<std::uint8_t>>(pixels * 3u);
     frame.code = std::make_shared<std::vector<std::uint8_t>>(pixels);
-    env->GetByteArrayRegion(
-            rgb,
-            0,
-            static_cast<jsize>(pixels * 3u),
-            reinterpret_cast<jbyte*>(frame.rgb->data()));
-    env->GetByteArrayRegion(
-            code,
-            0,
-            static_cast<jsize>(pixels),
-            reinterpret_cast<jbyte*>(frame.code->data()));
+    env->GetByteArrayRegion(rgb, 0, static_cast<jsize>(pixels * 3u), reinterpret_cast<jbyte*>(frame.rgb->data()));
+    env->GetByteArrayRegion(code, 0, static_cast<jsize>(pixels), reinterpret_cast<jbyte*>(frame.code->data()));
     return ctx->engine.scanner()->submit(std::move(frame)) ? JNI_TRUE : JNI_FALSE;
 }
 
-extern "C" JNIEXPORT jfloatArray JNICALL
-Java_com_jmengine_sdk_JMEngineNative_nativeScanMarkers(
-        JNIEnv* env, jclass, jlong handle) {
+extern "C" JNIEXPORT jfloatArray JNICALL ava_com_jmengine_sdk_JMEngineNative_nativeScanMarkers(JNIEnv* env, jclass,
+                                                                                                jlong handle) {
     std::vector<JMEngine::ScanMarker> markers;
     if (auto* ctx = context(handle)) {
         std::lock_guard<std::mutex> guard(ctx->mutex);
         markers = ctx->markers;
     }
 
-    jfloatArray result =
-            env->NewFloatArray(static_cast<jsize>(markers.size() * 4u));
+    jfloatArray result = env->NewFloatArray(static_cast<jsize>(markers.size() * 4u));
     std::vector<jfloat> values;
     values.reserve(markers.size() * 4u);
     for (const auto& marker : markers) {
@@ -230,20 +195,18 @@ Java_com_jmengine_sdk_JMEngineNative_nativeScanMarkers(
         values.push_back(marker.point3d[2]);
     }
     if (!values.empty()) {
-        env->SetFloatArrayRegion(
-                result, 0, static_cast<jsize>(values.size()), values.data());
+        env->SetFloatArrayRegion(result, 0, static_cast<jsize>(values.size()), values.data());
     }
     return result;
 }
 
-extern "C" JNIEXPORT void JNICALL
-Java_com_jmengine_sdk_JMEngineNative_nativeDestroy(JNIEnv*, jclass, jlong handle) {
+extern "C" JNIEXPORT void JNICALL ava_com_jmengine_sdk_JMEngineNative_nativeDestroy(JNIEnv*, jclass, jlong handle) {
     delete context(handle);
 }
 
-extern "C" JNIEXPORT jboolean JNICALL
-Java_com_jmengine_sdk_JMEngineNative_nativeLoadPointCloud(
-        JNIEnv* env, jclass, jlong handle, jstring path) {
+extern "C" JNIEXPORT jboolean JNICALL ava_com_jmengine_sdk_JMEngineNative_nativeLoadPointCloud(JNIEnv* env, jclass,
+                                                                                                jlong handle,
+                                                                                                jstring path) {
     auto* ctx = context(handle);
     if (!ctx)
         return JNI_FALSE;
@@ -258,9 +221,8 @@ Java_com_jmengine_sdk_JMEngineNative_nativeLoadPointCloud(
     return JNI_TRUE;
 }
 
-extern "C" JNIEXPORT jboolean JNICALL
-Java_com_jmengine_sdk_JMEngineNative_nativeSavePly(
-        JNIEnv* env, jclass, jlong handle, jstring path) {
+extern "C" JNIEXPORT jboolean JNICALL ava_com_jmengine_sdk_JMEngineNative_nativeSavePly(JNIEnv* env, jclass,
+                                                                                         jlong handle, jstring path) {
     auto* ctx = context(handle);
     if (!ctx)
         return JNI_FALSE;
@@ -271,12 +233,11 @@ Java_com_jmengine_sdk_JMEngineNative_nativeSavePly(
         ctx->lastError = "No point cloud loaded";
         return JNI_FALSE;
     }
-    return JMEngine::PointCloudIO::savePly(*cloud, toUtf8(env, path), &ctx->lastError)
-            ? JNI_TRUE : JNI_FALSE;
+    return JMEngine::PointCloudIO::savePly(*cloud, toUtf8(env, path), &ctx->lastError) ? JNI_TRUE : JNI_FALSE;
 }
 
-extern "C" JNIEXPORT jlong JNICALL
-Java_com_jmengine_sdk_JMEngineNative_nativePointCount(JNIEnv*, jclass, jlong handle) {
+extern "C" JNIEXPORT jlong JNICALL ava_com_jmengine_sdk_JMEngineNative_nativePointCount(JNIEnv*, jclass,
+                                                                                         jlong handle) {
     auto* ctx = context(handle);
     if (!ctx)
         return 0;
@@ -285,8 +246,8 @@ Java_com_jmengine_sdk_JMEngineNative_nativePointCount(JNIEnv*, jclass, jlong han
     return cloud ? static_cast<jlong>(cloud->size()) : 0;
 }
 
-extern "C" JNIEXPORT jlong JNICALL
-Java_com_jmengine_sdk_JMEngineNative_nativeActivePointCount(JNIEnv*, jclass, jlong handle) {
+extern "C" JNIEXPORT jlong JNICALL ava_com_jmengine_sdk_JMEngineNative_nativeActivePointCount(JNIEnv*, jclass,
+                                                                                               jlong handle) {
     auto* ctx = context(handle);
     if (!ctx)
         return 0;
@@ -295,8 +256,8 @@ Java_com_jmengine_sdk_JMEngineNative_nativeActivePointCount(JNIEnv*, jclass, jlo
     return cloud ? static_cast<jlong>(cloud->activeCount()) : 0;
 }
 
-extern "C" JNIEXPORT jlong JNICALL
-Java_com_jmengine_sdk_JMEngineNative_nativeDeletedPointCount(JNIEnv*, jclass, jlong handle) {
+extern "C" JNIEXPORT jlong JNICALL ava_com_jmengine_sdk_JMEngineNative_nativeDeletedPointCount(JNIEnv*, jclass,
+                                                                                                jlong handle) {
     auto* ctx = context(handle);
     if (!ctx)
         return 0;
@@ -305,9 +266,8 @@ Java_com_jmengine_sdk_JMEngineNative_nativeDeletedPointCount(JNIEnv*, jclass, jl
     return cloud ? static_cast<jlong>(cloud->deletedCount()) : 0;
 }
 
-extern "C" JNIEXPORT jlong JNICALL
-Java_com_jmengine_sdk_JMEngineNative_nativeSelectFirst(
-        JNIEnv*, jclass, jlong handle, jlong requested) {
+extern "C" JNIEXPORT jlong JNICALL ava_com_jmengine_sdk_JMEngineNative_nativeSelectFirst(JNIEnv*, jclass, jlong handle,
+                                                                                          jlong requested) {
     auto* ctx = context(handle);
     if (!ctx || requested <= 0)
         return 0;
@@ -319,9 +279,7 @@ Java_com_jmengine_sdk_JMEngineNative_nativeSelectFirst(
     const std::size_t limit = static_cast<std::size_t>(requested);
     std::vector<JMEngine::PointId> ids;
     ids.reserve(std::min(limit, cloud->activeCount()));
-    for (JMEngine::PointId id = 0;
-         static_cast<std::size_t>(id) < cloud->size() && ids.size() < limit;
-         ++id) {
+    for (JMEngine::PointId id = 0; static_cast<std::size_t>(id) < cloud->size() && ids.size() < limit; ++id) {
         const auto& p = cloud->points()[id];
         if ((p.flags & JMEngine::PointDeleted) == 0)
             ids.push_back(id);
@@ -330,41 +288,42 @@ Java_com_jmengine_sdk_JMEngineNative_nativeSelectFirst(
     return static_cast<jlong>(ctx->engine.selection().size());
 }
 
-extern "C" JNIEXPORT jboolean JNICALL
-Java_com_jmengine_sdk_JMEngineNative_nativeDeleteSelection(JNIEnv*, jclass, jlong handle) {
+extern "C" JNIEXPORT jboolean JNICALL ava_com_jmengine_sdk_JMEngineNative_nativeDeleteSelection(JNIEnv*, jclass,
+                                                                                                 jlong handle) {
     auto* ctx = context(handle);
     if (!ctx)
         return JNI_FALSE;
     std::lock_guard<std::mutex> guard(ctx->mutex);
-    const bool ok=ctx->engine.deleteSelection();
-    if(ok) ++ctx->revision;
+    const bool ok = ctx->engine.deleteSelection();
+    if (ok)
+        ++ctx->revision;
     return ok ? JNI_TRUE : JNI_FALSE;
 }
 
-extern "C" JNIEXPORT jboolean JNICALL
-Java_com_jmengine_sdk_JMEngineNative_nativeUndo(JNIEnv*, jclass, jlong handle) {
+extern "C" JNIEXPORT jboolean JNICALL ava_com_jmengine_sdk_JMEngineNative_nativeUndo(JNIEnv*, jclass, jlong handle) {
     auto* ctx = context(handle);
     if (!ctx)
         return JNI_FALSE;
     std::lock_guard<std::mutex> guard(ctx->mutex);
-    const bool ok=ctx->engine.undo();
-    if(ok) ++ctx->revision;
+    const bool ok = ctx->engine.undo();
+    if (ok)
+        ++ctx->revision;
     return ok ? JNI_TRUE : JNI_FALSE;
 }
 
-extern "C" JNIEXPORT jboolean JNICALL
-Java_com_jmengine_sdk_JMEngineNative_nativeRedo(JNIEnv*, jclass, jlong handle) {
+extern "C" JNIEXPORT jboolean JNICALL ava_com_jmengine_sdk_JMEngineNative_nativeRedo(JNIEnv*, jclass, jlong handle) {
     auto* ctx = context(handle);
     if (!ctx)
         return JNI_FALSE;
     std::lock_guard<std::mutex> guard(ctx->mutex);
-    const bool ok=ctx->engine.redo();
-    if(ok) ++ctx->revision;
+    const bool ok = ctx->engine.redo();
+    if (ok)
+        ++ctx->revision;
     return ok ? JNI_TRUE : JNI_FALSE;
 }
 
-extern "C" JNIEXPORT void JNICALL
-Java_com_jmengine_sdk_JMEngineNative_nativeClearSelection(JNIEnv*, jclass, jlong handle) {
+extern "C" JNIEXPORT void JNICALL ava_com_jmengine_sdk_JMEngineNative_nativeClearSelection(JNIEnv*, jclass,
+                                                                                            jlong handle) {
     auto* ctx = context(handle);
     if (!ctx)
         return;
@@ -372,8 +331,8 @@ Java_com_jmengine_sdk_JMEngineNative_nativeClearSelection(JNIEnv*, jclass, jlong
     ctx->engine.clearSelection();
 }
 
-extern "C" JNIEXPORT jstring JNICALL
-Java_com_jmengine_sdk_JMEngineNative_nativeLastError(JNIEnv* env, jclass, jlong handle) {
+extern "C" JNIEXPORT jstring JNICALL ava_com_jmengine_sdk_JMEngineNative_nativeLastError(JNIEnv* env, jclass,
+                                                                                          jlong handle) {
     auto* ctx = context(handle);
     if (!ctx)
         return env->NewStringUTF("Invalid JMEngine handle");
@@ -386,70 +345,92 @@ Java_com_jmengine_sdk_JMEngineNative_nativeLastError(JNIEnv* env, jclass, jlong 
 // on the same opaque engine handle, so a Java app never has to synchronize a
 // second native object with JMEngine's edited point cloud.
 // -----------------------------------------------------------------------------
-extern "C" JNIEXPORT void JNICALL
-Java_com_jmengine_sdk_JMEngineNative_nativeGlSurfaceCreated(JNIEnv*, jclass, jlong handle) {
-    if(auto* ctx=context(handle)) { std::lock_guard<std::mutex> guard(ctx->mutex); ctx->renderer.onSurfaceCreated(); }
-}
-
-extern "C" JNIEXPORT void JNICALL
-Java_com_jmengine_sdk_JMEngineNative_nativeGlResize(JNIEnv*, jclass, jlong handle, jint w, jint h) {
-    if(auto* ctx=context(handle)) { std::lock_guard<std::mutex> guard(ctx->mutex); ctx->renderer.onResize(w,h); }
-}
-
-extern "C" JNIEXPORT void JNICALL
-Java_com_jmengine_sdk_JMEngineNative_nativeGlRender(JNIEnv*, jclass, jlong handle) {
-    if(auto* ctx=context(handle)) {
+extern "C" JNIEXPORT void JNICALL ava_com_jmengine_sdk_JMEngineNative_nativeGlSurfaceCreated(JNIEnv*, jclass,
+                                                                                              jlong handle) {
+    if (auto* ctx = context(handle)) {
         std::lock_guard<std::mutex> guard(ctx->mutex);
-        const auto cloud=ctx->engine.pointCloud();
-        ctx->renderer.render(cloud.get(),ctx->revision);
+        ctx->renderer.onSurfaceCreated();
     }
 }
 
-extern "C" JNIEXPORT void JNICALL
-Java_com_jmengine_sdk_JMEngineNative_nativeGlOrbit(JNIEnv*, jclass, jlong handle, jfloat dx, jfloat dy) {
-    if(auto* ctx=context(handle)) { std::lock_guard<std::mutex> guard(ctx->mutex); ctx->renderer.orbit(dx,dy); }
+extern "C" JNIEXPORT void JNICALL ava_com_jmengine_sdk_JMEngineNative_nativeGlResize(JNIEnv*, jclass, jlong handle,
+                                                                                      jint w, jint h) {
+    if (auto* ctx = context(handle)) {
+        std::lock_guard<std::mutex> guard(ctx->mutex);
+        ctx->renderer.onResize(w, h);
+    }
 }
 
-extern "C" JNIEXPORT void JNICALL
-Java_com_jmengine_sdk_JMEngineNative_nativeGlZoom(JNIEnv*, jclass, jlong handle, jfloat scale) {
-    if(auto* ctx=context(handle)) { std::lock_guard<std::mutex> guard(ctx->mutex); ctx->renderer.zoom(scale); }
+extern "C" JNIEXPORT void JNICALL ava_com_jmengine_sdk_JMEngineNative_nativeGlRender(JNIEnv*, jclass, jlong handle) {
+    if (auto* ctx = context(handle)) {
+        std::lock_guard<std::mutex> guard(ctx->mutex);
+        const auto cloud = ctx->engine.pointCloud();
+        ctx->renderer.render(cloud.get(), ctx->revision);
+    }
 }
 
-extern "C" JNIEXPORT void JNICALL
-Java_com_jmengine_sdk_JMEngineNative_nativeGlFit(JNIEnv*, jclass, jlong handle) {
-    if(auto* ctx=context(handle)) { std::lock_guard<std::mutex> guard(ctx->mutex); ctx->renderer.fitNextFrame(); }
+extern "C" JNIEXPORT void JNICALL ava_com_jmengine_sdk_JMEngineNative_nativeGlOrbit(JNIEnv*, jclass, jlong handle,
+                                                                                     jfloat dx, jfloat dy) {
+    if (auto* ctx = context(handle)) {
+        std::lock_guard<std::mutex> guard(ctx->mutex);
+        ctx->renderer.orbit(dx, dy);
+    }
 }
 
-extern "C" JNIEXPORT jlong JNICALL
-Java_com_jmengine_sdk_JMEngineNative_nativeGlSelectRect(
-        JNIEnv*, jclass, jlong handle, jint x0, jint y0, jint x1, jint y1, jboolean surfaceOnly) {
-    auto* ctx=context(handle); if(!ctx) return 0;
+extern "C" JNIEXPORT void JNICALL ava_com_jmengine_sdk_JMEngineNative_nativeGlZoom(JNIEnv*, jclass, jlong handle,
+                                                                                    jfloat scale) {
+    if (auto* ctx = context(handle)) {
+        std::lock_guard<std::mutex> guard(ctx->mutex);
+        ctx->renderer.zoom(scale);
+    }
+}
+
+extern "C" JNIEXPORT void JNICALL ava_com_jmengine_sdk_JMEngineNative_nativeGlFit(JNIEnv*, jclass, jlong handle) {
+    if (auto* ctx = context(handle)) {
+        std::lock_guard<std::mutex> guard(ctx->mutex);
+        ctx->renderer.fitNextFrame();
+    }
+}
+
+extern "C" JNIEXPORT jlong JNICALL ava_com_jmengine_sdk_JMEngineNative_nativeGlSelectRect(JNIEnv*, jclass,
+                                                                                           jlong handle, jint x0,
+                                                                                           jint y0, jint x1, jint y1,
+                                                                                           jboolean surfaceOnly) {
+    auto* ctx = context(handle);
+    if (!ctx)
+        return 0;
     std::lock_guard<std::mutex> guard(ctx->mutex);
-    const auto cloud=ctx->engine.pointCloud(); if(!cloud) return 0;
-    auto ids=ctx->renderer.selectRectangle(*cloud,x0,y0,x1,y1,surfaceOnly==JNI_TRUE);
+    const auto cloud = ctx->engine.pointCloud();
+    if (!cloud)
+        return 0;
+    auto ids = ctx->renderer.selectRectangle(*cloud, x0, y0, x1, y1, surfaceOnly == JNI_TRUE);
     ctx->engine.select(ids);
     return static_cast<jlong>(ids.size());
 }
 
-extern "C" JNIEXPORT void JNICALL
-Java_com_jmengine_sdk_JMEngineNative_nativeGlClearSelection(JNIEnv*, jclass, jlong handle) {
-    if(auto* ctx=context(handle)) {
+extern "C" JNIEXPORT void JNICALL ava_com_jmengine_sdk_JMEngineNative_nativeGlClearSelection(JNIEnv*, jclass,
+                                                                                              jlong handle) {
+    if (auto* ctx = context(handle)) {
         std::lock_guard<std::mutex> guard(ctx->mutex);
         ctx->engine.clearSelection();
         ctx->renderer.clearSelection();
     }
 }
 
-extern "C" JNIEXPORT jboolean JNICALL
-Java_com_jmengine_sdk_JMEngineNative_nativeGlComputeAvailable(JNIEnv*, jclass, jlong handle) {
-    auto* ctx=context(handle); if(!ctx) return JNI_FALSE;
+extern "C" JNIEXPORT jboolean JNICALL ava_com_jmengine_sdk_JMEngineNative_nativeGlComputeAvailable(JNIEnv*, jclass,
+                                                                                                    jlong handle) {
+    auto* ctx = context(handle);
+    if (!ctx)
+        return JNI_FALSE;
     std::lock_guard<std::mutex> guard(ctx->mutex);
-    return ctx->renderer.gles31Available()?JNI_TRUE:JNI_FALSE;
+    return ctx->renderer.gles31Available() ? JNI_TRUE : JNI_FALSE;
 }
 
-extern "C" JNIEXPORT jstring JNICALL
-Java_com_jmengine_sdk_JMEngineNative_nativeGlStatus(JNIEnv* env, jclass, jlong handle) {
-    auto* ctx=context(handle); if(!ctx) return env->NewStringUTF("invalid handle");
+extern "C" JNIEXPORT jstring JNICALL ava_com_jmengine_sdk_JMEngineNative_nativeGlStatus(JNIEnv* env, jclass,
+                                                                                         jlong handle) {
+    auto* ctx = context(handle);
+    if (!ctx)
+        return env->NewStringUTF("invalid handle");
     std::lock_guard<std::mutex> guard(ctx->mutex);
     return env->NewStringUTF(ctx->renderer.statusText());
 }

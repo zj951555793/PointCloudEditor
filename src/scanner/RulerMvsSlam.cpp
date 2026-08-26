@@ -465,7 +465,7 @@ class RulerMvsBackend final : public ISlam {
   private:
     static constexpr int kDepthScale = 16;
     static constexpr int kRectifyScale = 4;
-    static constexpr int kLivePoseRefreshInterval = 30;
+    static constexpr int kLivePoseRefreshInterval = 120;
     static constexpr std::size_t kMaxRawResultQueue = 4;
 
     static void setError(std::string* error, const std::string& message) {
@@ -1061,6 +1061,7 @@ class RulerMvsBackend final : public ISlam {
     }
 
     void refreshLiveOptimizedPreview() {
+        const auto refreshStart = std::chrono::steady_clock::now();
         if (!fusion_)
             return;
 
@@ -1073,6 +1074,7 @@ class RulerMvsBackend final : public ISlam {
             return;
 
         std::vector<FramePoseUpdate> updates;
+        const auto getResultsStart = std::chrono::steady_clock::now();
         {
             std::lock_guard<std::mutex> resultsLock(fusionResultsMutex_);
             fusion_->getResults([this, &updates](const rgbdslam::IRGBDResult& result) {
@@ -1096,9 +1098,27 @@ class RulerMvsBackend final : public ISlam {
                 updates.push_back(std::move(framePose));
             });
         }
+        const auto getResultsEnd = std::chrono::steady_clock::now();
 
-        if (!updates.empty())
+        const std::size_t updateCount = updates.size();
+        const auto callbackStart = std::chrono::steady_clock::now();
+        if (!updates.empty()) {
             callback(std::move(updates));
+        }
+        const auto callbackEnd = std::chrono::steady_clock::now();
+
+        const auto refreshEnd = std::chrono::steady_clock::now();
+        const double getResultsMs = std::chrono::duration<double, std::milli>(
+            getResultsEnd - getResultsStart).count();
+        const double callbackMs = std::chrono::duration<double, std::milli>(
+            callbackEnd - callbackStart).count();
+        const double totalMs = std::chrono::duration<double, std::milli>(
+            refreshEnd - refreshStart).count();
+        std::cout << "[SLAM LIVE OPT] refreshLiveOptimizedPreview"
+                  << " getResults=" << getResultsMs << "ms"
+                  << " callback=" << callbackMs << "ms"
+                  << " total=" << totalMs << "ms"
+                  << " updates=" << updateCount << std::endl;
     }
 
     void saveOptimizedProjectPoses() {

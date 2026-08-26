@@ -19,25 +19,26 @@
  *  limitations under the License.
  *
  * All files in the folder are under this Apache License, Version 2.0.
- * Files in the jni/libjpeg, jni/libusb, jin/libuvc, jni/rapidjson folder may have a different license, see the respective files.
-*/
+ * Files in the jni/libjpeg, jni/libusb, jin/libuvc, jni/rapidjson folder may have a different license, see the
+ * respective files.
+ /
 
 #include "utilbase.h"
 
-static JavaVM *savedVm;
+static JavaVM* savedVm;
 
-void setVM(JavaVM *vm) {
-	savedVm = vm;
+void setVM(JavaVM* vm) {
+    savedVm = vm;
 }
 
-JavaVM *getVM() {
-	return savedVm;
+JavaVM* getVM() {
+    return savedVm;
 }
 
-JNIEnv *getEnv() {
-    JNIEnv *env = NULL;
-    if (savedVm->GetEnv(reinterpret_cast<void **>(&env), JNI_VERSION_1_6) != JNI_OK) {
-    	env = NULL;
+JNIEnv* getEnv() {
+    JNIEnv* env = NULL;
+    if (savedVm->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_6) != JNI_OK) {
+        env = NULL;
     }
     return env;
 }

@@ -72,56 +72,50 @@ extern "C" {
  * Method:    bufSize
  * Signature: (III)I
  */
-JNIEXPORT jint JNICALL Java_org_libjpegturbo_turbojpeg_TJ_bufSize
-  (JNIEnv *, jclass, jint, jint, jint);
+JNIEXPORT jint JNICALL Java_org_libjpegturbo_turbojpeg_TJ_bufSize(JNIEnv*, jclass, jint, jint, jint);
 
 /*
  * Class:     org_libjpegturbo_turbojpeg_TJ
  * Method:    bufSizeYUV
  * Signature: (IIII)I
  */
-JNIEXPORT jint JNICALL Java_org_libjpegturbo_turbojpeg_TJ_bufSizeYUV__IIII
-  (JNIEnv *, jclass, jint, jint, jint, jint);
+JNIEXPORT jint JNICALL Java_org_libjpegturbo_turbojpeg_TJ_bufSizeYUV__IIII(JNIEnv*, jclass, jint, jint, jint, jint);
 
 /*
  * Class:     org_libjpegturbo_turbojpeg_TJ
  * Method:    bufSizeYUV
  * Signature: (III)I
  */
-JNIEXPORT jint JNICALL Java_org_libjpegturbo_turbojpeg_TJ_bufSizeYUV__III
-  (JNIEnv *, jclass, jint, jint, jint);
+JNIEXPORT jint JNICALL Java_org_libjpegturbo_turbojpeg_TJ_bufSizeYUV__III(JNIEnv*, jclass, jint, jint, jint);
 
 /*
  * Class:     org_libjpegturbo_turbojpeg_TJ
  * Method:    planeSizeYUV
  * Signature: (IIIII)I
  */
-JNIEXPORT jint JNICALL Java_org_libjpegturbo_turbojpeg_TJ_planeSizeYUV__IIIII
-  (JNIEnv *, jclass, jint, jint, jint, jint, jint);
+JNIEXPORT jint JNICALL Java_org_libjpegturbo_turbojpeg_TJ_planeSizeYUV__IIIII(JNIEnv*, jclass, jint, jint, jint, jint,
+                                                                              jint);
 
 /*
  * Class:     org_libjpegturbo_turbojpeg_TJ
  * Method:    planeWidth
  * Signature: (III)I
  */
-JNIEXPORT jint JNICALL Java_org_libjpegturbo_turbojpeg_TJ_planeWidth__III
-  (JNIEnv *, jclass, jint, jint, jint);
+JNIEXPORT jint JNICALL Java_org_libjpegturbo_turbojpeg_TJ_planeWidth__III(JNIEnv*, jclass, jint, jint, jint);
 
 /*
  * Class:     org_libjpegturbo_turbojpeg_TJ
  * Method:    planeHeight
  * Signature: (III)I
  */
-JNIEXPORT jint JNICALL Java_org_libjpegturbo_turbojpeg_TJ_planeHeight__III
-  (JNIEnv *, jclass, jint, jint, jint);
+JNIEXPORT jint JNICALL Java_org_libjpegturbo_turbojpeg_TJ_planeHeight__III(JNIEnv*, jclass, jint, jint, jint);
 
 /*
  * Class:     org_libjpegturbo_turbojpeg_TJ
  * Method:    getScalingFactors
  * Signature: ()[Lorg/libjpegturbo/turbojpeg/TJScalingFactor;
  */
-JNIEXPORT jobjectArray JNICALL Java_org_libjpegturbo_turbojpeg_TJ_getScalingFactors
-  (JNIEnv *, jclass);
+JNIEXPORT jobjectArray JNICALL Java_org_libjpegturbo_turbojpeg_TJ_getScalingFactors(JNIEnv*, jclass);
 
 #ifdef __cplusplus
 }

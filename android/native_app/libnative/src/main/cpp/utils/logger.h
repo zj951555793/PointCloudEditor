@@ -1,5 +1,5 @@
 /**
- * 
+ *
  *
  * @author Created by jiangdg on 2022/2/18
  */
@@ -22,4 +22,4 @@ extern "C" {
 #ifdef __cplusplus
 };
 #endif
-#endif //ANDROIDUSBCAMERA_LOGGER_H
+#endif // ANDROIDUSBCAMERA_LOGGER_H

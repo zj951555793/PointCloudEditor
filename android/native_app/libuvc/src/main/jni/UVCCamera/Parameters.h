@@ -19,8 +19,9 @@
  *  limitations under the License.
  *
  * All files in the folder are under this Apache License, Version 2.0.
- * Files in the jni/libjpeg, jni/libusb, jin/libuvc, jni/rapidjson folder may have a different license, see the respective files.
-*/
+ * Files in the jni/libjpeg, jni/libusb, jin/libuvc, jni/rapidjson folder may have a different license, see the
+ * respective files.
+ /
 #ifndef PARAMETERS_H_
 #define PARAMETERS_H_
 
@@ -29,13 +30,13 @@
 #include "libUVCCamera.h"
 
 class UVCDiags {
-private:
-public:
-	UVCDiags();
-	~UVCDiags();
-	char *getDescriptions(const uvc_device_handle_t *deviceHandle);
-	char *getCurrentStream(const uvc_stream_ctrl_t *ctrl);
-	char *getSupportedSize(const uvc_device_handle_t *deviceHandle);
+  rivate:
+  ublic:
+    UVCDiags();
+    ~UVCDiags();
+    char* getDescriptions(const uvc_device_handle_t* deviceHandle);
+    char* getCurrentStream(const uvc_stream_ctrl_t* ctrl);
+    char* getSupportedSize(const uvc_device_handle_t* deviceHandle);
 };
 
 #endif /* PARAMETERS_H_ */

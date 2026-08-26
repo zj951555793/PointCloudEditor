@@ -12,17 +12,17 @@
 /* Private state */
 
 typedef struct {
-  struct jpeg_decomp_master pub; /* public fields */
+    struct jpeg_decomp_master pub; /* public fields */
 
-  int pass_number;              /* # of passes completed */
+    int pass_number; /* # of passes completed */
 
-  boolean using_merged_upsample; /* TRUE if using merged upsample/cconvert */
+    boolean using_merged_upsample; /* TRUE if using merged upsample/cconvert */
 
-  /* Saved references to initialized quantizer modules,
-   * in case we need to switch modes.
-   */
-  struct jpeg_color_quantizer *quantizer_1pass;
-  struct jpeg_color_quantizer *quantizer_2pass;
+    /* Saved references to initialized quantizer modules,
+     * in case we need to switch modes.
+     */
+    struct jpeg_color_quantizer* quantizer_1pass;
+    struct jpeg_color_quantizer* quantizer_2pass;
 } my_decomp_master;
 
-typedef my_decomp_master *my_master_ptr;
+typedef my_decomp_master* my_master_ptr;

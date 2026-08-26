@@ -38,6 +38,7 @@
 #include <vector>
 #include <unordered_map>
 
+class QContextMenuEvent;
 class QEvent;
 class QKeyEvent;
 class QMouseEvent;
@@ -199,6 +200,7 @@ class PointCloudWidget final : public QOpenGLWidget, protected QOpenGLExtraFunct
     void mousePressEvent(QMouseEvent* event) override;
     void mouseMoveEvent(QMouseEvent* event) override;
     void mouseReleaseEvent(QMouseEvent* event) override;
+    void contextMenuEvent(QContextMenuEvent* event) override;
     void wheelEvent(QWheelEvent* event) override;
     void keyPressEvent(QKeyEvent* event) override;
 
@@ -422,6 +424,8 @@ class PointCloudWidget final : public QOpenGLWidget, protected QOpenGLExtraFunct
         float offset{0.0f};           // 沿 normal 的交互偏移
         float visualRadius{1.0f};
         QPoint dragLast{};
+        QPointF dragScreenDir{0.0, -1.0}; // +normal 在按下瞬间的屏幕方向（单位向量，像素 Y 向下）
+        float dragWorldPerPixel{0.0f};     // 沿 dragScreenDir 每像素对应的模型局部 offset
     } basePlane_;
 
     int activeModelIndex_{-1};
@@ -440,7 +444,7 @@ class PointCloudWidget final : public QOpenGLWidget, protected QOpenGLExtraFunct
     int pickWidth_{0};
     int pickHeight_{0};
 
-    InteractionMode interactionMode_{InteractionMode::Rectangle};
+    InteractionMode interactionMode_{InteractionMode::Lasso};
     SelectionDepthMode selectionDepthMode_{SelectionDepthMode::Surface};
     PickingMode pickingMode_{PickingMode::Gpu};
     bool touchEditMode_{false};
@@ -467,6 +471,8 @@ class PointCloudWidget final : public QOpenGLWidget, protected QOpenGLExtraFunct
     // 浏览手势状态。
     bool viewDragging_{false};
     QPoint lastViewPos_;
+    QPoint rightPressPos_;
+    bool rightDragMoved_{false};
     Qt::MouseButton viewButton_{Qt::NoButton};
 
     // 双指触摸状态：同时完成平移和 pinch 缩放。

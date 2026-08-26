@@ -7,6 +7,7 @@
 #include <JMEngine/ModelIO.h>
 #include <JMEngine/processing/Parallel.h>
 
+#include <QContextMenuEvent>
 #include <QDebug>
 #include <QDir>
 #include <QEvent>
@@ -23,6 +24,7 @@
 #include <QVector4D>
 #include <QKeyEvent>
 #include <QMetaObject>
+#include <QMenu>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPointer>
@@ -3083,37 +3085,202 @@ void PointCloudWidget::updateOrbitPivotForActiveModel() {
 }
 
 void PointCloudWidget::centerScanOrbitPivot() {
+    // 扫描过程中观察相机会刚性跟随扫描相机，distance 通常只有 sceneRadius 的约 0.3 倍。
+    // 扫描结束后如果只把 target 拉回模型中心、却保留这个 chase-view distance，模型就会
+    // 突然被放得非常大。这里按最终模型包围盒重新计算一个完整可见的观察距离，同时保留
+    // 用户/扫描结束时的观察方向，避免结束瞬间既放大又跳回固定正视角。
     updateOrbitPivotForActiveModel();
+    const float radius = std::max(camera_.sceneRadius, 1.0e-4f);
+    camera_.distance = std::max(radius / std::tan(camera_.fovYRadians * 0.5f) * 1.25f,
+                                radius * 1.5f);
+    camera_.panNdcX = 0.0f;
+    camera_.panNdcY = 0.0f;
     update();
 }
 
 bool PointCloudWidget::fitBasePlaneFromSelection(QString* message) {
-    auto* m=activeModel();
-    if(!m || !m->cloud){if(message)*message=QString::fromUtf8("没有激活模型");return false;}
-    std::vector<JMEngine::Vec3f> pts;
-    if(m->meshMode && m->mesh && !m->selectedTriangleIds.empty()){
-        std::unordered_set<std::uint32_t> ids;
-        const auto& idx=m->mesh->indices();
-        for(auto tid:m->selectedTriangleIds){const std::size_t b=std::size_t(tid)*3u;if(b+2>=idx.size()||!m->mesh->triangleActive(tid))continue;ids.insert(idx[b]);ids.insert(idx[b+1]);ids.insert(idx[b+2]);}
-        pts.reserve(ids.size());
-        for(auto id:ids) if(id<m->cloud->size() && !(m->cloud->points()[id].flags&JMEngine::PointDeleted)) pts.push_back(m->cloud->points()[id].position);
-    } else {
-        pts.reserve(m->selectedIds.size());
-        for(auto id:m->selectedIds) if(id<m->cloud->size() && !(m->cloud->points()[id].flags&JMEngine::PointDeleted)) pts.push_back(m->cloud->points()[id].position);
+    auto* m = activeModel();
+    if (!m || !m->cloud) {
+        if (message) *message = QString::fromUtf8("没有激活模型");
+        return false;
     }
-    if(pts.size()<3){if(message)*message=QString::fromUtf8("请先框选/套索选择一块基底平面（至少 3 个点或三角形）");return false;}
-    JMEngine::Vec3f c,n;
-    if(!fitPlanePca(pts,c,n)){if(message)*message=QString::fromUtf8("平面拟合失败");return false;}
-    // 将法向指向模型主体一侧：模型中心在平面哪一侧，就把那一侧定义为“保留侧”。
-    JMEngine::Vec3f modelCenter=c; bool bv=false; JMEngine::Vec3f mn{},mx{};
-    for(const auto&p:m->cloud->points()) if(!(p.flags&JMEngine::PointDeleted)) {if(!bv){mn=mx=p.position;bv=true;}else{mn.x=std::min(mn.x,p.position.x);mn.y=std::min(mn.y,p.position.y);mn.z=std::min(mn.z,p.position.z);mx.x=std::max(mx.x,p.position.x);mx.y=std::max(mx.y,p.position.y);mx.z=std::max(mx.z,p.position.z);}}
-    if(bv) modelCenter={(mn.x+mx.x)*.5f,(mn.y+mx.y)*.5f,(mn.z+mx.z)*.5f};
-    if(dot3(n,sub3(modelCenter,c))<0.0f)n=mul3(n,-1.0f);
-    float radius=0.0f;for(const auto&p:pts){const auto q=sub3(p,c);const auto tang=sub3(q,mul3(n,dot3(q,n)));radius=std::max(radius,std::sqrt(dot3(tang,tang)));}
-    basePlane_.active=true;basePlane_.dragging=false;basePlane_.point=c;basePlane_.normal=n;basePlane_.offset=0.0f;basePlane_.visualRadius=std::max(radius*1.25f,camera_.sceneRadius*.08f);
-    statusText_=QString::fromUtf8("基底平面已拟合：拖动平面中心圆点可沿法向上下微调；应用后删除平面以下内容");
-    if(message)*message=statusText_;
-    update();return true;
+
+    std::vector<JMEngine::Vec3f> pts;
+    std::unordered_set<std::uint32_t> selectedPointIds;
+    if (m->meshMode && m->mesh && !m->selectedTriangleIds.empty()) {
+        const auto& idx = m->mesh->indices();
+        for (auto tid : m->selectedTriangleIds) {
+            const std::size_t b = std::size_t(tid) * 3u;
+            if (b + 2 >= idx.size() || !m->mesh->triangleActive(tid))
+                continue;
+            selectedPointIds.insert(idx[b]);
+            selectedPointIds.insert(idx[b + 1]);
+            selectedPointIds.insert(idx[b + 2]);
+        }
+        pts.reserve(selectedPointIds.size());
+        for (auto id : selectedPointIds) {
+            if (id < m->cloud->size() && !(m->cloud->points()[id].flags & JMEngine::PointDeleted))
+                pts.push_back(m->cloud->points()[id].position);
+        }
+    } else {
+        selectedPointIds.reserve(m->selectedIds.size());
+        pts.reserve(m->selectedIds.size());
+        for (auto id : m->selectedIds) {
+            if (id >= m->cloud->size() || (m->cloud->points()[id].flags & JMEngine::PointDeleted))
+                continue;
+            selectedPointIds.insert(static_cast<std::uint32_t>(id));
+            pts.push_back(m->cloud->points()[id].position);
+        }
+    }
+
+    if (pts.size() < 3) {
+        if (message) *message = QString::fromUtf8("请先框选/套索选择一块基底平面（至少 3 个点或三角形）");
+        return false;
+    }
+
+    JMEngine::Vec3f c, n;
+    if (!fitPlanePca(pts, c, n)) {
+        if (message) *message = QString::fromUtf8("平面拟合失败");
+        return false;
+    }
+
+    // PCA 平面法向天然有 ± 两个等价解，旧实现用整个模型 AABB 中心决定正负。
+    // 对非对称模型、长尾噪点、模型中心恰好落在基底附近时，AABB 中心会落到错误一侧，
+    // 于是“删除平面以下”偶尔会反过来删除主体。
+    //
+    // 新策略：优先使用“未被选中的模型主体”做稳健判定。基底选择本身从统计中排除，
+    // 再使用 signed-distance 的中位数确定主体所在侧；中位数不明显时，用四分位距离与
+    // 两侧有效点数量兜底。最多采样约 5 万点，百万级扫描模型也不会让 UI 卡住。
+    auto collectSignedDistances = [&](bool skipSelected) {
+        std::vector<float> distances;
+        constexpr std::size_t maxSamples = 50000u;
+
+        // 网格编辑模式只让“当前仍有效的网格顶点”参与主体侧判断。
+        // 原先直接遍历整份 cloud，历史点、未被任何有效三角形引用的点或离群点
+        // 都可能把 PCA 法向的正负带反，表现为同一个基底偶尔删错一侧。
+        if (m->meshMode && m->mesh) {
+            const auto& idx = m->mesh->indices();
+            std::vector<std::uint32_t> activeVertexIds;
+            activeVertexIds.reserve(std::min<std::size_t>(m->cloud->size(), m->mesh->activeTriangleCount() * 2u));
+            for (std::size_t i = 0; i + 2 < idx.size(); i += 3) {
+                const auto tid = static_cast<JMEngine::TriangleId>(i / 3u);
+                if (!m->mesh->triangleActive(tid))
+                    continue;
+                activeVertexIds.push_back(idx[i]);
+                activeVertexIds.push_back(idx[i + 1]);
+                activeVertexIds.push_back(idx[i + 2]);
+            }
+            std::sort(activeVertexIds.begin(), activeVertexIds.end());
+            activeVertexIds.erase(std::unique(activeVertexIds.begin(), activeVertexIds.end()), activeVertexIds.end());
+            const std::size_t stride = std::max<std::size_t>(1u, activeVertexIds.size() / maxSamples);
+            distances.reserve(std::min(activeVertexIds.size(), maxSamples) + 1u);
+            for (std::size_t k = 0; k < activeVertexIds.size(); k += stride) {
+                const auto id = activeVertexIds[k];
+                if (id >= m->cloud->size())
+                    continue;
+                const auto& p = m->cloud->points()[id];
+                if (p.flags & JMEngine::PointDeleted)
+                    continue;
+                if (skipSelected && selectedPointIds.find(id) != selectedPointIds.end())
+                    continue;
+                const float d = dot3(sub3(p.position, c), n);
+                if (std::isfinite(d))
+                    distances.push_back(d);
+            }
+            return distances;
+        }
+
+        const std::size_t total = m->cloud->size();
+        const std::size_t stride = std::max<std::size_t>(1u, total / maxSamples);
+        distances.reserve(std::min(total, maxSamples) + 1u);
+        for (std::size_t i = 0; i < total; i += stride) {
+            const auto& p = m->cloud->points()[i];
+            if (p.flags & JMEngine::PointDeleted)
+                continue;
+            if (skipSelected && selectedPointIds.find(static_cast<std::uint32_t>(i)) != selectedPointIds.end())
+                continue;
+            const float d = dot3(sub3(p.position, c), n);
+            if (std::isfinite(d))
+                distances.push_back(d);
+        }
+        return distances;
+    };
+
+    std::vector<float> distances = collectSignedDistances(true);
+    if (distances.size() < 16u)
+        distances = collectSignedDistances(false);
+
+    if (!distances.empty()) {
+        std::sort(distances.begin(), distances.end());
+        auto quantile = [&](float q) {
+            const std::size_t i = std::min(distances.size() - 1u,
+                                           static_cast<std::size_t>(q * float(distances.size() - 1u)));
+            return distances[i];
+        };
+
+        // 拟合残差给出“仍属于基底平面”的厚度，避免平面噪声左右摇摆法向判定。
+        double residualSum = 0.0;
+        for (const auto& p : pts) {
+            const double d = double(dot3(sub3(p, c), n));
+            residualSum += d * d;
+        }
+        const float rms = std::sqrt(float(residualSum / double(std::max<std::size_t>(1u, pts.size()))));
+        const float tol = std::max({1.0e-6f, rms * 3.0f, std::max(camera_.sceneRadius, 1.0f) * 1.0e-5f});
+
+        const float median = quantile(0.50f);
+        bool flip = false;
+        if (median < -tol) {
+            flip = true;
+        } else if (std::fabs(median) <= tol) {
+            // 大面积基底本身可能占绝大多数点，此时中位数会停在 0 附近。
+            // 用 5%/95% 稳健分位比较两侧真实几何延伸，既能看到占比较小的主体，
+            // 又不会被极少数离群点像 min/max 那样轻易带偏。
+            const float q05 = quantile(0.05f);
+            const float q95 = quantile(0.95f);
+            const float positiveExtent = std::max(0.0f, q95 - tol);
+            const float negativeExtent = std::max(0.0f, -q05 - tol);
+            if (negativeExtent > positiveExtent * 1.10f + tol) {
+                flip = true;
+            } else if (positiveExtent <= negativeExtent * 1.10f + tol) {
+                std::size_t positiveCount = 0, negativeCount = 0;
+                double positiveScore = 0.0, negativeScore = 0.0;
+                const float cap = std::max({positiveExtent, negativeExtent, tol});
+                for (const float d : distances) {
+                    if (d > tol) {
+                        ++positiveCount;
+                        positiveScore += std::min(d - tol, cap);
+                    } else if (d < -tol) {
+                        ++negativeCount;
+                        negativeScore += std::min(-d - tol, cap);
+                    }
+                }
+                if (negativeScore > positiveScore * 1.05)
+                    flip = true;
+                else if (std::fabs(negativeScore - positiveScore) <= std::max(1.0, positiveScore * 0.05))
+                    flip = negativeCount > positiveCount;
+            }
+        }
+        if (flip)
+            n = mul3(n, -1.0f);
+    }
+
+    float radius = 0.0f;
+    for (const auto& p : pts) {
+        const auto q = sub3(p, c);
+        const auto tang = sub3(q, mul3(n, dot3(q, n)));
+        radius = std::max(radius, std::sqrt(dot3(tang, tang)));
+    }
+
+    basePlane_.active = true;
+    basePlane_.dragging = false;
+    basePlane_.point = c;
+    basePlane_.normal = n; // 始终指向模型主体/保留侧
+    basePlane_.offset = 0.0f;
+    basePlane_.visualRadius = std::max(radius * 1.25f, camera_.sceneRadius * .08f);
+    statusText_ = QString::fromUtf8("基底平面已拟合：拖动中心圆点沿屏幕中的法向方向微调；应用后删除主体反侧内容");
+    if (message) *message = statusText_;
+    update();
+    return true;
 }
 
 bool PointCloudWidget::applyBasePlaneCut(QString* message) {
@@ -3609,7 +3776,38 @@ void PointCloudWidget::mousePressEvent(QMouseEvent* event) {
             if(projectPointToScreen(p0,modelMvp(*m),width(),height(),x,y,d)) {
                 const QPointF q=event->position();
                 if(QLineF(q,QPointF(x,y)).length()<=24.0) {
-                    basePlane_.dragging=true; basePlane_.dragLast=q.toPoint(); setCursor(Qt::SizeVerCursor); return;
+                    basePlane_.dragging = true;
+                    basePlane_.dragLast = q.toPoint();
+
+                    // 在“按下”的瞬间锁定 +normal 的屏幕投影方向和像素->offset 比例。
+                    // 拖动过程中不再反复重算方向，避免数值接近退化角度时一帧朝上、
+                    // 下一帧朝下，从而出现用户看到的“拖着拖着上下反过来”。
+                    const float probe = std::max({basePlane_.visualRadius * 0.25f,
+                                                  camera_.sceneRadius * 0.02f,
+                                                  1.0e-4f});
+                    const auto p1 = add3(p0, mul3(basePlane_.normal, probe));
+                    float x1 = 0.0f, y1 = 0.0f, d1 = 0.0f;
+                    if (projectPointToScreen(p1, modelMvp(*m), width(), height(), x1, y1, d1)) {
+                        const float sx = x1 - x;
+                        const float sy = y1 - y;
+                        const float screenLen = std::sqrt(sx * sx + sy * sy);
+                        if (screenLen > 0.25f) {
+                            basePlane_.dragScreenDir = QPointF(sx / screenLen, sy / screenLen);
+                            basePlane_.dragWorldPerPixel = probe / screenLen;
+                        } else {
+                            basePlane_.dragScreenDir = QPointF(0.0, -1.0);
+                            basePlane_.dragWorldPerPixel =
+                                2.0f * camera_.distance * std::tan(camera_.fovYRadians * 0.5f) /
+                                float(std::max(1, height()));
+                        }
+                    } else {
+                        basePlane_.dragScreenDir = QPointF(0.0, -1.0);
+                        basePlane_.dragWorldPerPixel =
+                            2.0f * camera_.distance * std::tan(camera_.fovYRadians * 0.5f) /
+                            float(std::max(1, height()));
+                    }
+                    setCursor(Qt::SizeAllCursor);
+                    return;
                 }
             }
         }
@@ -3645,14 +3843,26 @@ void PointCloudWidget::mousePressEvent(QMouseEvent* event) {
     viewDragging_ = true;
     viewButton_ = event->button();
     lastViewPos_ = event->position().toPoint();
+    if (event->button() == Qt::RightButton) {
+        rightPressPos_ = lastViewPos_;
+        rightDragMoved_ = false;
+    }
 }
 
 void PointCloudWidget::mouseMoveEvent(QMouseEvent* event) {
-    if(basePlane_.dragging){
-        const QPoint p=event->position().toPoint(); const int dy=p.y()-basePlane_.dragLast.y(); basePlane_.dragLast=p;
-        const float worldPerPixel=2.0f*camera_.distance*std::tan(camera_.fovYRadians*0.5f)/float(std::max(1,height()));
-        basePlane_.offset += -float(dy)*worldPerPixel;
-        statusText_=QString::fromUtf8("基底平面偏移：%1（模型单位）").arg(basePlane_.offset,0,'f',4); update(); return;
+    if (basePlane_.dragging) {
+        const QPoint p = event->position().toPoint();
+        const QPoint delta = p - basePlane_.dragLast;
+        basePlane_.dragLast = p;
+
+        const QPointF dir = basePlane_.dragScreenDir;
+        const float alongPixels = float(delta.x()) * float(dir.x()) +
+                                  float(delta.y()) * float(dir.y());
+        basePlane_.offset += alongPixels * std::max(basePlane_.dragWorldPerPixel, 0.0f);
+
+        statusText_ = QString::fromUtf8("基底平面偏移：%1（模型单位）").arg(basePlane_.offset, 0, 'f', 4);
+        update();
+        return;
     }
     if (editGestureActive_) {
         updateEditGesture(event->position().toPoint());
@@ -3672,6 +3882,8 @@ void PointCloudWidget::mouseMoveEvent(QMouseEvent* event) {
     const QPoint current = event->position().toPoint();
     const QPoint delta = current - lastViewPos_;
     lastViewPos_ = current;
+    if (viewButton_ == Qt::RightButton && (current - rightPressPos_).manhattanLength() > 6)
+        rightDragMoved_ = true;
     if (viewButton_ == Qt::LeftButton) {
         camera_.orbit(static_cast<float>(delta.x()), static_cast<float>(delta.y()), width(), height());
     } else {
@@ -3694,6 +3906,37 @@ void PointCloudWidget::mouseReleaseEvent(QMouseEvent* event) {
     viewDragging_ = false;
     viewButton_ = Qt::NoButton;
 }
+void PointCloudWidget::contextMenuEvent(QContextMenuEvent* event) {
+    // 右键仍兼作视图平移。真正拖动过时不要在松手后又弹菜单；纯右键点击才显示。
+    if (event->reason() == QContextMenuEvent::Mouse && rightDragMoved_) {
+        rightDragMoved_ = false;
+        event->ignore();
+        return;
+    }
+    rightDragMoved_ = false;
+
+    QMenu menu(this);
+    auto* clear = menu.addAction(QString::fromUtf8("取消选择"));
+    auto* base = menu.addAction(QString::fromUtf8("基底选择工具"));
+
+    const auto* m = activeModel();
+    const bool hasSelection = m && (!m->selectedIds.empty() || !m->selectedTriangleIds.empty());
+    clear->setEnabled(hasSelection);
+    base->setEnabled(hasSelection);
+
+    QAction* chosen = menu.exec(event->globalPos());
+    if (chosen == clear) {
+        clearSelection();
+    } else if (chosen == base) {
+        QString message;
+        if (!fitBasePlaneFromSelection(&message)) {
+            statusText_ = message;
+            update();
+        }
+    }
+    event->accept();
+}
+
 void PointCloudWidget::wheelEvent(QWheelEvent* e) {
     camera_.zoom(float(e->angleDelta().y()) / 120.0f);
     update();

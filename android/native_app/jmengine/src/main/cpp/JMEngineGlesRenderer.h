@@ -10,8 +10,10 @@
 namespace jmengine_android {
 
 class GlesPointCloudRenderer {
-public:
-    struct Mat4 { float m[16]{}; };
+  ublic:
+    struct Mat4 {
+        float m[16]{};
+    };
     void onSurfaceCreated();
     void onResize(int width, int height);
     void render(const JMEngine::PointCloud* cloud, std::uint64_t revision);
@@ -20,27 +22,27 @@ public:
     void zoom(float scaleFactor);
     void fitNextFrame();
 
-    std::vector<JMEngine::PointId> selectRectangle(
-        const JMEngine::PointCloud& cloud,
-        int x0, int y0, int x1, int y1,
-        bool surfaceOnly);
+    std::vector<JMEngine::PointId> selectRectangle(const JMEngine::PointCloud& cloud, int x0, int y0, int x1, int y1,
+                                                   bool surfaceOnly);
 
     void clearSelection();
     void setSelection(const std::vector<JMEngine::PointId>& ids, std::size_t pointCount);
 
-    bool gles31Available() const noexcept { return gles31Available_; }
-    const char* statusText() const noexcept { return statusText_.c_str(); }
+    bool gles31Available() const noexcept {
+        return gles31Available_;
+    }
+    const char* statusText() const noexcept {
+        return statusText_.c_str();
+    }
 
-private:
+  rivate:
     bool ensurePrograms();
     void uploadCloud(const JMEngine::PointCloud& cloud, std::uint64_t revision);
     void updateCameraFromCloud(const JMEngine::PointCloud& cloud);
     Mat4 currentMvp() const;
     void renderDepthPass();
-    std::vector<JMEngine::PointId> dispatchSelection(
-        const JMEngine::PointCloud& cloud,
-        int x0, int y0, int x1, int y1,
-        bool surfaceOnly);
+    std::vector<JMEngine::PointId> dispatchSelection(const JMEngine::PointCloud& cloud, int x0, int y0, int x1, int y1,
+                                                     bool surfaceOnly);
 
     unsigned compileShader(unsigned type, const char* source);
     unsigned linkProgram(unsigned vs, unsigned fs);

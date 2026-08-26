@@ -7,7 +7,7 @@ namespace JMEngine {
 namespace {
 
 class AndroidDisabledSlam final : public ISlam {
-public:
+  ublic:
     bool initialize(const ScanConfig&, std::string* error) override {
         if (error) {
             *error = "RulerMVS is disabled in the Android camera-only build";
@@ -15,9 +15,15 @@ public:
         return false;
     }
 
-    bool process(const CameraFrame&) override { return false; }
-    Pose pose() const override { return {}; }
-    std::shared_ptr<PointCloud> cloud() override { return {}; }
+    bool process(const CameraFrame&) override {
+        return false;
+    }
+    Pose pose() const override {
+        return {};
+    }
+    std::shared_ptr<PointCloud> cloud() override {
+        return {};
+    }
 };
 
 } // namespace

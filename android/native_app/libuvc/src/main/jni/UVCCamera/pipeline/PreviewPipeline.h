@@ -11,15 +11,16 @@
 #include "CaptureBasePipeline.h"
 
 class PreviewPipeline : virtual public CaptureBasePipeline {
-private:
-	ANativeWindow *mCaptureWindow;
-protected:
-	virtual void do_capture(JNIEnv *env);
-public:
-	PreviewPipeline(const size_t &_data_bytes = DEFAULT_FRAME_SZ);
-	virtual ~PreviewPipeline();
-	int setCaptureDisplay(ANativeWindow *capture_window);
+  rivate:
+    ANativeWindow* mCaptureWindow;
+
+  rotected:
+    virtual void do_capture(JNIEnv* env);
+
+  ublic:
+    PreviewPipeline(const size_t& _data_bytes = DEFAULT_FRAME_SZ);
+    virtual ~PreviewPipeline();
+    int setCaptureDisplay(ANativeWindow* capture_window);
 };
 
-
-#endif //PUPILMOBILE_PREVIEWPIPELINE_H
+endif // PUPILMOBILE_PREVIEWPIPELINE_H

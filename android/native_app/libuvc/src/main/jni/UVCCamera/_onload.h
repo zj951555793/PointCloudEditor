@@ -19,8 +19,9 @@
  *  limitations under the License.
  *
  * All files in the folder are under this Apache License, Version 2.0.
- * Files in the jni/libjpeg, jni/libusb, jin/libuvc, jni/rapidjson folder may have a different license, see the respective files.
-*/
+ * Files in the jni/libjpeg, jni/libusb, jin/libuvc, jni/rapidjson folder may have a different license, see the
+ * respective files.
+ /
 
 #ifndef ONLOAD_H_
 #define ONLOAD_H_
@@ -33,7 +34,7 @@
 extern "C" {
 #endif
 
-jint JNI_OnLoad(JavaVM *vm, void *reserved);
+jint JNI_OnLoad(JavaVM* vm, void* reserved);
 
 #ifdef __cplusplus
 }

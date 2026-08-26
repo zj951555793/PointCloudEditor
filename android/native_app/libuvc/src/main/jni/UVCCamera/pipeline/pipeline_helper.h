@@ -9,6 +9,6 @@
 
 #include "IPipeline.h"
 
-IPipeline *getPipeline(JNIEnv *env, jobject pipeline_obj);
+IPipeline* getPipeline(JNIEnv* env, jobject pipeline_obj);
 
-#endif //PUPILMOBILE_PIPELINE_HELPER_H_H
+#endif // PUPILMOBILE_PIPELINE_HELPER_H_H

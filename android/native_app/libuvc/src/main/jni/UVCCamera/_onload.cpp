@@ -19,28 +19,29 @@
  *  limitations under the License.
  *
  * All files in the folder are under this Apache License, Version 2.0.
- * Files in the jni/libjpeg, jni/libusb, jin/libuvc, jni/rapidjson folder may have a different license, see the respective files.
-*/
+ * Files in the jni/libjpeg, jni/libusb, jin/libuvc, jni/rapidjson folder may have a different license, see the
+ * respective files.
+ /
 
 #include "_onload.h"
 #include "utilbase.h"
 
 #define LOCAL_DEBUG 0
 
-extern int register_uvccamera(JNIEnv *env);
+extern int register_uvccamera(JNIEnv* env);
 
-jint JNI_OnLoad(JavaVM *vm, void *reserved) {
+jint JNI_OnLoad(JavaVM* vm, void* reserved) {
 #if LOCAL_DEBUG
     LOGD("JNI_OnLoad");
 #endif
 
-    JNIEnv *env;
-    if (vm->GetEnv(reinterpret_cast<void **>(&env), JNI_VERSION_1_6) != JNI_OK) {
+    JNIEnv* env;
+    if (vm->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_6) != JNI_OK) {
         return JNI_ERR;
     }
     // register native methods
     int result = register_uvccamera(env);
-	setVM(vm);
+    setVM(vm);
 #if LOCAL_DEBUG
     LOGD("JNI_OnLoad:finshed:result=%d", result);
 #endif

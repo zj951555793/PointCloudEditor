@@ -145,309 +145,411 @@ void main() {
 }
 )GLSL";
 
-struct V3 { float x, y, z; };
+struct V3 {
+    float x, y, z;
+};
 
-V3 sub(V3 a, V3 b) { return {a.x-b.x, a.y-b.y, a.z-b.z}; }
-V3 cross(V3 a, V3 b) { return {a.y*b.z-a.z*b.y, a.z*b.x-a.x*b.z, a.x*b.y-a.y*b.x}; }
-float dot(V3 a, V3 b) { return a.x*b.x+a.y*b.y+a.z*b.z; }
+V3 sub(V3 a, V3 b) {
+    return {a.x - b.x, a.y - b.y, a.z - b.z};
+}
+V3 cross(V3 a, V3 b) {
+    return {a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x};
+}
+float dot(V3 a, V3 b) {
+    return a.x * b.x + a.y * b.y + a.z * b.z;
+}
 V3 normalize(V3 v) {
-    const float n = std::sqrt(std::max(1e-20f, dot(v,v)));
-    return {v.x/n,v.y/n,v.z/n};
+    const float n = std::sqrt(std::max(1e-20f, dot(v, v)));
+    return {v.x / n, v.y / n, v.z / n};
 }
 
 GlesPointCloudRenderer::Mat4 identity() {
     GlesPointCloudRenderer::Mat4 r{};
-    r.m[0]=r.m[5]=r.m[10]=r.m[15]=1.0f;
+    r.m[0] = r.m[5] = r.m[10] = r.m[15] = 1.0f;
     return r;
 }
 
-GlesPointCloudRenderer::Mat4 multiply(const GlesPointCloudRenderer::Mat4& a,
-                                      const GlesPointCloudRenderer::Mat4& b) {
+GlesPointCloudRenderer::Mat4 multiply(const GlesPointCloudRenderer::Mat4& a, const GlesPointCloudRenderer::Mat4& b) {
     GlesPointCloudRenderer::Mat4 r{};
-    for (int c=0;c<4;++c)
-        for (int row=0;row<4;++row)
-            for (int k=0;k<4;++k)
-                r.m[c*4+row] += a.m[k*4+row] * b.m[c*4+k];
+    for (int c = 0; c < 4; ++c)
+        for (int row = 0; row < 4; ++row)
+            for (int k = 0; k < 4; ++k)
+                r.m[c * 4 + row] += a.m[k * 4 + row] * b.m[c * 4 + k];
     return r;
 }
 
 GlesPointCloudRenderer::Mat4 perspective(float fovy, float aspect, float zNear, float zFar) {
     GlesPointCloudRenderer::Mat4 r{};
-    const float f=1.0f/std::tan(fovy*0.5f);
-    r.m[0]=f/aspect;
-    r.m[5]=f;
-    r.m[10]=(zFar+zNear)/(zNear-zFar);
-    r.m[11]=-1.0f;
-    r.m[14]=(2.0f*zFar*zNear)/(zNear-zFar);
+    const float f = 1.0f / std::tan(fovy * 0.5f);
+    r.m[0] = f / aspect;
+    r.m[5] = f;
+    r.m[10] = (zFar + zNear) / (zNear - zFar);
+    r.m[11] = -1.0f;
+    r.m[14] = (2.0f * zFar * zNear) / (zNear - zFar);
     return r;
 }
 
 GlesPointCloudRenderer::Mat4 lookAt(V3 eye, V3 center, V3 up) {
-    const V3 f=normalize(sub(center,eye));
-    const V3 s=normalize(cross(f,up));
-    const V3 u=cross(s,f);
-    auto r=identity();
-    r.m[0]=s.x; r.m[1]=u.x; r.m[2]=-f.x;
-    r.m[4]=s.y; r.m[5]=u.y; r.m[6]=-f.y;
-    r.m[8]=s.z; r.m[9]=u.z; r.m[10]=-f.z;
-    r.m[12]=-dot(s,eye); r.m[13]=-dot(u,eye); r.m[14]=dot(f,eye);
+    const V3 f = normalize(sub(center, eye));
+    const V3 s = normalize(cross(f, up));
+    const V3 u = cross(s, f);
+    auto r = identity();
+    r.m[0] = s.x;
+    r.m[1] = u.x;
+    r.m[2] = -f.x;
+    r.m[4] = s.y;
+    r.m[5] = u.y;
+    r.m[6] = -f.y;
+    r.m[8] = s.z;
+    r.m[9] = u.z;
+    r.m[10] = -f.z;
+    r.m[12] = -dot(s, eye);
+    r.m[13] = -dot(u, eye);
+    r.m[14] = dot(f, eye);
     return r;
 }
 
 } // namespace
 
 unsigned GlesPointCloudRenderer::compileShader(unsigned type, const char* source) {
-    const GLuint shader=glCreateShader(type);
-    glShaderSource(shader,1,&source,nullptr);
+    const GLuint shader = glCreateShader(type);
+    glShaderSource(shader, 1, &source, nullptr);
     glCompileShader(shader);
-    GLint ok=GL_FALSE; glGetShaderiv(shader,GL_COMPILE_STATUS,&ok);
-    if(!ok){
-        GLint n=0; glGetShaderiv(shader,GL_INFO_LOG_LENGTH,&n);
-        std::string msg(std::max(1,n),'\0'); glGetShaderInfoLog(shader,n,nullptr,msg.data());
-        logError("shader compile: "+msg); glDeleteShader(shader); return 0;
+    GLint ok = GL_FALSE;
+    glGetShaderiv(shader, GL_COMPILE_STATUS, &ok);
+    if (!ok) {
+        GLint n = 0;
+        glGetShaderiv(shader, GL_INFO_LOG_LENGTH, &n);
+        std::string msg(std::max(1, n), '\0');
+        glGetShaderInfoLog(shader, n, nullptr, msg.data());
+        logError("shader compile: " + msg);
+        glDeleteShader(shader);
+        return 0;
     }
     return shader;
 }
 
 unsigned GlesPointCloudRenderer::linkProgram(unsigned vs, unsigned fs) {
-    if(!vs||!fs) return 0;
-    GLuint p=glCreateProgram(); glAttachShader(p,vs); glAttachShader(p,fs); glLinkProgram(p);
-    GLint ok=GL_FALSE; glGetProgramiv(p,GL_LINK_STATUS,&ok);
-    glDeleteShader(vs); glDeleteShader(fs);
-    if(!ok){
-        GLint n=0; glGetProgramiv(p,GL_INFO_LOG_LENGTH,&n); std::string msg(std::max(1,n),'\0');
-        glGetProgramInfoLog(p,n,nullptr,msg.data()); logError("program link: "+msg); glDeleteProgram(p); return 0;
+    if (!vs || !fs)
+        return 0;
+    GLuint p = glCreateProgram();
+    glAttachShader(p, vs);
+    glAttachShader(p, fs);
+    glLinkProgram(p);
+    GLint ok = GL_FALSE;
+    glGetProgramiv(p, GL_LINK_STATUS, &ok);
+    glDeleteShader(vs);
+    glDeleteShader(fs);
+    if (!ok) {
+        GLint n = 0;
+        glGetProgramiv(p, GL_INFO_LOG_LENGTH, &n);
+        std::string msg(std::max(1, n), '\0');
+        glGetProgramInfoLog(p, n, nullptr, msg.data());
+        logError("program link: " + msg);
+        glDeleteProgram(p);
+        return 0;
     }
     return p;
 }
 
 unsigned GlesPointCloudRenderer::linkComputeProgram(unsigned cs) {
-    if(!cs) return 0;
-    GLuint p=glCreateProgram(); glAttachShader(p,cs); glLinkProgram(p);
-    GLint ok=GL_FALSE; glGetProgramiv(p,GL_LINK_STATUS,&ok); glDeleteShader(cs);
-    if(!ok){
-        GLint n=0; glGetProgramiv(p,GL_INFO_LOG_LENGTH,&n); std::string msg(std::max(1,n),'\0');
-        glGetProgramInfoLog(p,n,nullptr,msg.data()); logError("compute link: "+msg); glDeleteProgram(p); return 0;
+    if (!cs)
+        return 0;
+    GLuint p = glCreateProgram();
+    glAttachShader(p, cs);
+    glLinkProgram(p);
+    GLint ok = GL_FALSE;
+    glGetProgramiv(p, GL_LINK_STATUS, &ok);
+    glDeleteShader(cs);
+    if (!ok) {
+        GLint n = 0;
+        glGetProgramiv(p, GL_INFO_LOG_LENGTH, &n);
+        std::string msg(std::max(1, n), '\0');
+        glGetProgramInfoLog(p, n, nullptr, msg.data());
+        logError("compute link: " + msg);
+        glDeleteProgram(p);
+        return 0;
     }
     return p;
 }
 
 bool GlesPointCloudRenderer::ensurePrograms() {
-    if(renderProgram_ && depthProgram_ && selectProgram_) return true;
-    renderProgram_=linkProgram(compileShader(GL_VERTEX_SHADER,kRenderVs),compileShader(GL_FRAGMENT_SHADER,kRenderFs));
-    depthProgram_=linkProgram(compileShader(GL_VERTEX_SHADER,kDepthVs),compileShader(GL_FRAGMENT_SHADER,kDepthFs));
-    selectProgram_=linkComputeProgram(compileShader(GL_COMPUTE_SHADER,kSelectCs));
-    if(!renderProgram_||!depthProgram_||!selectProgram_){ statusText_="GLES shader creation failed"; return false; }
+    if (renderProgram_ && depthProgram_ && selectProgram_)
+        return true;
+    renderProgram_ =
+        linkProgram(compileShader(GL_VERTEX_SHADER, kRenderVs), compileShader(GL_FRAGMENT_SHADER, kRenderFs));
+    depthProgram_ = linkProgram(compileShader(GL_VERTEX_SHADER, kDepthVs), compileShader(GL_FRAGMENT_SHADER, kDepthFs));
+    selectProgram_ = linkComputeProgram(compileShader(GL_COMPUTE_SHADER, kSelectCs));
+    if (!renderProgram_ || !depthProgram_ || !selectProgram_) {
+        statusText_ = "GLES shader creation failed";
+        return false;
+    }
     return true;
 }
 
 void GlesPointCloudRenderer::onSurfaceCreated() {
     // A new EGL context invalidates all previous GL object names.
-    renderProgram_=depthProgram_=selectProgram_=0;
-    vao_=positionBuffer_=colorBuffer_=flagBuffer_=selectionBuffer_=0;
-    depthFbo_=depthTexture_=depthColorTexture_=0;
-    uploadedRevision_=~std::uint64_t{0};
-    pointCount_=0;
+    renderProgram_ = depthProgram_ = selectProgram_ = 0;
+    vao_ = positionBuffer_ = colorBuffer_ = flagBuffer_ = selectionBuffer_ = 0;
+    depthFbo_ = depthTexture_ = depthColorTexture_ = 0;
+    uploadedRevision_ = ~std::uint64_t{0};
+    pointCount_ = 0;
 
-    const char* version=reinterpret_cast<const char*>(glGetString(GL_VERSION));
-    std::string v=version?version:"";
-    gles31Available_ = v.find("OpenGL ES 3.1")!=std::string::npos ||
-                       v.find("OpenGL ES 3.2")!=std::string::npos;
-    statusText_=gles31Available_ ? ("GLES compute ready: "+v) : ("GLES 3.1 required: "+v);
+    const char* version = reinterpret_cast<const char*>(glGetString(GL_VERSION));
+    std::string v = version ? version : "";
+    gles31Available_ = v.find("OpenGL ES 3.1") != std::string::npos || v.find("OpenGL ES 3.2") != std::string::npos;
+    statusText_ = gles31Available_ ? ("GLES compute ready: " + v) : ("GLES 3.1 required: " + v);
     glEnable(GL_DEPTH_TEST);
     glDisable(GL_BLEND);
-    glClearColor(0.10f,0.11f,0.13f,1.0f);
-    if(gles31Available_) ensurePrograms();
+    glClearColor(0.10f, 0.11f, 0.13f, 1.0f);
+    if (gles31Available_)
+        ensurePrograms();
 }
 
 void GlesPointCloudRenderer::onResize(int width, int height) {
-    width_=std::max(1,width); height_=std::max(1,height);
-    depthFbo_=depthTexture_=depthColorTexture_=0; // recreate lazily in this EGL context
-    glViewport(0,0,width_,height_);
+    width_ = std::max(1, width);
+    height_ = std::max(1, height);
+    depthFbo_ = depthTexture_ = depthColorTexture_ = 0; // recreate lazily in this EGL context
+    glViewport(0, 0, width_, height_);
 }
 
 void GlesPointCloudRenderer::updateCameraFromCloud(const JMEngine::PointCloud& cloud) {
-    float minx= std::numeric_limits<float>::max(), miny=minx, minz=minx;
-    float maxx=-minx,maxy=-minx,maxz=-minx;
-    bool any=false;
-    for(const auto& p:cloud.points()){
-        if((p.flags&JMEngine::PointDeleted)!=0) continue;
-        if (!std::isfinite(p.position.x) ||
-            !std::isfinite(p.position.y) ||
-            !std::isfinite(p.position.z)) {
+    float minx = std::numeric_limits<float>::max(), miny = minx, minz = minx;
+    float maxx = -minx, maxy = -minx, maxz = -minx;
+    bool any = false;
+    for (const auto& p : cloud.points()) {
+        if ((p.flags & JMEngine::PointDeleted) != 0)
+            continue;
+        if (!std::isfinite(p.position.x) || !std::isfinite(p.position.y) || !std::isfinite(p.position.z)) {
             continue;
         }
-        any=true;
-        minx=std::min(minx,p.position.x); miny=std::min(miny,p.position.y); minz=std::min(minz,p.position.z);
-        maxx=std::max(maxx,p.position.x); maxy=std::max(maxy,p.position.y); maxz=std::max(maxz,p.position.z);
+        any = true;
+        minx = std::min(minx, p.position.x);
+        miny = std::min(miny, p.position.y);
+        minz = std::min(minz, p.position.z);
+        maxx = std::max(maxx, p.position.x);
+        maxy = std::max(maxy, p.position.y);
+        maxz = std::max(maxz, p.position.z);
     }
-    if(!any) return;
-    centerX_=(minx+maxx)*0.5f; centerY_=(miny+maxy)*0.5f; centerZ_=(minz+maxz)*0.5f;
-    const float dx=maxx-minx,dy=maxy-miny,dz=maxz-minz;
-    radius_=std::max(1e-4f,0.5f*std::sqrt(dx*dx+dy*dy+dz*dz));
-    const float fovy=45.0f*3.1415926535f/180.0f;
-    distance_=std::max(radius_*1.5f,radius_/std::tan(fovy*0.5f)*1.20f);
-    fitPending_=false;
+    if (!any)
+        return;
+    centerX_ = (minx + maxx) * 0.5f;
+    centerY_ = (miny + maxy) * 0.5f;
+    centerZ_ = (minz + maxz) * 0.5f;
+    const float dx = maxx - minx, dy = maxy - miny, dz = maxz - minz;
+    radius_ = std::max(1e-4f, 0.5f * std::sqrt(dx * dx + dy * dy + dz * dz));
+    const float fovy = 45.0f * 3.1415926535f / 180.0f;
+    distance_ = std::max(radius_ * 1.5f, radius_ / std::tan(fovy * 0.5f) * 1.20f);
+    fitPending_ = false;
 }
 
 GlesPointCloudRenderer::Mat4 GlesPointCloudRenderer::currentMvp() const {
-    const float cp=std::cos(pitch_), sp=std::sin(pitch_), cy=std::cos(yaw_), sy=std::sin(yaw_);
-    V3 dir{cp*sy,sp,cp*cy};
-    V3 center{centerX_,centerY_,centerZ_};
-    V3 eye{center.x+dir.x*distance_,center.y+dir.y*distance_,center.z+dir.z*distance_};
-    const float nearZ=std::max(0.001f,std::min(distance_*0.2f,radius_*0.01f));
-    const float farZ=std::max(nearZ+1.0f,distance_+radius_*8.0f);
-    const auto p=perspective(45.0f*3.1415926535f/180.0f,float(width_)/float(height_),nearZ,farZ);
-    const auto v=lookAt(eye,center,{0.0f,1.0f,0.0f});
-    return multiply(p,v);
+    const float cp = std::cos(pitch_), sp = std::sin(pitch_), cy = std::cos(yaw_), sy = std::sin(yaw_);
+    V3 dir{cp * sy, sp, cp * cy};
+    V3 center{centerX_, centerY_, centerZ_};
+    V3 eye{center.x + dir.x * distance_, center.y + dir.y * distance_, center.z + dir.z * distance_};
+    const float nearZ = std::max(0.001f, std::min(distance_ * 0.2f, radius_ * 0.01f));
+    const float farZ = std::max(nearZ + 1.0f, distance_ + radius_ * 8.0f);
+    const auto p = perspective(45.0f * 3.1415926535f / 180.0f, float(width_) / float(height_), nearZ, farZ);
+    const auto v = lookAt(eye, center, {0.0f, 1.0f, 0.0f});
+    return multiply(p, v);
 }
 
 void GlesPointCloudRenderer::uploadCloud(const JMEngine::PointCloud& cloud, std::uint64_t revision) {
-    if(!gles31Available_ || !ensurePrograms()) return;
-    const std::size_t n=cloud.size();
-    std::vector<float> pos(n*4u);
-    std::vector<std::uint32_t> color(n),flags(n),selected(n,0u);
-    for(std::size_t i=0;i<n;++i){
-        const auto& p=cloud.points()[i];
-        const bool finite =
-            std::isfinite(p.position.x) &&
-            std::isfinite(p.position.y) &&
-            std::isfinite(p.position.z);
-        pos[i*4+0]=finite?p.position.x:0.0f;
-        pos[i*4+1]=finite?p.position.y:0.0f;
-        pos[i*4+2]=finite?p.position.z:0.0f;
-        pos[i*4+3]=1.0f;
-        color[i]=p.rgba;
-        flags[i]=finite?p.flags:(p.flags|JMEngine::PointDeleted);
+    if (!gles31Available_ || !ensurePrograms())
+        return;
+    const std::size_t n = cloud.size();
+    std::vector<float> pos(n * 4u);
+    std::vector<std::uint32_t> color(n), flags(n), selected(n, 0u);
+    for (std::size_t i = 0; i < n; ++i) {
+        const auto& p = cloud.points()[i];
+        const bool finite = std::isfinite(p.position.x) && std::isfinite(p.position.y) && std::isfinite(p.position.z);
+        pos[i * 4 + 0] = finite ? p.position.x : 0.0f;
+        pos[i * 4 + 1] = finite ? p.position.y : 0.0f;
+        pos[i * 4 + 2] = finite ? p.position.z : 0.0f;
+        pos[i * 4 + 3] = 1.0f;
+        color[i] = p.rgba;
+        flags[i] = finite ? p.flags : (p.flags | JMEngine::PointDeleted);
     }
-    if(!vao_) glGenVertexArrays(1,&vao_);
+    if (!vao_)
+        glGenVertexArrays(1, &vao_);
     glBindVertexArray(vao_);
-    if(!positionBuffer_) glGenBuffers(1,&positionBuffer_);
-    glBindBuffer(GL_ARRAY_BUFFER,positionBuffer_); glBufferData(GL_ARRAY_BUFFER,GLsizeiptr(pos.size()*sizeof(float)),pos.data(),GL_STATIC_DRAW);
-    glEnableVertexAttribArray(0); glVertexAttribPointer(0,4,GL_FLOAT,GL_FALSE,0,nullptr);
-    if(!colorBuffer_) glGenBuffers(1,&colorBuffer_);
-    glBindBuffer(GL_ARRAY_BUFFER,colorBuffer_); glBufferData(GL_ARRAY_BUFFER,GLsizeiptr(color.size()*sizeof(std::uint32_t)),color.data(),GL_STATIC_DRAW);
-    glEnableVertexAttribArray(1); glVertexAttribIPointer(1,1,GL_UNSIGNED_INT,0,nullptr);
-    if(!selectionBuffer_) glGenBuffers(1,&selectionBuffer_);
-    glBindBuffer(GL_ARRAY_BUFFER,selectionBuffer_); glBufferData(GL_ARRAY_BUFFER,GLsizeiptr(selected.size()*sizeof(std::uint32_t)),selected.data(),GL_DYNAMIC_DRAW);
-    glEnableVertexAttribArray(2); glVertexAttribIPointer(2,1,GL_UNSIGNED_INT,0,nullptr);
-    if(!flagBuffer_) glGenBuffers(1,&flagBuffer_);
-    glBindBuffer(GL_ARRAY_BUFFER,flagBuffer_); glBufferData(GL_ARRAY_BUFFER,GLsizeiptr(flags.size()*sizeof(std::uint32_t)),flags.data(),GL_DYNAMIC_DRAW);
-    glEnableVertexAttribArray(3); glVertexAttribIPointer(3,1,GL_UNSIGNED_INT,0,nullptr);
+    if (!positionBuffer_)
+        glGenBuffers(1, &positionBuffer_);
+    glBindBuffer(GL_ARRAY_BUFFER, positionBuffer_);
+    glBufferData(GL_ARRAY_BUFFER, GLsizeiptr(pos.size() * sizeof(float)), pos.data(), GL_STATIC_DRAW);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 4, GL_FLOAT, GL_FALSE, 0, nullptr);
+    if (!colorBuffer_)
+        glGenBuffers(1, &colorBuffer_);
+    glBindBuffer(GL_ARRAY_BUFFER, colorBuffer_);
+    glBufferData(GL_ARRAY_BUFFER, GLsizeiptr(color.size() * sizeof(std::uint32_t)), color.data(), GL_STATIC_DRAW);
+    glEnableVertexAttribArray(1);
+    glVertexAttribIPointer(1, 1, GL_UNSIGNED_INT, 0, nullptr);
+    if (!selectionBuffer_)
+        glGenBuffers(1, &selectionBuffer_);
+    glBindBuffer(GL_ARRAY_BUFFER, selectionBuffer_);
+    glBufferData(GL_ARRAY_BUFFER, GLsizeiptr(selected.size() * sizeof(std::uint32_t)), selected.data(),
+                 GL_DYNAMIC_DRAW);
+    glEnableVertexAttribArray(2);
+    glVertexAttribIPointer(2, 1, GL_UNSIGNED_INT, 0, nullptr);
+    if (!flagBuffer_)
+        glGenBuffers(1, &flagBuffer_);
+    glBindBuffer(GL_ARRAY_BUFFER, flagBuffer_);
+    glBufferData(GL_ARRAY_BUFFER, GLsizeiptr(flags.size() * sizeof(std::uint32_t)), flags.data(), GL_DYNAMIC_DRAW);
+    glEnableVertexAttribArray(3);
+    glVertexAttribIPointer(3, 1, GL_UNSIGNED_INT, 0, nullptr);
     glBindVertexArray(0);
-    pointCount_=n; uploadedRevision_=revision;
-    if(fitPending_) updateCameraFromCloud(cloud);
+    pointCount_ = n;
+    uploadedRevision_ = revision;
+    if (fitPending_)
+        updateCameraFromCloud(cloud);
 }
 
 void GlesPointCloudRenderer::render(const JMEngine::PointCloud* cloud, std::uint64_t revision) {
-    glViewport(0,0,width_,height_);
-    glBindFramebuffer(GL_FRAMEBUFFER,0);
-    glClear(GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT);
-    if(!cloud||cloud->empty()||!gles31Available_||!ensurePrograms()) return;
-    if(uploadedRevision_!=revision || pointCount_!=cloud->size()) uploadCloud(*cloud,revision);
-    const auto mvp=currentMvp();
+    glViewport(0, 0, width_, height_);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    if (!cloud || cloud->empty() || !gles31Available_ || !ensurePrograms())
+        return;
+    if (uploadedRevision_ != revision || pointCount_ != cloud->size())
+        uploadCloud(*cloud, revision);
+    const auto mvp = currentMvp();
     glUseProgram(renderProgram_);
-    glUniformMatrix4fv(glGetUniformLocation(renderProgram_,"uMvp"),1,GL_FALSE,mvp.m);
-    glUniform1f(glGetUniformLocation(renderProgram_,"uPointSize"),3.0f);
-    glBindVertexArray(vao_); glDrawArrays(GL_POINTS,0,GLsizei(pointCount_)); glBindVertexArray(0);
+    glUniformMatrix4fv(glGetUniformLocation(renderProgram_, "uMvp"), 1, GL_FALSE, mvp.m);
+    glUniform1f(glGetUniformLocation(renderProgram_, "uPointSize"), 3.0f);
+    glBindVertexArray(vao_);
+    glDrawArrays(GL_POINTS, 0, GLsizei(pointCount_));
+    glBindVertexArray(0);
     glUseProgram(0);
 }
 
 void GlesPointCloudRenderer::ensureDepthTarget() {
-    if(depthFbo_&&depthTexture_&&depthColorTexture_) return;
-    glGenFramebuffers(1,&depthFbo_); glBindFramebuffer(GL_FRAMEBUFFER,depthFbo_);
-    glGenTextures(1,&depthTexture_); glBindTexture(GL_TEXTURE_2D,depthTexture_);
-    glTexImage2D(GL_TEXTURE_2D,0,GL_DEPTH_COMPONENT24,width_,height_,0,GL_DEPTH_COMPONENT,GL_UNSIGNED_INT,nullptr);
-    glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_NEAREST); glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_S,GL_CLAMP_TO_EDGE); glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_T,GL_CLAMP_TO_EDGE);
-    glFramebufferTexture2D(GL_FRAMEBUFFER,GL_DEPTH_ATTACHMENT,GL_TEXTURE_2D,depthTexture_,0);
-    glGenTextures(1,&depthColorTexture_); glBindTexture(GL_TEXTURE_2D,depthColorTexture_);
-    glTexImage2D(GL_TEXTURE_2D,0,GL_RGBA8,width_,height_,0,GL_RGBA,GL_UNSIGNED_BYTE,nullptr);
-    glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_NEAREST); glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_NEAREST);
-    glFramebufferTexture2D(GL_FRAMEBUFFER,GL_COLOR_ATTACHMENT0,GL_TEXTURE_2D,depthColorTexture_,0);
-    const GLenum status=glCheckFramebufferStatus(GL_FRAMEBUFFER);
-    if(status!=GL_FRAMEBUFFER_COMPLETE) logError("depth framebuffer incomplete");
-    glBindFramebuffer(GL_FRAMEBUFFER,0);
+    if (depthFbo_ && depthTexture_ && depthColorTexture_)
+        return;
+    glGenFramebuffers(1, &depthFbo_);
+    glBindFramebuffer(GL_FRAMEBUFFER, depthFbo_);
+    glGenTextures(1, &depthTexture_);
+    glBindTexture(GL_TEXTURE_2D, depthTexture_);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, width_, height_, 0, GL_DEPTH_COMPONENT, GL_UNSIGNED_INT,
+                 nullptr);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, depthTexture_, 0);
+    glGenTextures(1, &depthColorTexture_);
+    glBindTexture(GL_TEXTURE_2D, depthColorTexture_);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width_, height_, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, depthColorTexture_, 0);
+    const GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+    if (status != GL_FRAMEBUFFER_COMPLETE)
+        logError("depth framebuffer incomplete");
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
 
 void GlesPointCloudRenderer::renderDepthPass() {
     ensureDepthTarget();
-    glBindFramebuffer(GL_FRAMEBUFFER,depthFbo_); glViewport(0,0,width_,height_);
-    glClearDepthf(1.0f); glClear(GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT);
-    glEnable(GL_DEPTH_TEST); glDepthFunc(GL_LESS);
-    const auto mvp=currentMvp();
+    glBindFramebuffer(GL_FRAMEBUFFER, depthFbo_);
+    glViewport(0, 0, width_, height_);
+    glClearDepthf(1.0f);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    glEnable(GL_DEPTH_TEST);
+    glDepthFunc(GL_LESS);
+    const auto mvp = currentMvp();
     glUseProgram(depthProgram_);
-    glUniformMatrix4fv(glGetUniformLocation(depthProgram_,"uMvp"),1,GL_FALSE,mvp.m);
-    glUniform1f(glGetUniformLocation(depthProgram_,"uPointSize"),4.0f);
-    glBindVertexArray(vao_); glDrawArrays(GL_POINTS,0,GLsizei(pointCount_)); glBindVertexArray(0);
-    glUseProgram(0); glBindFramebuffer(GL_FRAMEBUFFER,0);
+    glUniformMatrix4fv(glGetUniformLocation(depthProgram_, "uMvp"), 1, GL_FALSE, mvp.m);
+    glUniform1f(glGetUniformLocation(depthProgram_, "uPointSize"), 4.0f);
+    glBindVertexArray(vao_);
+    glDrawArrays(GL_POINTS, 0, GLsizei(pointCount_));
+    glBindVertexArray(0);
+    glUseProgram(0);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
 
-std::vector<JMEngine::PointId> GlesPointCloudRenderer::dispatchSelection(
-    const JMEngine::PointCloud& cloud,int x0,int y0,int x1,int y1,bool surfaceOnly) {
+std::vector<JMEngine::PointId> GlesPointCloudRenderer::dispatchSelection(const JMEngine::PointCloud& cloud, int x0,
+                                                                         int y0, int x1, int y1, bool surfaceOnly) {
     std::vector<JMEngine::PointId> ids;
-    if(!gles31Available_||!selectProgram_||pointCount_!=cloud.size()) return ids;
-    const int left=std::clamp(std::min(x0,x1),0,width_-1), right=std::clamp(std::max(x0,x1),0,width_-1);
-    const int top=std::clamp(std::min(y0,y1),0,height_-1), bottom=std::clamp(std::max(y0,y1),0,height_-1);
-    if(surfaceOnly) renderDepthPass();
+    if (!gles31Available_ || !selectProgram_ || pointCount_ != cloud.size())
+        return ids;
+    const int left = std::clamp(std::min(x0, x1), 0, width_ - 1), right = std::clamp(std::max(x0, x1), 0, width_ - 1);
+    const int top = std::clamp(std::min(y0, y1), 0, height_ - 1), bottom = std::clamp(std::max(y0, y1), 0, height_ - 1);
+    if (surfaceOnly)
+        renderDepthPass();
 
-    const auto mvp=currentMvp();
+    const auto mvp = currentMvp();
     glUseProgram(selectProgram_);
-    glUniformMatrix4fv(glGetUniformLocation(selectProgram_,"uMvp"),1,GL_FALSE,mvp.m);
-    glUniform2i(glGetUniformLocation(selectProgram_,"uViewport"),width_,height_);
-    glUniform4i(glGetUniformLocation(selectProgram_,"uRect"),left,top,right,bottom);
-    glUniform1ui(glGetUniformLocation(selectProgram_,"uCount"),GLuint(pointCount_));
-    glUniform1ui(glGetUniformLocation(selectProgram_,"uSurfaceOnly"),surfaceOnly?1u:0u);
-    glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D,depthTexture_);
-    glUniform1i(glGetUniformLocation(selectProgram_,"uDepth"),0);
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER,0,positionBuffer_);
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER,1,flagBuffer_);
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER,2,selectionBuffer_);
-    glDispatchCompute(GLuint((pointCount_+255u)/256u),1,1);
-    glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT|GL_VERTEX_ATTRIB_ARRAY_BARRIER_BIT|GL_BUFFER_UPDATE_BARRIER_BIT);
+    glUniformMatrix4fv(glGetUniformLocation(selectProgram_, "uMvp"), 1, GL_FALSE, mvp.m);
+    glUniform2i(glGetUniformLocation(selectProgram_, "uViewport"), width_, height_);
+    glUniform4i(glGetUniformLocation(selectProgram_, "uRect"), left, top, right, bottom);
+    glUniform1ui(glGetUniformLocation(selectProgram_, "uCount"), GLuint(pointCount_));
+    glUniform1ui(glGetUniformLocation(selectProgram_, "uSurfaceOnly"), surfaceOnly ? 1u : 0u);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, depthTexture_);
+    glUniform1i(glGetUniformLocation(selectProgram_, "uDepth"), 0);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, positionBuffer_);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, flagBuffer_);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 2, selectionBuffer_);
+    glDispatchCompute(GLuint((pointCount_ + 255u) / 256u), 1, 1);
+    glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT | GL_VERTEX_ATTRIB_ARRAY_BARRIER_BIT | GL_BUFFER_UPDATE_BARRIER_BIT);
 
-    glBindBuffer(GL_SHADER_STORAGE_BUFFER,selectionBuffer_);
-    const auto bytes=GLsizeiptr(pointCount_*sizeof(std::uint32_t));
-    auto* ptr=static_cast<const std::uint32_t*>(glMapBufferRange(GL_SHADER_STORAGE_BUFFER,0,bytes,GL_MAP_READ_BIT));
-    if(ptr){
-        ids.reserve(std::min<std::size_t>(pointCount_,65536u));
-        for(std::size_t i=0;i<pointCount_;++i) if(ptr[i]!=0u) ids.push_back(static_cast<JMEngine::PointId>(i));
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, selectionBuffer_);
+    const auto bytes = GLsizeiptr(pointCount_ * sizeof(std::uint32_t));
+    auto* ptr =
+        static_cast<const std::uint32_t*>(glMapBufferRange(GL_SHADER_STORAGE_BUFFER, 0, bytes, GL_MAP_READ_BIT));
+    if (ptr) {
+        ids.reserve(std::min<std::size_t>(pointCount_, 65536u));
+        for (std::size_t i = 0; i < pointCount_; ++i)
+            if (ptr[i] != 0u)
+                ids.push_back(static_cast<JMEngine::PointId>(i));
         glUnmapBuffer(GL_SHADER_STORAGE_BUFFER);
     }
-    glBindBuffer(GL_SHADER_STORAGE_BUFFER,0); glUseProgram(0);
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
+    glUseProgram(0);
     return ids;
 }
 
-std::vector<JMEngine::PointId> GlesPointCloudRenderer::selectRectangle(
-    const JMEngine::PointCloud& cloud,int x0,int y0,int x1,int y1,bool surfaceOnly) {
-    return dispatchSelection(cloud,x0,y0,x1,y1,surfaceOnly);
+std::vector<JMEngine::PointId> GlesPointCloudRenderer::selectRectangle(const JMEngine::PointCloud& cloud, int x0,
+                                                                       int y0, int x1, int y1, bool surfaceOnly) {
+    return dispatchSelection(cloud, x0, y0, x1, y1, surfaceOnly);
 }
 
 void GlesPointCloudRenderer::clearSelection() {
-    if(!selectionBuffer_||pointCount_==0) return;
-    std::vector<std::uint32_t> zero(pointCount_,0u);
-    glBindBuffer(GL_ARRAY_BUFFER,selectionBuffer_);
-    glBufferSubData(GL_ARRAY_BUFFER,0,GLsizeiptr(zero.size()*sizeof(std::uint32_t)),zero.data());
+    if (!selectionBuffer_ || pointCount_ == 0)
+        return;
+    std::vector<std::uint32_t> zero(pointCount_, 0u);
+    glBindBuffer(GL_ARRAY_BUFFER, selectionBuffer_);
+    glBufferSubData(GL_ARRAY_BUFFER, 0, GLsizeiptr(zero.size() * sizeof(std::uint32_t)), zero.data());
 }
 
-void GlesPointCloudRenderer::setSelection(const std::vector<JMEngine::PointId>& ids,std::size_t pointCount) {
-    if(!selectionBuffer_||pointCount_!=pointCount) return;
-    std::vector<std::uint32_t> mask(pointCount_,0u);
-    for(auto id:ids) if(static_cast<std::size_t>(id)<mask.size()) mask[id]=1u;
-    glBindBuffer(GL_ARRAY_BUFFER,selectionBuffer_);
-    glBufferSubData(GL_ARRAY_BUFFER,0,GLsizeiptr(mask.size()*sizeof(std::uint32_t)),mask.data());
+void GlesPointCloudRenderer::setSelection(const std::vector<JMEngine::PointId>& ids, std::size_t pointCount) {
+    if (!selectionBuffer_ || pointCount_ != pointCount)
+        return;
+    std::vector<std::uint32_t> mask(pointCount_, 0u);
+    for (auto id : ids)
+        if (static_cast<std::size_t>(id) < mask.size())
+            mask[id] = 1u;
+    glBindBuffer(GL_ARRAY_BUFFER, selectionBuffer_);
+    glBufferSubData(GL_ARRAY_BUFFER, 0, GLsizeiptr(mask.size() * sizeof(std::uint32_t)), mask.data());
 }
 
-void GlesPointCloudRenderer::orbit(float dxPixels,float dyPixels) {
-    yaw_ -= dxPixels*0.008f; pitch_ -= dyPixels*0.008f;
-    pitch_=std::clamp(pitch_,-1.50f,1.50f);
+void GlesPointCloudRenderer::orbit(float dxPixels, float dyPixels) {
+    yaw_ -= dxPixels * 0.008f;
+    pitch_ -= dyPixels * 0.008f;
+    pitch_ = std::clamp(pitch_, -1.50f, 1.50f);
 }
 
 void GlesPointCloudRenderer::zoom(float scaleFactor) {
-    if(scaleFactor<=0.01f) return;
-    distance_=std::clamp(distance_/scaleFactor,std::max(radius_*0.05f,1e-4f),std::max(radius_*100.0f,1.0f));
+    if (scaleFactor <= 0.01f)
+        return;
+    distance_ = std::clamp(distance_ / scaleFactor, std::max(radius_ * 0.05f, 1e-4f), std::max(radius_ * 100.0f, 1.0f));
 }
 
-void GlesPointCloudRenderer::fitNextFrame() { fitPending_=true; uploadedRevision_=~std::uint64_t{0}; }
+void GlesPointCloudRenderer::fitNextFrame() {
+    fitPending_ = true;
+    uploadedRevision_ = ~std::uint64_t{0};
+}
 
 } // namespace jmengine_android
