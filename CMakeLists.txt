@@ -770,79 +770,71 @@ if(JMENGINE_BUILD_QT_EDITOR)
             endif()
 
             # ---------------------------------------------------------
-            # OpenCV 4.8.0 - manual include/lib configuration
+            # OpenCV 4.8.0
             # ---------------------------------------------------------
-            find_path(JMENGINE_OPENCV_INCLUDE_DIR
-                NAMES opencv2/core.hpp
-                PATHS
-                    "${JMENGINE_OPENCV_ROOT}/include"
-                    "${JMENGINE_OPENCV_ROOT}/build/include"
-                NO_DEFAULT_PATH)
-            if(NOT JMENGINE_OPENCV_INCLUDE_DIR)
-                message(FATAL_ERROR
-                    "OpenCV headers were not found under ${JMENGINE_OPENCV_ROOT}")
-            endif()
-            set(OpenCV_INCLUDE_DIRS "${JMENGINE_OPENCV_INCLUDE_DIR}")
-
-            # Locate the prebuilt OpenCV import-library directory.  Support the
-            # old opencv/lib layout and official opencv/x64/vc*/lib packages.
-            set(JMENGINE_OPENCV_LIB_DIR "")
-            foreach(_opencv_lib_candidate
-                    "${JMENGINE_OPENCV_ROOT}/lib")
-                if(EXISTS "${_opencv_lib_candidate}/opencv_core480.lib")
-                    set(JMENGINE_OPENCV_LIB_DIR "${_opencv_lib_candidate}")
+            # Prefer OpenCV's package config when the SDK keeps the official
+            # Windows pack layout. Some local packages are flattened to
+            # opencv/{include,lib,bin}; their generated config still points at
+            # the old install prefix, so use CMake discovery over the actual
+            # lib directory for that layout.
+            set(OpenCV_CUDA OFF CACHE BOOL "Use CUDA-enabled OpenCV package" FORCE)
+            set(_JMENGINE_OPENCV_USED_PACKAGE_CONFIG FALSE)
+            file(GLOB _JMENGINE_OPENCV_CONFIG_DIRS LIST_DIRECTORIES TRUE
+                "${JMENGINE_OPENCV_ROOT}/x64/vc*/lib")
+            foreach(_opencv_config_dir IN LISTS _JMENGINE_OPENCV_CONFIG_DIRS)
+                if(EXISTS "${_opencv_config_dir}/OpenCVConfig.cmake")
+                    set(OpenCV_DIR "${_opencv_config_dir}" CACHE PATH "OpenCV package config directory" FORCE)
+                    find_package(OpenCV REQUIRED CONFIG NO_DEFAULT_PATH)
+                    set(_JMENGINE_OPENCV_USED_PACKAGE_CONFIG TRUE)
                     break()
                 endif()
             endforeach()
-            if(NOT JMENGINE_OPENCV_LIB_DIR)
-                file(GLOB _opencv_vc_lib_dirs LIST_DIRECTORIES TRUE
-                    "${JMENGINE_OPENCV_ROOT}/x64/vc*/lib")
-                foreach(_opencv_lib_candidate IN LISTS _opencv_vc_lib_dirs)
+
+            if(NOT _JMENGINE_OPENCV_USED_PACKAGE_CONFIG)
+                find_path(JMENGINE_OPENCV_INCLUDE_DIR
+                    NAMES opencv2/core.hpp
+                    PATHS
+                        "${JMENGINE_OPENCV_ROOT}/include"
+                        "${JMENGINE_OPENCV_ROOT}/build/include"
+                    NO_DEFAULT_PATH)
+                if(NOT JMENGINE_OPENCV_INCLUDE_DIR)
+                    message(FATAL_ERROR
+                        "OpenCV headers were not found under ${JMENGINE_OPENCV_ROOT}")
+                endif()
+                set(OpenCV_INCLUDE_DIRS "${JMENGINE_OPENCV_INCLUDE_DIR}")
+
+                set(JMENGINE_OPENCV_LIB_DIR "")
+                foreach(_opencv_lib_candidate
+                        "${JMENGINE_OPENCV_ROOT}/lib")
                     if(EXISTS "${_opencv_lib_candidate}/opencv_core480.lib")
                         set(JMENGINE_OPENCV_LIB_DIR "${_opencv_lib_candidate}")
                         break()
                     endif()
                 endforeach()
-            endif()
-            if(NOT JMENGINE_OPENCV_LIB_DIR)
-                message(FATAL_ERROR
-                    "OpenCV 4.8 import libraries were not found under ${JMENGINE_OPENCV_ROOT}")
-            endif()
-
-            set(OpenCV_LIBS
-                ${JMENGINE_OPENCV_LIB_DIR}/opencv_core480.lib
-                ${JMENGINE_OPENCV_LIB_DIR}/opencv_imgcodecs480.lib
-                ${JMENGINE_OPENCV_LIB_DIR}/opencv_highgui480.lib
-                ${JMENGINE_OPENCV_LIB_DIR}/opencv_imgproc480.lib
-                ${JMENGINE_OPENCV_LIB_DIR}/opencv_cudaarithm480.lib
-                ${JMENGINE_OPENCV_LIB_DIR}/opencv_cudabgsegm480.lib
-                ${JMENGINE_OPENCV_LIB_DIR}/opencv_cudacodec480.lib
-                ${JMENGINE_OPENCV_LIB_DIR}/opencv_cudafeatures2d480.lib
-                ${JMENGINE_OPENCV_LIB_DIR}/opencv_cudafilters480.lib
-                ${JMENGINE_OPENCV_LIB_DIR}/opencv_cudaimgproc480.lib
-                ${JMENGINE_OPENCV_LIB_DIR}/opencv_cudalegacy480.lib
-                ${JMENGINE_OPENCV_LIB_DIR}/opencv_cudaobjdetect480.lib
-                ${JMENGINE_OPENCV_LIB_DIR}/opencv_cudaoptflow480.lib
-                ${JMENGINE_OPENCV_LIB_DIR}/opencv_cudastereo480.lib
-                ${JMENGINE_OPENCV_LIB_DIR}/opencv_cudawarping480.lib
-                ${JMENGINE_OPENCV_LIB_DIR}/opencv_cudev480.lib
-                ${JMENGINE_OPENCV_LIB_DIR}/opencv_dnn_objdetect480.lib
-                ${JMENGINE_OPENCV_LIB_DIR}/opencv_dnn_superres480.lib
-                ${JMENGINE_OPENCV_LIB_DIR}/opencv_dnn480.lib
-                ${JMENGINE_OPENCV_LIB_DIR}/opencv_video480.lib
-                ${JMENGINE_OPENCV_LIB_DIR}/opencv_ccalib480.lib
-                ${JMENGINE_OPENCV_LIB_DIR}/opencv_videoio480.lib
-                ${JMENGINE_OPENCV_LIB_DIR}/opencv_flann480.lib
-                ${JMENGINE_OPENCV_LIB_DIR}/opencv_features2d480.lib
-                ${JMENGINE_OPENCV_LIB_DIR}/opencv_calib3d480.lib
-            )
-
-            # Fail during CMake configure instead of waiting for VS linker errors.
-            foreach(_opencv_lib IN LISTS OpenCV_LIBS)
-                if(NOT EXISTS "${_opencv_lib}")
-                    message(FATAL_ERROR "Missing OpenCV library: ${_opencv_lib}")
+                if(NOT JMENGINE_OPENCV_LIB_DIR)
+                    message(FATAL_ERROR
+                        "OpenCV 4.8 import libraries were not found under ${JMENGINE_OPENCV_ROOT}")
                 endif()
-            endforeach()
+
+                set(_JMENGINE_OPENCV_MODULES
+                    core
+                    imgproc
+                    imgcodecs
+                    videoio
+                    calib3d
+                    features2d
+                    flann
+                    highgui
+                    video)
+                set(OpenCV_LIBS)
+                foreach(_opencv_module IN LISTS _JMENGINE_OPENCV_MODULES)
+                    set(_opencv_lib "${JMENGINE_OPENCV_LIB_DIR}/opencv_${_opencv_module}480.lib")
+                    if(NOT EXISTS "${_opencv_lib}")
+                        message(FATAL_ERROR "Missing OpenCV library: ${_opencv_lib}")
+                    endif()
+                    list(APPEND OpenCV_LIBS "${_opencv_lib}")
+                endforeach()
+            endif()
 
             message(STATUS "OpenCV_INCLUDE_DIRS = ${OpenCV_INCLUDE_DIRS}")
             message(STATUS "OpenCV_LIBS = ${OpenCV_LIBS}")

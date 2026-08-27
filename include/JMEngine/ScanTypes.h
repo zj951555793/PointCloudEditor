@@ -27,7 +27,7 @@ enum class ScanRegistrationMode : std::uint8_t {
 struct ScanConfig {
     int maxFrames{20000};
     int maxInflightFrames{6};
-    int previewPointsPerFrame{12000};
+    int previewPointsPerFrame{3000};
     int previewPointLimit{500000};
     int textureKeyframeStride{5};
     int textureMaxKeyframes{120};
@@ -44,6 +44,10 @@ struct ScanConfig {
     // Controls periodic online pose refresh/application. Keeping this in the engine config
     // avoids running expensive full-history getResults() scans when the UI switch is off.
     bool liveOptimizationEnabled{true};
+    // Dataset/virtual replay is lossless and back-pressured: when downstream
+    // processing is slower than the source, wait instead of dropping frames.
+    // Keep false for physical cameras so live latency stays bounded.
+    bool losslessDatasetReplay{false};
     std::string calibrationPath;
     std::string vocabularyPath;
     // Optional scan project persistence: pose/frame cloud are saved without affecting SLAM memory.

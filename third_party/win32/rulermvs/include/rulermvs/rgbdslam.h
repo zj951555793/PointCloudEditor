@@ -104,10 +104,16 @@ public:
     using AddFrameCallback = std::function<void(int& userID, int64_t& nTime,
         cv::Mat& depth, cv::Mat& color, cv::Mat& mask, cv::Mat& gray)>;
 
+    /*RGBDFusion(const cv::Mat& K, const DBoW3::Vocabulary& dbow,
+        const DBoW3::Database& db, int width, int height, double* maxDist,
+        int* maxIter, int nLayer, int nThread = 2, int nGroup = 15,
+        bool bColorICP = true, bool bWithCuda = false);*/
+
+    /////* 20260610, 新增两个参数，方便一体机测试 */
     RGBDFusion(const cv::Mat& K, const DBoW3::Vocabulary& dbow,
         const DBoW3::Database& db, int width, int height, double* maxDist,
-        int* maxIter, int nLayer,int nThread = 2, int nGroup = 15, 
-        bool bColorICP = true, bool bWithCuda = false);
+        int* maxIter, int nLayer, int nThread = 2, int nGroup = 15,
+        bool bColorICP = true, bool bWithCuda = false, bool use_rgbsift = true, bool EnableExpandImage = false);
     /*RGBDFusion(const cv::Mat& K, int width, int height, double* maxDist,
         int* maxIter, int nLayer, int nThread = 2, int nGroup = 15,
         bool bColorICP = true, bool bWithCuda = false);*/

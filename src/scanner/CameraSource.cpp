@@ -14,9 +14,12 @@
 #include <deque>
 #include <filesystem>
 #include <iomanip>
+#include <iostream>
+#include <map>
 #include <sstream>
 #include <limits>
 #include <mutex>
+#include <optional>
 #include <thread>
 #include <utility>
 
@@ -472,15 +475,20 @@ class DatasetCamera final : public ICameraSource {
         stop();
         frameCallback_ = std::move(frameCallback);
         errorCallback_ = std::move(errorCallback);
-        rgbFiles_ = collectImages(
+        const auto rgbFiles = collectImages(
             std::filesystem::path(directory_) / "img" / "c");
-        codeFiles_ = collectImages(
+        const auto codeFiles = collectImages(
             std::filesystem::path(directory_) / "img" / "p");
-        if (rgbFiles_.empty() || codeFiles_.empty()) {
+        framePairs_ = pairDatasetImages(rgbFiles, codeFiles);
+        if (framePairs_.empty()) {
             if (error)
-                *error = "dataset must contain img/c and img/p images";
+                *error = "dataset must contain matching img/c and img/p images";
             return false;
         }
+
+        std::cout << "[VIRTUAL DATASET] colorFiles=" << rgbFiles.size()
+                  << " codeFiles=" << codeFiles.size()
+                  << " paired=" << framePairs_.size() << std::endl;
 
         stopping_.store(false);
         worker_ = std::thread([this] { run(); });
@@ -522,21 +530,141 @@ class DatasetCamera final : public ICameraSource {
         return files;
     }
 
+    struct DatasetFramePair {
+        std::filesystem::path rgb;
+        std::filesystem::path code;
+    };
+
+    static std::optional<long long> numericFrameKey(
+        const std::filesystem::path& path) {
+        const std::string stem = path.stem().string();
+        if (stem.empty())
+            return std::nullopt;
+
+        std::size_t end = stem.size();
+        while (end > 0 && !std::isdigit(static_cast<unsigned char>(stem[end - 1])))
+            --end;
+        if (end == 0)
+            return std::nullopt;
+        std::size_t begin = end;
+        while (begin > 0 && std::isdigit(static_cast<unsigned char>(stem[begin - 1])))
+            --begin;
+        try {
+            return std::stoll(stem.substr(begin, end - begin));
+        } catch (...) {
+            return std::nullopt;
+        }
+    }
+
+    static std::string lowerStem(const std::filesystem::path& path) {
+        std::string stem = path.stem().string();
+        std::transform(stem.begin(), stem.end(), stem.begin(),
+                       [](unsigned char c) { return char(std::tolower(c)); });
+        return stem;
+    }
+
+    static std::vector<DatasetFramePair> pairDatasetImages(
+        const std::vector<std::filesystem::path>& rgbFiles,
+        const std::vector<std::filesystem::path>& codeFiles) {
+        std::vector<DatasetFramePair> pairs;
+        if (rgbFiles.empty() || codeFiles.empty())
+            return pairs;
+
+        const std::size_t expected = std::min(rgbFiles.size(), codeFiles.size());
+        const auto coverageIsSafe = [expected](std::size_t matched) {
+            // A single missing recording is fine; a weak filename heuristic that
+            // matches only a small prefix is not. The latter made virtual replay
+            // appear to "freeze" because the dataset worker simply reached the
+            // prematurely shortened pair list.
+            return expected > 0 && matched * 100u >= expected * 80u;
+        };
+
+        // Prefer exact stems first. This is unambiguous and works for both purely
+        // numeric names and names such as frame_000123_color/frame_000123_code only
+        // when the two directories actually use identical stems.
+        std::map<std::string, std::filesystem::path> codeByStem;
+        for (const auto& path : codeFiles)
+            codeByStem.emplace(lowerStem(path), path);
+        for (const auto& rgb : rgbFiles) {
+            const auto it = codeByStem.find(lowerStem(rgb));
+            if (it != codeByStem.end())
+                pairs.push_back({rgb, it->second});
+        }
+        if (coverageIsSafe(pairs.size())) {
+            std::cout << "[VIRTUAL DATASET] pairing=stem matched=" << pairs.size()
+                      << "/" << expected << std::endl;
+            return pairs;
+        }
+        pairs.clear();
+
+        // Raw recordings normally share the same numeric frame id. Pair by that
+        // id so one genuinely missing file does not shift all later frames.
+        std::map<long long, std::filesystem::path> rgbByNumber;
+        std::map<long long, std::filesystem::path> codeByNumber;
+        for (const auto& path : rgbFiles) {
+            if (const auto key = numericFrameKey(path))
+                rgbByNumber.emplace(*key, path);
+        }
+        for (const auto& path : codeFiles) {
+            if (const auto key = numericFrameKey(path))
+                codeByNumber.emplace(*key, path);
+        }
+        for (const auto& [key, rgb] : rgbByNumber) {
+            const auto it = codeByNumber.find(key);
+            if (it != codeByNumber.end())
+                pairs.push_back({rgb, it->second});
+        }
+        if (coverageIsSafe(pairs.size())) {
+            const std::size_t skippedRgb = rgbFiles.size() - pairs.size();
+            const std::size_t skippedCode = codeFiles.size() - pairs.size();
+            std::cout << "[VIRTUAL DATASET] pairing=frame-id matched=" << pairs.size()
+                      << "/" << expected << std::endl;
+            if (skippedRgb || skippedCode) {
+                std::cerr << "[VIRTUAL DATASET] unmatched frames skipped color="
+                          << skippedRgb << " code=" << skippedCode << std::endl;
+            }
+            return pairs;
+        }
+        if (!pairs.empty()) {
+            std::cerr << "[VIRTUAL DATASET] weak frame-id match " << pairs.size()
+                      << "/" << expected
+                      << "; using sorted index pairing to avoid premature EOF"
+                      << std::endl;
+        }
+
+        // Last-resort compatibility path: this is the behavior used by the older
+        // virtual scanner and guarantees that a filename convention difference
+        // cannot silently truncate JMC1S replay.
+        pairs.clear();
+        pairs.reserve(expected);
+        for (std::size_t i = 0; i < expected; ++i)
+            pairs.push_back({rgbFiles[i], codeFiles[i]});
+        std::cout << "[VIRTUAL DATASET] pairing=sorted-index matched="
+                  << pairs.size() << "/" << expected << std::endl;
+        return pairs;
+    }
+
     void run() {
-        const std::size_t frameCount =
-            std::min(rgbFiles_.size(), codeFiles_.size());
+        const std::size_t frameCount = framePairs_.size();
         for (std::size_t index = 0;
              index < frameCount && !stopping_.load(); ++index) {
-            cv::Mat bgr = cv::imread(
-                rgbFiles_[index].string(), cv::IMREAD_COLOR);
-            cv::Mat code = cv::imread(
-                codeFiles_[index].string(), cv::IMREAD_GRAYSCALE);
+            const auto& pair = framePairs_[index];
+            cv::Mat bgr = cv::imread(pair.rgb.string(), cv::IMREAD_COLOR);
+            cv::Mat code = cv::imread(pair.code.string(), cv::IMREAD_GRAYSCALE);
             if (bgr.empty() || code.empty()) {
                 if (errorCallback_) {
                     errorCallback_("failed to read dataset frame " +
                                    std::to_string(index));
                 }
                 continue;
+            }
+            if (index == 0) {
+                std::cout << "[VIRTUAL DATASET] firstFrame color="
+                          << bgr.cols << "x" << bgr.rows
+                          << " code=" << code.cols << "x" << code.rows
+                          << " colorFile=" << pair.rgb.filename().string()
+                          << " codeFile=" << pair.code.filename().string()
+                          << " rotate=disabled" << std::endl;
             }
             // Preserve the dataset's native structured-light code resolution.
             // OneShot datasets intentionally use code widths such as 216/343;
@@ -561,13 +689,52 @@ class DatasetCamera final : public ICameraSource {
             frame.code = std::make_shared<std::vector<std::uint8_t>>(
                 code.data, code.data + codePixelCount);
 
-            // Virtual and real scan share the exact same SLAM->render path.
-            // Camera preview is a physical-camera UI feature only and must not be
-            // used as a second 3D render clock for dataset scanning.
+            // Virtual datasets are already stored in the orientation expected by
+            // their calibration. Never apply camera-model rotate/flip here. The
+            // preview must show exactly the same unmodified img/c image that is
+            // sent to the SLAM pipeline, so direction problems can be diagnosed
+            // without changing the virtual scan input.
+            publishPreview(bgr);
+
+            // Virtual and real scan share the exact same SLAM->render path. The
+            // preview callback is UI-only and is not used as a 3D render clock.
             if (frameCallback_)
                 frameCallback_(std::move(frame));
+            if ((index % 50u) == 0u || index + 1u == frameCount) {
+                std::cout << "[VIRTUAL DATASET] replay=" << (index + 1u)
+                          << "/" << frameCount << std::endl;
+            }
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }
+        if (!stopping_.load()) {
+            std::cout << "[VIRTUAL DATASET] source EOF frames=" << frameCount
+                      << "; waiting for queued SLAM work to drain" << std::endl;
+        }
+    }
+
+    void publishPreview(const cv::Mat& source) {
+        const auto callback = previewCallback_;
+        if (!callback || source.empty())
+            return;
+
+        cv::Mat preview = source;
+        if (source.cols > 384) {
+            const double scale = 384.0 / double(source.cols);
+            cv::resize(source, preview, cv::Size(), scale, scale, cv::INTER_AREA);
+        }
+
+        cv::Mat rgb;
+        if (preview.channels() == 3)
+            cv::cvtColor(preview, rgb, cv::COLOR_BGR2RGB);
+        else
+            cv::cvtColor(preview, rgb, cv::COLOR_GRAY2RGB);
+        if (!rgb.isContinuous())
+            rgb = rgb.clone();
+
+        const std::size_t byteCount = rgb.total() * rgb.elemSize();
+        auto pixels = std::make_shared<std::vector<std::uint8_t>>(
+            rgb.data, rgb.data + byteCount);
+        callback(std::move(pixels), rgb.cols, rgb.rows);
     }
 
     std::string directory_;
@@ -576,8 +743,7 @@ class DatasetCamera final : public ICameraSource {
     PreviewCallback previewCallback_;
     std::atomic<bool> stopping_{true};
     std::thread worker_;
-    std::vector<std::filesystem::path> rgbFiles_;
-    std::vector<std::filesystem::path> codeFiles_;
+    std::vector<DatasetFramePair> framePairs_;
 };
 
 #if defined(_WIN32)

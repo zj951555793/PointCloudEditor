@@ -147,6 +147,7 @@ class MainWindow final : public QMainWindow {
     std::unique_ptr<JMEngine::JMScanner> scanner_;
     std::thread reconstructionThread_;
     ScanUiConfig activeScanConfig_;
+    JMEngine::ScanState scanState_{JMEngine::ScanState::Idle};
     int lastScanVisualFrameId_{-1};
     struct PendingScanHistoryFrame {
         int frameId{-1};

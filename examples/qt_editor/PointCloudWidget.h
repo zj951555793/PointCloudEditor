@@ -298,15 +298,13 @@ class PointCloudWidget final : public QOpenGLWidget, protected QOpenGLExtraFunct
         std::uint64_t livePoseEpoch{0};
         std::vector<LiveFrameRange> liveFrames;
         std::unordered_map<int, std::size_t> liveFrameIndex;
-        // Optimization callbacks only enqueue/coalesce poses. Expensive point transforms are
-        // spread across paint frames under a fixed point budget so loop-closure refreshes do
-        // not stall the current live frame.
-        std::deque<int> pendingLivePoseOrder;
+        // One SDK optimization snapshot is treated as one render batch. While a batch is being
+        // transformed off-thread, newer pose callbacks are coalesced here for the NEXT batch.
+        // A batch is never split across paintGL() calls: all of its poses are applied first,
+        // then all dirty VBO ranges are uploaded, and only then is the scene drawn once.
         std::unordered_map<int, JMEngine::Mat4f> pendingLivePoseUpdates;
-        // A frame being transformed on a pose worker is not scheduled twice. If a newer RT
-        // arrives while it is in flight, pendingLivePoseUpdates keeps only that newest RT and
-        // the frame is requeued after the current worker result is consumed.
-        std::unordered_set<int> livePoseInFlight;
+        bool livePoseBatchInFlight{false};
+        std::uint64_t livePoseBatchSerial{0};
         struct LiveMarkerRange {
             int frameId{-1};
             std::size_t first{0};
@@ -316,7 +314,15 @@ class PointCloudWidget final : public QOpenGLWidget, protected QOpenGLExtraFunct
         std::vector<LiveMarkerRange> liveMarkerRanges;
         std::unordered_map<int, std::size_t> liveMarkerIndex;
         std::unordered_map<int, std::vector<std::array<float,3>>> pendingLiveMarkers;
-        std::vector<std::pair<std::size_t, std::size_t>> livePoseDirtyRanges;
+        struct LivePoseGpuRange {
+            std::size_t first{0};
+            std::vector<JMEngine::Vec3f> positions;
+            std::vector<JMEngine::Vec3f> normals;
+        };
+        // Complete live-optimization batches arrive with GPU-ready position/normal ranges.
+        // They are uploaded in the same paint that commits the whole batch; there is no
+        // file-loading style per-paint budget or partial optimization display.
+        std::vector<LivePoseGpuRange> livePoseGpuRanges;
 
         // 场景级非破坏变换。当前交互器只修改平移，不重写点/三角形数据。
         JMEngine::Mat4f modelTransform{JMEngine::Mat4f::identity()};
@@ -345,17 +351,25 @@ class PointCloudWidget final : public QOpenGLWidget, protected QOpenGLExtraFunct
         Model(QString p, std::shared_ptr<JMEngine::TriangleMesh> meshValue);
     };
 
-    struct LivePoseTransformResult {
-        QString modelPath;
-        std::uint64_t modelEpoch{0};
+    struct LivePoseFrameCommit {
         int frameId{-1};
         std::size_t first{0};
+        std::size_t count{0};
         JMEngine::Mat4f pose{JMEngine::Mat4f::identity()};
         std::shared_ptr<std::vector<Model::LiveLocalPoint>> localToken;
-        std::vector<Model::LiveLocalPoint> transformedPoints;
         std::size_t markerFirst{0};
+        std::size_t markerCount{0};
         std::shared_ptr<std::vector<JMEngine::Point>> markerToken;
-        std::vector<JMEngine::Point> transformedMarkers;
+    };
+
+    struct LivePoseBatchTransformResult {
+        QString modelPath;
+        std::uint64_t modelEpoch{0};
+        std::uint64_t batchSerial{0};
+        std::size_t transformedPointCount{0};
+        double transformMs{0.0};
+        std::vector<LivePoseFrameCommit> frames;
+        std::vector<Model::LivePoseGpuRange> gpuRanges;
     };
 
     const std::vector<std::uint32_t>& meshDrawIndices(const Model& model) const;
@@ -375,8 +389,9 @@ class PointCloudWidget final : public QOpenGLWidget, protected QOpenGLExtraFunct
     void destroyModelGl(Model& model);
     void destroyLiveBackGl(Model& model);
     void uploadPointRangeNow(Model& model, std::size_t first, std::size_t count);
+    void uploadLivePoseRangeNow(Model& model, const Model::LivePoseGpuRange& range);
     void schedulePendingLivePoseUpdates(Model& model);
-    void applyReadyLivePoseUpdates(std::size_t& pointBudget);
+    void applyReadyLivePoseUpdates();
     void uploadLiveBackIncremental(Model& model, std::size_t& byteBudget);
     void uploadModelIncremental(Model& model, std::size_t& byteBudget);
     void uploadSelectionMask(Model& model);
@@ -520,15 +535,14 @@ class PointCloudWidget final : public QOpenGLWidget, protected QOpenGLExtraFunct
     qreal lastTouchDistance_{0.0};
 
     QThreadPool workerPool_;
-    // Dedicated pool for online-optimization pose transforms. Keeping it separate from heavy
-    // Poisson/processing jobs prevents live scan history from competing with editor tasks and
-    // lets multiple historical frames transform in parallel without touching OpenGL off-thread.
+    // Exactly one background task is used for online-optimization pose transforms. The task
+    // uses frame-level OpenMP internally and becomes visible atomically in one paintGL().
     QThreadPool livePoseWorkerPool_;
     std::atomic<bool> livePoseWorkersStopping_{false};
     std::atomic<int> livePoseJobsInFlight_{0};
     std::atomic<std::uint64_t> livePoseEpochCounter_{1};
     std::mutex livePoseReadyMutex_;
-    std::deque<LivePoseTransformResult> livePoseReady_;
+    std::deque<LivePoseBatchTransformResult> livePoseReady_;
 #ifdef JMENGINE_HAS_TEXTURE_MAPPING
     TextureFramesPtr textureFrames_;
 #endif

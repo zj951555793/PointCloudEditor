@@ -17,6 +17,9 @@ class FrameQueue {
     // Preserve chronological continuity: when full, reject the incoming
     // newest frame instead of evicting an older frame already waiting.
     bool pushSequential(CameraFrame frame);
+    // Lossless producer path used by virtual/dataset replay. Waits until a slot
+    // becomes available or the queue is closed.
+    bool pushBlocking(CameraFrame frame);
     bool pushLatest(CameraFrame frame);
     bool pop(CameraFrame& frame);
     void close();

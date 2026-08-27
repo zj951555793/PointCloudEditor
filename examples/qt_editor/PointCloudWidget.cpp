@@ -34,6 +34,7 @@
 #include <QWheelEvent>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <cstring>
@@ -847,10 +848,10 @@ PointCloudWidget::PointCloudWidget(QWidget* parent) : QOpenGLWidget(parent) {
     setMouseTracking(true);
     setMinimumSize(800, 480);
     workerPool_.setMaxThreadCount(2);
-    const int idealThreads = std::max(2, QThread::idealThreadCount());
-    // Pose application is CPU-bound but must leave headroom for RGBDFusion, OneShot and Qt.
-    // Half the logical cores, clamped to 2..4, works well on RK3588 and desktop CPUs.
-    livePoseWorkerPool_.setMaxThreadCount(std::clamp(idealThreads / 2, 2, 4));
+    // Realtime pose optimization owns exactly ONE background task. Heavy frame/point
+    // transformation inside that task is parallelized by OpenMP, avoiding nested
+    // QThreadPool x OpenMP oversubscription while preserving one atomic visual commit.
+    livePoseWorkerPool_.setMaxThreadCount(1);
     statusText_ = QString::fromUtf8("空场景：打开 OBJ / PLY / TXT / ASC");
 }
 
@@ -1320,237 +1321,338 @@ void PointCloudWidget::updateScanFramePoses(
     if (!model.liveFramePoseMode || !model.cloud)
         return;
 
-    // Keep this UI callback cheap. A loop-closure refresh can change thousands of historical
-    // poses at once; transforming all their points synchronously here blocks event processing
-    // and makes the *current* frame look jittery even though its pose is protected. Coalesce
-    // repeated updates by frame id and let paintGL consume them under a fixed point budget.
+    // Treat one SLAM optimization snapshot as one render batch.  Do NOT trickle historical
+    // frames through paintGL() under a point budget like file loading.  If a previous batch is
+    // still transforming, keep only the newest RT per frame for the next batch.
     for (const auto& u : *updates) {
         if (model.liveFrameIndex.find(u.frameId) == model.liveFrameIndex.end())
             continue;
         JMEngine::Mat4f nextPose;
         nextPose.m = u.pose;
-        if (model.livePoseInFlight.find(u.frameId) != model.livePoseInFlight.end()) {
-            // The worker already owns an immutable local-point snapshot. Keep only the newest
-            // RT; once that worker result is consumed the frame is queued exactly once again.
-            model.pendingLivePoseUpdates[u.frameId] = nextPose;
-            continue;
-        }
-        auto [it, inserted] = model.pendingLivePoseUpdates.emplace(u.frameId, nextPose);
-        if (!inserted) {
-            it->second = nextPose;
-        } else {
-            model.pendingLivePoseOrder.push_back(u.frameId);
-        }
+        model.pendingLivePoseUpdates[u.frameId] = nextPose;
     }
-    update();
+
+    // Starting the worker does not repaint.  The worker posts exactly one update() after the
+    // whole batch has finished transforming, so optimization can never appear half-applied.
+    schedulePendingLivePoseUpdates(model);
 }
 
 void PointCloudWidget::schedulePendingLivePoseUpdates(Model& model) {
-    if (!model.cloud || model.liveBackCloud || model.pendingLivePoseOrder.empty() ||
+    if (!model.cloud || model.liveBackCloud || model.pendingLivePoseUpdates.empty() ||
+        model.livePoseBatchInFlight ||
         livePoseWorkersStopping_.load(std::memory_order_acquire))
         return;
 
-    const int maxJobs = std::max(2, livePoseWorkerPool_.maxThreadCount() * 2);
-    {
-        std::lock_guard<std::mutex> lock(livePoseReadyMutex_);
-        // Bound transformed staging memory. The renderer will drain this queue on subsequent
-        // paints; producing thousands of completed ranges ahead of GL only wastes RAM.
-        if (livePoseReady_.size() >= std::size_t(maxJobs * 2))
-            return;
-    }
-    while (!model.pendingLivePoseOrder.empty() &&
-           livePoseJobsInFlight_.load(std::memory_order_acquire) < maxJobs) {
-        const int frameId = model.pendingLivePoseOrder.front();
-        model.pendingLivePoseOrder.pop_front();
-
-        auto poseIt = model.pendingLivePoseUpdates.find(frameId);
-        if (poseIt == model.pendingLivePoseUpdates.end())
-            continue;
-        if (model.livePoseInFlight.find(frameId) != model.livePoseInFlight.end())
-            continue;
-
-        const auto frameIndexIt = model.liveFrameIndex.find(frameId);
-        if (frameIndexIt == model.liveFrameIndex.end()) {
-            model.pendingLivePoseUpdates.erase(poseIt);
-            continue;
-        }
-        const auto& frame = model.liveFrames[frameIndexIt->second];
-        if (!frame.localPoints) {
-            model.pendingLivePoseUpdates.erase(poseIt);
-            continue;
-        }
-
-        const JMEngine::Mat4f nextPose = poseIt->second;
-        model.pendingLivePoseUpdates.erase(poseIt);
-        model.livePoseInFlight.insert(frameId);
-
-        const QString modelPath = model.path;
-        const std::uint64_t modelEpoch = model.livePoseEpoch;
-        const std::size_t first = frame.first;
-        const std::size_t frameCount = frame.count;
-        auto localPoints = frame.localPoints;
-
-        std::size_t markerFirst = 0;
-        std::size_t markerCount = 0;
+    struct BatchInput {
+        int frameId{-1};
+        std::size_t first{0};
+        std::size_t frameCount{0};
+        JMEngine::Mat4f pose{JMEngine::Mat4f::identity()};
+        std::shared_ptr<std::vector<Model::LiveLocalPoint>> localPoints;
+        std::size_t markerFirst{0};
+        std::size_t markerCount{0};
         std::shared_ptr<std::vector<JMEngine::Point>> markerLocalPoints;
+        std::size_t pointGpuRange{std::numeric_limits<std::size_t>::max()};
+        std::size_t pointGpuOffset{0};
+        std::size_t markerGpuRange{std::numeric_limits<std::size_t>::max()};
+        std::size_t markerGpuOffset{0};
+    };
+
+    std::vector<BatchInput> inputs;
+    inputs.reserve(model.pendingLivePoseUpdates.size());
+    for (const auto& [frameId, nextPose] : model.pendingLivePoseUpdates) {
+        const auto frameIndexIt = model.liveFrameIndex.find(frameId);
+        if (frameIndexIt == model.liveFrameIndex.end())
+            continue;
+        const auto& frame = model.liveFrames[frameIndexIt->second];
+        if (!frame.localPoints)
+            continue;
+
+        BatchInput input;
+        input.frameId = frameId;
+        input.first = frame.first;
+        input.frameCount = std::min(frame.count, frame.localPoints->size());
+        input.pose = nextPose;
+        input.localPoints = frame.localPoints;
+
         const auto markerIt = model.liveMarkerIndex.find(frameId);
         if (markerIt != model.liveMarkerIndex.end()) {
             const auto& marker = model.liveMarkerRanges[markerIt->second];
-            markerFirst = marker.first;
-            markerCount = marker.count;
-            markerLocalPoints = marker.localPoints;
+            input.markerFirst = marker.first;
+            input.markerCount = marker.localPoints
+                ? std::min(marker.count, marker.localPoints->size())
+                : 0u;
+            input.markerLocalPoints = marker.localPoints;
         }
-
-        livePoseJobsInFlight_.fetch_add(1, std::memory_order_acq_rel);
-        PointCloudWidget* owner = this;
-        livePoseWorkerPool_.start(
-            [owner, modelPath, modelEpoch, frameId, first, frameCount, nextPose,
-             localPoints = std::move(localPoints), markerFirst, markerCount,
-             markerLocalPoints = std::move(markerLocalPoints)]() mutable {
-                LivePoseTransformResult result;
-                result.modelPath = modelPath;
-                result.modelEpoch = modelEpoch;
-                result.frameId = frameId;
-                result.first = first;
-                result.pose = nextPose;
-                result.localToken = localPoints;
-
-                const std::size_t count = localPoints
-                    ? std::min(frameCount, localPoints->size())
-                    : 0u;
-                result.transformedPoints.resize(count);
-                for (std::size_t i = 0; i < count; ++i) {
-                    const auto& src = (*localPoints)[i];
-                    auto& dst = result.transformedPoints[i];
-                    dst.position = JMEngine::transformPoint(nextPose, src.position);
-                    dst.normal = transformNormalByPose(nextPose, src.normal);
-                }
-
-                result.markerFirst = markerFirst;
-                result.markerToken = markerLocalPoints;
-                const std::size_t markers = markerLocalPoints
-                    ? std::min(markerCount, markerLocalPoints->size())
-                    : 0u;
-                result.transformedMarkers.resize(markers);
-                for (std::size_t i = 0; i < markers; ++i)
-                    result.transformedMarkers[i] =
-                        worldPointFromLocal((*markerLocalPoints)[i], nextPose);
-
-                if (!owner->livePoseWorkersStopping_.load(std::memory_order_acquire)) {
-                    {
-                        std::lock_guard<std::mutex> lock(owner->livePoseReadyMutex_);
-                        owner->livePoseReady_.push_back(std::move(result));
-                    }
-                    QMetaObject::invokeMethod(owner, [owner] {
-                        if (!owner->livePoseWorkersStopping_.load(std::memory_order_acquire))
-                            owner->update();
-                    }, Qt::QueuedConnection);
-                }
-                owner->livePoseJobsInFlight_.fetch_sub(1, std::memory_order_acq_rel);
-            });
+        inputs.push_back(std::move(input));
     }
-}
+    model.pendingLivePoseUpdates.clear();
 
-void PointCloudWidget::applyReadyLivePoseUpdates(std::size_t& pointBudget) {
-    bool anyChanged = false;
-    bool appliedAny = false;
+    if (inputs.empty())
+        return;
 
-    while (pointBudget > 0) {
-        LivePoseTransformResult result;
-        {
-            std::lock_guard<std::mutex> lock(livePoseReadyMutex_);
-            if (livePoseReady_.empty())
-                break;
-            result = std::move(livePoseReady_.front());
-            livePoseReady_.pop_front();
+    // Spatial order matters here.  Optimization snapshots commonly contain almost every
+    // historical frame. Sorting once lets the worker build a handful of contiguous GPU ranges
+    // instead of making hundreds/thousands of glBufferSubData calls on the render thread.
+    std::sort(inputs.begin(), inputs.end(), [](const BatchInput& a, const BatchInput& b) {
+        return a.first < b.first;
+    });
+
+    model.livePoseBatchInFlight = true;
+    const QString modelPath = model.path;
+    const std::uint64_t modelEpoch = model.livePoseEpoch;
+    const std::uint64_t batchSerial = ++model.livePoseBatchSerial;
+
+    struct SegmentPlan {
+        std::size_t first{0};
+        std::size_t count{0};
+        std::size_t inputIndex{0};
+        bool marker{false};
+    };
+    std::vector<SegmentPlan> segments;
+    segments.reserve(inputs.size() * 2u);
+    for (std::size_t i = 0; i < inputs.size(); ++i) {
+        if (inputs[i].frameCount > 0)
+            segments.push_back({inputs[i].first, inputs[i].frameCount, i, false});
+        if (inputs[i].markerCount > 0)
+            segments.push_back({inputs[i].markerFirst, inputs[i].markerCount, i, true});
+    }
+    std::sort(segments.begin(), segments.end(), [](const SegmentPlan& a, const SegmentPlan& b) {
+        return a.first < b.first;
+    });
+
+    auto batch = std::make_shared<LivePoseBatchTransformResult>();
+    batch->modelPath = modelPath;
+    batch->modelEpoch = modelEpoch;
+    batch->batchSerial = batchSerial;
+    batch->frames.reserve(inputs.size());
+    for (const auto& input : inputs) {
+        LivePoseFrameCommit commit;
+        commit.frameId = input.frameId;
+        commit.first = input.first;
+        commit.count = input.frameCount;
+        commit.pose = input.pose;
+        commit.localToken = input.localPoints;
+        commit.markerFirst = input.markerFirst;
+        commit.markerCount = input.markerCount;
+        commit.markerToken = input.markerLocalPoints;
+        batch->frames.push_back(std::move(commit));
+        batch->transformedPointCount += input.frameCount + input.markerCount;
+    }
+
+    // Pre-size the final position/normal upload ranges BEFORE workers start. Workers then write
+    // disjoint elements directly into the final staging buffers, so paintGL does not allocate
+    // or repack millions of points after an optimization finishes.
+    for (const auto& segment : segments) {
+        bool appendToPrevious = false;
+        if (!batch->gpuRanges.empty()) {
+            const auto& previous = batch->gpuRanges.back();
+            appendToPrevious = segment.first == previous.first + previous.positions.size();
         }
-
-        const int modelIndex = findModel(result.modelPath);
-        if (modelIndex < 0)
-            continue;
-        auto& model = *models_[static_cast<std::size_t>(modelIndex)];
-        if (model.livePoseEpoch != result.modelEpoch)
-            continue;
-
-        // During VBO growth the back snapshot still represents an older CPU cloud. Applying a
-        // ready optimized range now would be overwritten by the subsequent swap, so defer it.
-        if (model.liveBackCloud) {
-            std::lock_guard<std::mutex> lock(livePoseReadyMutex_);
-            livePoseReady_.push_front(std::move(result));
-            break;
+        if (!appendToPrevious) {
+            Model::LivePoseGpuRange range;
+            range.first = segment.first;
+            batch->gpuRanges.push_back(std::move(range));
         }
-
-        const auto frameIndexIt = model.liveFrameIndex.find(result.frameId);
-        if (frameIndexIt == model.liveFrameIndex.end()) {
-            model.livePoseInFlight.erase(result.frameId);
-            continue;
+        auto& range = batch->gpuRanges.back();
+        const std::size_t offset = range.positions.size();
+        range.positions.resize(offset + segment.count);
+        range.normals.resize(offset + segment.count);
+        auto& input = inputs[segment.inputIndex];
+        if (segment.marker) {
+            input.markerGpuRange = batch->gpuRanges.size() - 1u;
+            input.markerGpuOffset = offset;
+        } else {
+            input.pointGpuRange = batch->gpuRanges.size() - 1u;
+            input.pointGpuOffset = offset;
         }
-        auto& frame = model.liveFrames[frameIndexIt->second];
-        const bool sameFrameStorage =
-            frame.first == result.first && frame.localPoints == result.localToken;
-        if (!sameFrameStorage) {
-            model.livePoseInFlight.erase(result.frameId);
-            continue;
-        }
+    }
 
-        // If another optimization update arrived while this job was running, this result is
-        // already obsolete. Drop it before touching CPU/GPU history and immediately make the
-        // coalesced newest pose schedulable.
-        if (model.pendingLivePoseUpdates.find(result.frameId) !=
-            model.pendingLivePoseUpdates.end()) {
-            model.livePoseInFlight.erase(result.frameId);
-            model.pendingLivePoseOrder.push_back(result.frameId);
-            continue;
-        }
+    struct BatchWorkState {
+        PointCloudWidget* owner{nullptr};
+        std::shared_ptr<LivePoseBatchTransformResult> batch;
+        std::vector<BatchInput> inputs;
+        std::chrono::steady_clock::time_point started;
+    };
+    auto state = std::make_shared<BatchWorkState>();
+    state->owner = this;
+    state->batch = batch;
+    state->inputs = std::move(inputs);
+    state->started = std::chrono::steady_clock::now();
 
-        const std::size_t work = result.transformedPoints.size() + result.transformedMarkers.size();
-        if (appliedAny && work > pointBudget) {
-            std::lock_guard<std::mutex> lock(livePoseReadyMutex_);
-            livePoseReady_.push_front(std::move(result));
-            break;
-        }
+    const int inputCount = static_cast<int>(state->inputs.size());
+    constexpr std::size_t kLivePoseOmpMinPoints = 30000u;
+    int ompThreads = 1;
+#ifdef JMENGINE_USE_OPENMP
+    if (inputCount >= 4 && state->batch->transformedPointCount >= kLivePoseOmpMinPoints) {
+        // Live scanning must leave substantially more CPU headroom than offline processing:
+        // RGBDFusion, OneShot, capture and Qt are active at the same time. Use at most half of
+        // the logical CPUs (and never more than 8) while still respecting the project CPU-1 cap.
+        const int logicalThreads = std::max(2, QThread::idealThreadCount());
+        const int liveOmpLimit = std::clamp(logicalThreads / 2, 2, 8);
+        ompThreads = std::min(
+            {JMEngine::processing::processingThreadCount(), inputCount, liveOmpLimit});
+    }
+#endif
+    const bool useOmp = ompThreads > 1;
+    livePoseJobsInFlight_.fetch_add(1, std::memory_order_acq_rel);
 
-        auto& world = model.cloud->points();
-        const std::size_t pointCount = result.first < world.size()
-            ? std::min(result.transformedPoints.size(), world.size() - result.first)
-            : 0u;
-        for (std::size_t i = 0; i < pointCount; ++i) {
-            auto& dst = world[result.first + i];
-            const auto& src = result.transformedPoints[i];
-            dst.position = src.position;
-            dst.normal = src.normal;
-        }
-        if (pointCount > 0)
-            model.livePoseDirtyRanges.push_back({result.first, pointCount});
+    // One QThreadPool task per optimization batch. OpenMP parallelizes independent historical
+    // frames inside the task. All GPU staging buffers were pre-sized above, and each frame writes
+    // to a disjoint range, so no lock is needed in the OMP loop. Nothing is rendered until this
+    // entire loop is complete.
+    livePoseWorkerPool_.start([state, inputCount, ompThreads, useOmp]() {
+#ifdef JMENGINE_USE_OPENMP
+#pragma omp parallel for schedule(static) num_threads(ompThreads) if(useOmp)
+#endif
+        for (int inputIndex = 0; inputIndex < inputCount; ++inputIndex) {
+            const auto& input = state->inputs[static_cast<std::size_t>(inputIndex)];
+            if (input.pointGpuRange != std::numeric_limits<std::size_t>::max()) {
+                auto& range = state->batch->gpuRanges[input.pointGpuRange];
+                for (std::size_t i = 0; i < input.frameCount; ++i) {
+                    const auto& src = (*input.localPoints)[i];
+                    const std::size_t dstIndex = input.pointGpuOffset + i;
+                    range.positions[dstIndex] = JMEngine::transformPoint(input.pose, src.position);
+                    range.normals[dstIndex] = transformNormalByPose(input.pose, src.normal);
+                }
+            }
 
-        if (result.markerToken) {
-            const auto markerIndexIt = model.liveMarkerIndex.find(result.frameId);
-            if (markerIndexIt != model.liveMarkerIndex.end()) {
-                auto& marker = model.liveMarkerRanges[markerIndexIt->second];
-                if (marker.first == result.markerFirst && marker.localPoints == result.markerToken &&
-                    marker.first < world.size()) {
-                    const std::size_t markerCount = std::min(
-                        result.transformedMarkers.size(), world.size() - marker.first);
-                    for (std::size_t i = 0; i < markerCount; ++i)
-                        world[marker.first + i] = result.transformedMarkers[i];
-                    if (markerCount > 0)
-                        model.livePoseDirtyRanges.push_back({marker.first, markerCount});
+            if (input.markerGpuRange != std::numeric_limits<std::size_t>::max()) {
+                auto& range = state->batch->gpuRanges[input.markerGpuRange];
+                for (std::size_t i = 0; i < input.markerCount; ++i) {
+                    const auto transformed =
+                        worldPointFromLocal((*input.markerLocalPoints)[i], input.pose);
+                    const std::size_t dstIndex = input.markerGpuOffset + i;
+                    range.positions[dstIndex] = transformed.position;
+                    range.normals[dstIndex] = transformed.normal;
                 }
             }
         }
 
-        frame.pose = result.pose;
-        model.livePoseInFlight.erase(result.frameId);
-        // A newer optimized RT may have arrived while this worker was running. updateScanFramePoses
-        // coalesces it in the map but intentionally does not enqueue a second concurrent job.
-        if (model.pendingLivePoseUpdates.find(result.frameId) !=
-            model.pendingLivePoseUpdates.end()) {
-            model.pendingLivePoseOrder.push_back(result.frameId);
+        const auto finished = std::chrono::steady_clock::now();
+        state->batch->transformMs =
+            std::chrono::duration<double, std::milli>(finished - state->started).count();
+
+        qDebug().nospace()
+            << "[LIVE POSE OMP] frames=" << inputCount
+            << " points=" << static_cast<qulonglong>(state->batch->transformedPointCount)
+            << " ompThreads=" << ompThreads
+            << " enabled=" << (useOmp ? 1 : 0)
+            << " transform=" << state->batch->transformMs << "ms";
+
+        auto* owner = state->owner;
+        if (!owner->livePoseWorkersStopping_.load(std::memory_order_acquire)) {
+            {
+                std::lock_guard<std::mutex> lock(owner->livePoseReadyMutex_);
+                owner->livePoseReady_.push_back(std::move(*state->batch));
+            }
+            // Exactly ONE GUI refresh after the whole OMP batch completes.
+            QMetaObject::invokeMethod(owner, [owner] {
+                if (!owner->livePoseWorkersStopping_.load(std::memory_order_acquire))
+                    owner->update();
+            }, Qt::QueuedConnection);
+        }
+        owner->livePoseJobsInFlight_.fetch_sub(1, std::memory_order_acq_rel);
+    });
+
+}
+
+void PointCloudWidget::applyReadyLivePoseUpdates() {
+    bool anyChanged = false;
+
+    // Complete batches only: there is no point budget and no partial optimization display.
+    while (true) {
+        LivePoseBatchTransformResult batch;
+        {
+            std::lock_guard<std::mutex> lock(livePoseReadyMutex_);
+            if (livePoseReady_.empty())
+                break;
+            batch = std::move(livePoseReady_.front());
+            livePoseReady_.pop_front();
         }
 
-        pointBudget = work >= pointBudget ? 0u : pointBudget - work;
-        appliedAny = true;
-        anyChanged = anyChanged || pointCount > 0 || !result.transformedMarkers.empty();
+        const int modelIndex = findModel(batch.modelPath);
+        if (modelIndex < 0)
+            continue;
+        auto& model = *models_[static_cast<std::size_t>(modelIndex)];
+        if (model.livePoseEpoch != batch.modelEpoch)
+            continue;
+
+        // A VBO growth swap would overwrite this batch. Defer the WHOLE batch, never part of it.
+        if (model.liveBackCloud) {
+            std::lock_guard<std::mutex> lock(livePoseReadyMutex_);
+            livePoseReady_.push_front(std::move(batch));
+            break;
+        }
+
+        // Validate every frame token first. If the scan model changed while the worker ran,
+        // discard the complete stale batch instead of showing a mixed old/new optimization.
+        bool valid = true;
+        for (const auto& commit : batch.frames) {
+            const auto frameIndexIt = model.liveFrameIndex.find(commit.frameId);
+            if (frameIndexIt == model.liveFrameIndex.end()) {
+                valid = false;
+                break;
+            }
+            const auto& frame = model.liveFrames[frameIndexIt->second];
+            if (frame.first != commit.first || frame.localPoints != commit.localToken) {
+                valid = false;
+                break;
+            }
+            if (commit.markerToken) {
+                const auto markerIndexIt = model.liveMarkerIndex.find(commit.frameId);
+                if (markerIndexIt == model.liveMarkerIndex.end()) {
+                    valid = false;
+                    break;
+                }
+                const auto& marker = model.liveMarkerRanges[markerIndexIt->second];
+                if (marker.first != commit.markerFirst || marker.localPoints != commit.markerToken) {
+                    valid = false;
+                    break;
+                }
+            }
+        }
+        if (!valid) {
+            if (batch.batchSerial == model.livePoseBatchSerial)
+                model.livePoseBatchInFlight = false;
+            continue;
+        }
+
+        QElapsedTimer guiApplyTimer;
+        guiApplyTimer.start();
+        auto& world = model.cloud->points();
+        for (const auto& range : batch.gpuRanges) {
+            if (range.first >= world.size())
+                continue;
+            const std::size_t count = std::min(range.positions.size(), world.size() - range.first);
+            for (std::size_t i = 0; i < count; ++i) {
+                auto& dst = world[range.first + i];
+                dst.position = range.positions[i];
+                dst.normal = range.normals[i];
+            }
+        }
+        for (const auto& commit : batch.frames) {
+            const auto frameIndexIt = model.liveFrameIndex.find(commit.frameId);
+            if (frameIndexIt != model.liveFrameIndex.end())
+                model.liveFrames[frameIndexIt->second].pose = commit.pose;
+        }
+
+        // Move already-packed GPU ranges to the model. paintGL uploads them directly; it no
+        // longer allocates pos/normal vectors or rescans model.cloud for every optimization.
+        model.livePoseGpuRanges = std::move(batch.gpuRanges);
+
+        if (batch.batchSerial == model.livePoseBatchSerial)
+            model.livePoseBatchInFlight = false;
+        anyChanged = anyChanged || !model.livePoseGpuRanges.empty();
+
+        const double guiApplyMs = double(guiApplyTimer.nsecsElapsed()) / 1.0e6;
+        if (batch.transformedPointCount >= 250000u || guiApplyMs >= 8.0 || batch.transformMs >= 8.0) {
+            std::cout << "[LIVE POSE BATCH] frames=" << batch.frames.size()
+                      << " points=" << batch.transformedPointCount
+                      << " transform=" << batch.transformMs << "ms"
+                      << " guiApply=" << guiApplyMs << "ms"
+                      << " gpuRanges=" << model.livePoseGpuRanges.size() << std::endl;
+        }
     }
 
     if (anyChanged) {
@@ -1813,10 +1915,10 @@ void PointCloudWidget::replaceScanPreview(const std::shared_ptr<JMEngine::PointC
     model.livePoseEpoch = livePoseEpochCounter_.fetch_add(1, std::memory_order_relaxed);
     model.liveFrames.clear();
     model.liveFrameIndex.clear();
-    model.pendingLivePoseOrder.clear();
     model.pendingLivePoseUpdates.clear();
-    model.livePoseInFlight.clear();
-    model.livePoseDirtyRanges.clear();
+    model.livePoseBatchInFlight = false;
+    model.livePoseBatchSerial = 0;
+    model.livePoseGpuRanges.clear();
     model.liveMarkerRanges.clear();
     model.liveMarkerIndex.clear();
     model.pendingLiveMarkers.clear();
@@ -2024,6 +2126,9 @@ void PointCloudWidget::initializeGL() {
     }
 
     backend_->configureContextState(*this);
+    qInfo() << "[JMEngine GL CAP] vao=" << backend_->vaoSupported()
+            << "gpuPicking=" << backend_->gpuPickingSupported()
+            << "legacyVboFallback=" << (!backend_->vaoSupported() && !(ctx && ctx->isOpenGLES()));
     glEnable(GL_DEPTH_TEST);
     glDepthFunc(GL_LEQUAL);
     glDisable(GL_CULL_FACE);
@@ -2344,6 +2449,25 @@ void PointCloudWidget::uploadPointRangeNow(Model& m, std::size_t first, std::siz
     m.drawPointCount = static_cast<GLsizei>(std::max<std::size_t>(m.drawPointCount, first + count));
 }
 
+void PointCloudWidget::uploadLivePoseRangeNow(Model& m, const Model::LivePoseGpuRange& range) {
+    if (!m.glCreated || range.positions.empty() || range.first >= m.uploadPointCursor)
+        return;
+    const std::size_t count = std::min(range.positions.size(), m.uploadPointCursor - range.first);
+    if (count == 0)
+        return;
+
+    // GPU-ready staging was produced by the background optimization batch. No allocation,
+    // no model.cloud rescan, and no generic color/flags/selection upload on the render thread.
+    const GLintptr off = static_cast<GLintptr>(range.first);
+    glBindBuffer(GL_ARRAY_BUFFER, m.gpu.positionVbo);
+    glBufferSubData(GL_ARRAY_BUFFER, off * sizeof(JMEngine::Vec3f),
+                    count * sizeof(JMEngine::Vec3f), range.positions.data());
+    glBindBuffer(GL_ARRAY_BUFFER, m.gpu.normalVbo);
+    glBufferSubData(GL_ARRAY_BUFFER, off * sizeof(JMEngine::Vec3f),
+                    count * sizeof(JMEngine::Vec3f), range.normals.data());
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+}
+
 void PointCloudWidget::uploadLiveBackIncremental(Model& m, std::size_t& budget) {
     if (!m.liveBackCloud || m.liveBackCloud->empty() || !backend_ || budget == 0)
         return;
@@ -2575,49 +2699,36 @@ void PointCloudWidget::paintGL() {
     // incremental upload policy and byte budget.
     // One uploader and one byte budget for both real and virtual scanning.
     std::size_t budget = 4u * 1024u * 1024u;
-    // Historical pose math runs on a dedicated worker pool. paintGL only schedules immutable
-    // frame jobs and consumes already-transformed ranges under a bounded copy/upload budget.
-    // This keeps loop closure CPU work parallel while OpenGL remains strictly on this thread.
+    // Live optimization is NOT a file-loading path.  A complete background pose batch is
+    // committed in full before this paint continues.  There is no per-paint point budget and
+    // therefore no partially optimized history visible between frames.
+    applyReadyLivePoseUpdates();
     for (auto& m : models_)
         schedulePendingLivePoseUpdates(*m);
-    std::size_t livePosePointBudget = 250000u;
-    applyReadyLivePoseUpdates(livePosePointBudget);
 
     for (auto& m : models_) {
         uploadModelIncremental(*m, budget);
         uploadLiveBackIncremental(*m, budget);
 
-        // Pose optimization only rewrites the affected world-baked frame ranges.
-        // Coalesce adjacent ranges so one optimization batch usually becomes one small
-        // glBufferSubData sequence rather than hundreds of historical draw calls.
-        if (m->glCreated && !m->livePoseDirtyRanges.empty()) {
-            auto ranges = std::move(m->livePoseDirtyRanges);
-            m->livePoseDirtyRanges.clear();
-            std::sort(ranges.begin(), ranges.end(),
-                      [](const auto& a, const auto& b) { return a.first < b.first; });
-
-            std::size_t mergedFirst = ranges.front().first;
-            std::size_t mergedEnd = mergedFirst + ranges.front().second;
-            auto flushRange = [&](std::size_t first, std::size_t end) {
-                if (first >= end || first >= m->uploadPointCursor)
-                    return;
-                end = std::min(end, m->uploadPointCursor);
-                if (end > first)
-                    uploadPointRangeNow(*m, first, end - first);
-            };
-
-            for (std::size_t i = 1; i < ranges.size(); ++i) {
-                const std::size_t first = ranges[i].first;
-                const std::size_t end = first + ranges[i].second;
-                if (first <= mergedEnd) {
-                    mergedEnd = std::max(mergedEnd, end);
-                } else {
-                    flushRange(mergedFirst, mergedEnd);
-                    mergedFirst = first;
-                    mergedEnd = end;
-                }
+        // A complete optimization batch is already packed into contiguous position/normal
+        // ranges by background workers. Upload every range in this paint, then draw once.
+        // This is atomic visually, but unlike v23 it does not repack millions of points here.
+        if (m->glCreated && !m->livePoseGpuRanges.empty()) {
+            QElapsedTimer gpuUploadTimer;
+            gpuUploadTimer.start();
+            std::size_t uploadedPoints = 0;
+            const std::size_t rangeCount = m->livePoseGpuRanges.size();
+            for (const auto& range : m->livePoseGpuRanges) {
+                uploadLivePoseRangeNow(*m, range);
+                uploadedPoints += range.positions.size();
             }
-            flushRange(mergedFirst, mergedEnd);
+            m->livePoseGpuRanges.clear();
+            const double gpuUploadMs = double(gpuUploadTimer.nsecsElapsed()) / 1.0e6;
+            if (uploadedPoints >= 250000u || gpuUploadMs >= 8.0) {
+                std::cout << "[LIVE POSE GPU] ranges=" << rangeCount
+                          << " points=" << uploadedPoints
+                          << " upload=" << gpuUploadMs << "ms" << std::endl;
+            }
         }
     }
     uploadScanStatusFrame(recoveryScanGpu_);
@@ -2636,7 +2747,6 @@ void PointCloudWidget::paintGL() {
     }
 
     bool uploading = false;
-    bool poseSchedulingPending = false;
     for (const auto& m : models_) {
         if (!m->cloud)
             continue;
@@ -2645,13 +2755,10 @@ void PointCloudWidget::paintGL() {
             (m->liveBackCloud && m->liveBackUploadCursor < m->liveBackCloud->size())) {
             uploading = true;
         }
-        if (!m->liveBackCloud && !m->pendingLivePoseOrder.empty())
-            poseSchedulingPending = true;
     }
-    // If a non-scan/editor upload exceeds the per-paint budget, or applying one worker result
-    // exposed a newer coalesced pose for that frame, schedule another paint. Finished workers
-    // independently post update() when their ready result enters the queue.
-    if (uploading || poseSchedulingPending)
+    // Ordinary model/live VBO growth remains incremental. Optimization does not use this loop:
+    // its worker requests exactly one repaint only after a complete pose batch is ready.
+    if (uploading)
         update();
 }
 

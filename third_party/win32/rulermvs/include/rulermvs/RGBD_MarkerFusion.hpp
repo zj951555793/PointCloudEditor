@@ -72,44 +72,62 @@ struct IRGBD_MarkerFusionPara {
     float optimize_cloud_max_dist    = 10.0f;
     float optimize_cloud_max_angle   = (float)MVS_PI_4;
 
-    bool consecutive = true;  //是否连续扫描模式，该模式下特征对齐frames大小是1且当前帧与前一帧对齐失败时会将第一帧替换掉并重新初始化
-    //标志点对齐模式下，连续若干帧对齐失败时，会清空全局地图并重新初始化
-    //bool calculate_pose = true;  //是否计算位姿，若为false当前帧既无法初始化成功也不参与对齐，不存储帧的内存(已废弃)
-    bool use_marker_track = false;
-    bool input_rectified = false;  //默认输入图片为原始图片
-    bool input_rectifiefcamera = true;  //是否输入极线校正后相机参数，true表示内部调用stereorectify函数后再读取输入的P1、P2等
-    int width = -1;  //照片宽度
-    int height = -1;  //照片高度
-    int rectify_flags = cv::CALIB_SAME_FOCAL_LENGTH;
+    // 标志点提点参数
     CicrleConfigs configs;
+    // 标志点粗对齐参数
     int min_match_num = 4;  //最小同名点数量
     int min_mappoint_num = 7;  //最小地图点数量，小于此值无法初始化全局地图
     double MAX_PTBIAS_ERROR = 0.18;  //同名点间的均方根差，相邻帧的该值对于下一帧的误匹配筛选具有重要意义
-    int match_adjacentframe_nums = 1;  //与相邻帧对齐时，默认只选取一帧，只与全局地图对齐时该参数没有意义
-    bool reproject_KeyFrame = false;  //是否将全局地图点重投影到关键帧生成新的帧
     double site_diff_thres = 1.0;  //两对同名点之间的线段距离差阈值
     double p3d_match_thres = 1.5;  //同名点匹配对在RT作用后两者之间的距离阈值
     double p3d_nearest_thres = 3.0;  //求解RT后合并单帧到global_map时，未参与匹配的同名点在同名点在RT作用后两者间的距离阈值，大于p3d_match_thres
-    int iter_Num = 1;  //BA优化迭代次数
-    //bool insert_newframe = true;  //对齐成功或初始化成功是否将当前帧添加到global_map中，false表示否定(calculate_pose为false时会被屏蔽)(已废弃)
-    slam::FrameMatchMode match_mode = slam::FrameMatchMode::match_adjacentFrame_only;  //默认为只与相邻帧对齐
+    int max_triMatched_counter = 2;  //三角形匹配成功次数阈值
+    slam::FrameMatchMode match_mode =
+        slam::FrameMatchMode::match_adjacentFrame_only;  //默认为只与相邻帧对齐
+    int match_adjacentframe_nums = 1;  //与相邻帧对齐时，默认只选取一帧，只与全局地图对齐时该参数没有意义
+    bool reproject_KeyFrame = false;  //是否将全局地图点重投影到关键帧生成新的帧
     bool savePointer = false;  //不开启共享指针(避免内存爆炸)
 
+    // 标志点精对齐参数
+    int iter_Num = 1;  // BA优化迭代次数
     int max_failedframes_num = 5;  //连续失败帧数量，超过该值说明全局地图globalmap存在问题，非标志点模式下，超过该值进行重定位
     int min_stable_globalmapframes = 10;  //全局地图内置稳定帧数量，低于此值表明该地图尚不稳定
-    int BA_min_added_mappoints = 7;  //BA优化要求的最小新增地图点数量
+    //int BA_min_added_mappoints = 7;  //BA优化要求的最小新增地图点数量
     int BA_min_added_frames = 6;  //BA优化要求的最小新增Frame数量
+
+    //外部控制参数（公共）
+    bool consecutive = true;  
+    //是否连续扫描模式，该模式下"特征对齐"frames大小是1且当前帧与前一帧对齐失败时会将第一帧替换掉并重新初始化，拍照模式下则不会重复初始化
+    //特征对齐下，连续模式时对齐失败若干帧才能重定位，拍照模式时对齐失败立刻重定位
+    //标志点对齐模式下，连续若干帧对齐失败时，会清空全局地图并重新初始化（连续模式下），拍照模式下初始化成功后即使多帧连续失败也不会重复初始化
+
+    //bool insert_newframe = true;  //对齐成功或初始化成功是否将当前帧添加到global_map中，false表示否定(calculate_pose为false时会被屏蔽)(已废弃)
+    //bool calculate_pose = true;  //是否计算位姿，若为false当前帧既无法初始化成功也不参与对齐，不存储帧的内存(已废弃)
+    bool use_marker_track = false;
+    bool input_rectified = false;  //默认输入图片为原始图片
+    bool input_rectifiedcamera = true;  //是否输入极线校正后相机参数，true表示内部调用stereorectify函数后再读取输入的P1、P2等
+    int width = -1;  //照片宽度
+    int height = -1;  //照片高度
+    int rectify_flags = cv::CALIB_SAME_FOCAL_LENGTH;
+    float valid_data_ratio = 0.125;  //深度图中有效数据占比（除以图片尺寸的乘积）最低阈值，低于该值为无效数据
 };
 
 /// @brief 获取拼接的结果数据
 struct IRGBD_MarkerFusionResult {
     /// @brief 匹配状态标识
-    enum : int { Failed = 0, Init, Succeed, Key, Relocation,Reset };
+    enum : int {
+        Failed = 0, /*参与对齐但返回失败*/
+        Init,       /*未参与对齐求解*/
+        Succeed,    /*参与对齐且返回成功*/
+        Key,        /*关键帧（前提条件当前帧必须要加入）*/
+        Relocation, /*重定位成功帧*/
+        Reset /*初始化成功（前提条件当前帧必须要加入）*/
+    };
     virtual ~IRGBD_MarkerFusionResult() {}
-    virtual int           getID() const            = 0;
+    virtual int getID() const = 0;
     virtual const void* getUserData() const = 0;
     virtual Pose getPose() const = 0;
-    virtual int           getState() const         = 0;
+    virtual int getState() const = 0;
     virtual Image3f getVmap() const = 0;
     virtual Image3f getNmap() const = 0;
     virtual Image8u getMask() const = 0;
@@ -197,10 +215,13 @@ struct IRGBD_MarkerFusion {
     virtual void deleteLastFrame() = 0;
     /// @brief 姿态优化
     /// @param progress 进度条
-    virtual std::pair<bool, Pose> rescan(const RGBImage& rgb, const Imagef& depth, Pose& pose, int min_num,int flag) = 0;
+    virtual std::pair<bool, Pose> rescan(const RGBImage& rgb,
+        const Imagef& depth, Pose& pose, int min_num, int flag) = 0;
     
     virtual void optimize(rulermvs::ProgressBar progress = 0) = 0;  //标志点模式下不可调用
     virtual void optimize_point_clouds(rulermvs::ProgressBar progress = 0) = 0;  //标志点模式下可调用
+
+    virtual void BundleAdjustmentWithLoopClosure(int iter_Num = 1, rulermvs::ProgressBar progress = 0) = 0;  //标志点模式下专用，用于回环校正及后续的BA优化
 
     virtual void equalizeSpeed() = 0;
 
@@ -227,6 +248,23 @@ MVS_EXPORT std::tuple<std::vector<Pose>, std::vector<CameraPB>, Pose> load_multi
     std::vector<Pose>& camPoseVec, std::vector<CameraPB>& cameraPBVec,
     int camera_count, int width, int height, bool output_rectify = false,
     int rectify_flags = cv::CALIB_SAME_FOCAL_LENGTH);
+
+MVS_EXPORT void merge_frame_to_cloud(std::vector<Imagef>& depths,
+    std::vector<RGBImage>& rgbs, CameraP& cam, std::vector<Pose>& poses,
+    RGBPointCloud& cloud);
+
+MVS_EXPORT void optimizeMultiGroupRGBDFrames(std::vector<Imagef>& _multi_depths,
+    std::vector<RGBImage>& _multi_rgbs, std::vector<Pose>& _multi_poses,
+    std::vector<int>& state, CameraP& cam, ICPMethod _method = ICPMethod::Color,
+    int optimize_rgbd_max_iter = 100, double optimize_rgbd_max_dist = 1.0,
+    double optimize_rgbd_max_angle = MVS_PI / 12,
+    double optimize_rgbd_min_overlap = 0.001,
+    double optimize_rgbd_theta = 0.000001f, int optimize_cloud_max_iter = 100,
+    double optimize_cloud_max_dist = 1.0,
+    double optimize_cloud_max_angle = MVS_PI / 12,
+    double optimize_cloud_min_overlap = 0.001,
+    double optimize_cloud_theta = 0.000001f, int _group_number = 80,
+    float voxel_leaf = 1.0f, ProgressBar progress = 0);
 
 /// @brief 读取厂家提供的极线校正后相机部分参数文件，默认双目相机
 /// @param path 标定文件路径，格式需统一

@@ -156,6 +156,10 @@ class RulerMvsBackend final : public ISlam {
         oneshot_->getColorCamera(camera_);
         rgbSize_ = {camera_.width, camera_.height};
         depthSize_ = rgbSize_ / kDepthScale;
+        std::cout << "[SLAM CALIB] color=" << rgbSize_.width << "x" << rgbSize_.height
+                  << " depth=" << depthSize_.width << "x" << depthSize_.height
+                  << " losslessDatasetReplay=" << (config_.losslessDatasetReplay ? 1 : 0)
+                  << std::endl;
 
         const double sx = double(depthSize_.width) / double(rgbSize_.width);
         const double sy = double(depthSize_.height) / double(rgbSize_.height);
@@ -194,7 +198,7 @@ class RulerMvsBackend final : public ISlam {
         fusion_ = std::make_unique<rgbdslam::RGBDFusion>(
             depthK_, vocabulary_, *database_, depthSize_.width, depthSize_.height,
             maxDists.data(), maxIters.data(), int(maxDists.size()),
-            8, 8, true, true);
+            8, 8, true, true, true, false);
 
         auto& p = fusion_->para();
         p.is_use_dbow = config_.registrationMode == ScanRegistrationMode::Texture;
@@ -216,6 +220,7 @@ class RulerMvsBackend final : public ISlam {
         markerConfigs_.has_distorted = true;
 
         accepting_.store(true, std::memory_order_release);
+        inputWaitInterrupted_.store(false, std::memory_order_release);
         inflight_.store(0, std::memory_order_release);
         submitted_.store(0, std::memory_order_release);
         completed_.store(0, std::memory_order_release);
@@ -255,18 +260,59 @@ class RulerMvsBackend final : public ISlam {
     bool process(const CameraFrame& frame) override {
         if (!fusion_ || !frame.valid() || !frame.code)
             return false;
-        if (frame.width != rgbSize_.width || frame.height != rgbSize_.height)
+        if (frame.width != rgbSize_.width || frame.height != rgbSize_.height) {
+            const int previous = inputSizeMismatchReports_.fetch_add(1, std::memory_order_relaxed);
+            if (previous < 5) {
+                std::cerr << "[SLAM INPUT] RGB size mismatch frame=" << frame.frameId
+                          << " actual=" << frame.width << "x" << frame.height
+                          << " calibration=" << rgbSize_.width << "x" << rgbSize_.height
+                          << " code=" << frame.codeWidth << "x" << frame.codeHeight
+                          << std::endl;
+            }
             return false;
+        }
 
-        std::lock_guard<std::mutex> lock(inputMutex_);
+        std::unique_lock<std::mutex> lock(inputMutex_);
         if (!accepting_.load(std::memory_order_acquire))
             return false;
+
+        const int configuredMaxInflight = std::max(1, config_.maxInflightFrames);
+        const int maxInflight = config_.losslessDatasetReplay
+            ? std::min(2, configuredMaxInflight)
+            : configuredMaxInflight;
+        if (config_.losslessDatasetReplay) {
+            // Keep virtual replay lossless, but do not flood the vendor SDK with
+            // six simultaneous OneShot callbacks. IOneShot owns internal scratch
+            // state and is not treated as a re-entrant decoder below. Two slots
+            // keep decode + RGBDFusion pipelined while preserving frame order.
+            using namespace std::chrono_literals;
+            while (accepting_.load(std::memory_order_acquire) &&
+                   !inputWaitInterrupted_.load(std::memory_order_acquire) &&
+                   inflight_.load(std::memory_order_acquire) >= maxInflight) {
+                if (inputSlotCondition_.wait_for(lock, 2s) == std::cv_status::timeout) {
+                    std::cout << "[VIRTUAL BACKPRESSURE] frame=" << frame.frameId
+                              << " inflight=" << inflight_.load(std::memory_order_relaxed)
+                              << " submitted=" << submitted_.load(std::memory_order_relaxed)
+                              << " completed=" << completed_.load(std::memory_order_relaxed)
+                              << " converted=" << converted_.load(std::memory_order_relaxed)
+                              << std::endl;
+                }
+            }
+            if (!accepting_.load(std::memory_order_acquire) ||
+                inputWaitInterrupted_.load(std::memory_order_acquire))
+                return false;
+
+            inflight_.fetch_add(1, std::memory_order_acq_rel);
+            lock.unlock();
+            submitFrame(frame);
+            return true;
+        }
+
         if (shouldThrottleLostTrackingInputLocked()) {
             pendingReplaced_.fetch_add(1, std::memory_order_relaxed);
             return false;
         }
 
-        const int maxInflight = std::max(1, config_.maxInflightFrames);
         if (inflight_.load(std::memory_order_acquire) >= maxInflight) {
             // Preserve a short sequence of adjacent frames instead of replacing
             // one pending frame with the newest image. Fast turntable motion
@@ -286,8 +332,25 @@ class RulerMvsBackend final : public ISlam {
         }
 
         inflight_.fetch_add(1, std::memory_order_acq_rel);
+        lock.unlock();
         submitFrame(frame);
         return true;
+    }
+
+    void setLosslessInputReplay(bool enabled) override {
+        // JMScanner calls this before the source starts producing frames. A new
+        // source also clears a previous stop/restart wake-up token.
+        {
+            std::lock_guard<std::mutex> lock(inputMutex_);
+            config_.losslessDatasetReplay = enabled;
+            inputWaitInterrupted_.store(false, std::memory_order_release);
+        }
+        inputSlotCondition_.notify_all();
+    }
+
+    void interruptInputWait() override {
+        inputWaitInterrupted_.store(true, std::memory_order_release);
+        inputSlotCondition_.notify_all();
     }
 
     Pose pose() const override {
@@ -308,6 +371,7 @@ class RulerMvsBackend final : public ISlam {
         }
 
         accepting_.store(false, std::memory_order_release);
+        inputSlotCondition_.notify_all();
         {
             std::lock_guard<std::mutex> lock(inputMutex_);
             pendingFrames_.clear();
@@ -366,6 +430,7 @@ class RulerMvsBackend final : public ISlam {
 
     void reset() override {
         accepting_.store(false, std::memory_order_release);
+        inputSlotCondition_.notify_all();
         {
             std::lock_guard<std::mutex> lock(inputMutex_);
             pendingFrames_.clear();
@@ -388,6 +453,8 @@ class RulerMvsBackend final : public ISlam {
         completed_.store(0, std::memory_order_release);
         converted_.store(0, std::memory_order_release);
         pendingReplaced_.store(0, std::memory_order_release);
+        inputSizeMismatchReports_.store(0, std::memory_order_release);
+        decodeEmptyReports_.store(0, std::memory_order_release);
 
         {
             std::lock_guard<std::mutex> lock(stateMutex_);
@@ -629,7 +696,26 @@ class RulerMvsBackend final : public ISlam {
 
                 rulermvs::Imagef depthImage;
                 rulermvs::SimpleTriMesh mesh;
-                oneshot_->decode(codeImage, mesh, decode);
+                {
+                    // The same IOneShot instance is shared by all RGBDFusion
+                    // input callbacks. Treat it as non-reentrant: concurrent
+                    // decode() calls can stall on some JMC1S recordings even
+                    // though JMC1L happens to tolerate them.
+                    std::lock_guard<std::mutex> decodeLock(oneShotDecodeMutex_);
+                    oneshot_->decode(codeImage, mesh, decode);
+                }
+                if (frameIndex < 3) {
+                    std::cout << "[ONESHOT DECODE] frame=" << frameIndex
+                              << " code=" << codeWidth << "x" << codeHeight
+                              << " points=" << mesh.points.size() << std::endl;
+                } else if (mesh.points.empty()) {
+                    const int report = decodeEmptyReports_.fetch_add(1, std::memory_order_relaxed);
+                    if (report < 8) {
+                        std::cerr << "[ONESHOT DECODE] empty mesh frame=" << frameIndex
+                                  << " code=" << codeWidth << "x" << codeHeight
+                                  << " (virtual input is not rotated)" << std::endl;
+                    }
+                }
 
                 // rasterDepth() leaves the output untouched when decode() returns an
                 // empty mesh.  That is exactly what happens when the structured-light
@@ -707,6 +793,7 @@ class RulerMvsBackend final : public ISlam {
                 }
             }
         }
+        inputSlotCondition_.notify_all();
         if (hasNext)
             submitFrame(next);
     }
@@ -764,7 +851,7 @@ class RulerMvsBackend final : public ISlam {
                 cv::cvtColor(grayFull, markerImage, cv::COLOR_BGR2GRAY);
 
             detected = markerExtractor_.CircleExtractSimple(
-                markerImage, corners, 0, markerConfigs_);
+                static_cast<const cv::Mat&>(markerImage), corners, 0, markerConfigs_);
             ellipses = markerExtractor_.ellipses_;
         }
 
@@ -855,18 +942,24 @@ class RulerMvsBackend final : public ISlam {
             poseRefreshRequested_ = false;
         }
         resultWorkersRunning_.store(true, std::memory_order_release);
+        liveResultSnapshotActive_.store(false, std::memory_order_release);
         resultConsumerThread_ = std::thread([this] { resultConsumerLoop(); });
         resultConvertThread_ = std::thread([this] { resultConvertLoop(); });
+        poseRefreshThread_ = std::thread([this] { poseRefreshLoop(); });
     }
 
     void stopResultWorkers() {
         resultWorkersRunning_.store(false, std::memory_order_release);
         resultSignalCv_.notify_all();
         resultConvertCv_.notify_all();
+        poseRefreshCv_.notify_all();
         if (resultConsumerThread_.joinable())
             resultConsumerThread_.join();
         if (resultConvertThread_.joinable())
             resultConvertThread_.join();
+        if (poseRefreshThread_.joinable())
+            poseRefreshThread_.join();
+        liveResultSnapshotActive_.store(false, std::memory_order_release);
         {
             std::lock_guard<std::mutex> lock(resultSignalMutex_);
             pendingResultSignals_.clear();
@@ -955,58 +1048,25 @@ class RulerMvsBackend final : public ISlam {
             if (!fusion_ || wanted.empty())
                 continue;
 
-            bool collectPoseRefresh = false;
-            int optimizeThroughFrame = -1;
-            {
-                std::lock_guard<std::mutex> lock(poseRefreshMutex_);
-                if (poseRefreshRequested_) {
-                    poseRefreshRequested_ = false;
-                    collectPoseRefresh = true;
-                }
-            }
-            if (collectPoseRefresh) {
-                std::lock_guard<std::mutex> lock(stateMutex_);
-                optimizeThroughFrame = lastStateFrameId_ - kLivePoseGuardFrames;
-                if (optimizeThroughFrame < 0 || !poseUpdateCallback_)
-                    collectPoseRefresh = false;
-            }
-
             std::vector<RawFusionResult> ready;
             ready.reserve(wanted.size());
-            std::vector<FramePoseUpdate> poseCandidates;
-            if (collectPoseRefresh)
-                poseCandidates.reserve(std::size_t(optimizeThroughFrame + 1));
 
-            const auto sharedSnapshotStart = std::chrono::steady_clock::now();
+            const auto liveSnapshotStart = std::chrono::steady_clock::now();
+            liveResultSnapshotActive_.store(true, std::memory_order_release);
             {
-                // One and only one live getResults() pass:
-                //   1) current-frame IRGBDResult::toCloud()
-                //   2) optional historical optimized poses
-                // Keeping both consumers on the same snapshot prevents an optimization thread
-                // from monopolizing fusionResultsMutex_ and prevents current/history from being
-                // assembled from two different optimization epochs.
+                // Live/result consumption is intentionally independent from online pose refresh.
+                // This pass only resolves the requested IRGBDResult clouds. Historical optimized
+                // poses are collected by poseRefreshLoop() on a low-priority background path.
                 std::lock_guard<std::mutex> resultsLock(fusionResultsMutex_);
-                fusion_->getResults([this, &wanted, &ready, &poseCandidates,
-                                     collectPoseRefresh, optimizeThroughFrame]
-                                    (const rgbdslam::IRGBDResult& result) {
-                    if (collectPoseRefresh && result.getFlag() == 0 &&
-                        result.getFrameID() <= optimizeThroughFrame) {
-                        cv::Mat optimizedPose = result.getRT();
-                        if (!baseRtInv_.empty())
-                            optimizedPose = baseRtInv_ * optimizedPose;
-                        poseCandidates.push_back(
-                            {int(result.getFrameID()), poseFromCv(optimizedPose)});
-                    }
-
+                fusion_->getResults([this, &wanted, &ready](const rgbdslam::IRGBDResult& result) {
                     auto it = wanted.find(result.getFrameID());
                     if (it == wanted.end())
                         return;
 
                     RawFusionResult raw;
                     raw.frameId = result.getFrameID();
-                    // The current/live pose comes from the trace callback, not getResults().
-                    // getResults() may already contain an online-optimized RT and therefore is
-                    // intentionally used only as the owning point-cloud snapshot here.
+                    // Current/live pose is always the trace-callback tracking pose. getResults()
+                    // supplies only the owning IRGBDResult cloud for preview/history geometry.
                     raw.trackingOk = it->second.trackingOk;
                     raw.measuredPose = it->second.trackingPose.clone();
                     result.toCloud(raw.points, raw.normals, raw.colors);
@@ -1018,10 +1078,21 @@ class RulerMvsBackend final : public ISlam {
                     wanted.erase(it);
                 });
             }
-            const double sharedSnapshotMs = std::chrono::duration<double, std::milli>(
-                std::chrono::steady_clock::now() - sharedSnapshotStart).count();
-            if (collectPoseRefresh)
-                publishLiveOptimizedPoseCandidates(std::move(poseCandidates), sharedSnapshotMs);
+            liveResultSnapshotActive_.store(false, std::memory_order_release);
+            poseRefreshCv_.notify_one();
+
+            const double liveSnapshotMs = std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - liveSnapshotStart).count();
+            if (liveSnapshotMs > 20.0) {
+                std::size_t pendingCount = 0;
+                {
+                    std::lock_guard<std::mutex> lock(resultSignalMutex_);
+                    pendingCount = pendingResultSignals_.size();
+                }
+                std::cout << "[SLAM LIVE RESULT] getResults+toCloud=" << liveSnapshotMs
+                          << "ms batch=" << ready.size()
+                          << " pending=" << pendingCount << std::endl;
+            }
 
             // Some SDK builds invoke trace slightly before the frame becomes visible from
             // getResults(). Requeue the tiny metadata rather than spinning or dropping it.
@@ -1055,11 +1126,110 @@ class RulerMvsBackend final : public ISlam {
         if (!config_.liveOptimizationEnabled ||
             config_.registrationMode != ScanRegistrationMode::Texture)
             return;
-        // Do NOT start a second getResults() pass here. The next live-result snapshot will
-        // collect optimized historical poses from the very same RGBDFusion snapshot used for
-        // IRGBDResult::toCloud(). This removes lock contention and cross-snapshot frame skew.
-        std::lock_guard<std::mutex> lock(poseRefreshMutex_);
-        poseRefreshRequested_ = true;
+        {
+            std::lock_guard<std::mutex> lock(poseRefreshMutex_);
+            // Multiple refresh requests collapse into one. Historical pose refresh is best effort;
+            // the live result path always has priority.
+            poseRefreshRequested_ = true;
+        }
+        poseRefreshCv_.notify_one();
+    }
+
+    bool liveResultWorkPending() {
+        if (liveResultSnapshotActive_.load(std::memory_order_acquire))
+            return true;
+        {
+            std::lock_guard<std::mutex> lock(resultSignalMutex_);
+            if (!pendingResultSignals_.empty())
+                return true;
+        }
+        return false;
+    }
+
+    void poseRefreshLoop() {
+        using namespace std::chrono_literals;
+
+        while (resultWorkersRunning_.load(std::memory_order_acquire)) {
+            {
+                std::unique_lock<std::mutex> lock(poseRefreshMutex_);
+                poseRefreshCv_.wait_for(lock, 25ms, [this] {
+                    return !resultWorkersRunning_.load(std::memory_order_acquire) ||
+                           poseRefreshRequested_;
+                });
+                if (!resultWorkersRunning_.load(std::memory_order_acquire))
+                    break;
+                if (!poseRefreshRequested_)
+                    continue;
+            }
+
+            // Real-time cloud consumption wins. Do not even attempt a fusion snapshot while
+            // current/history geometry is waiting to be resolved or converted.
+            if (liveResultWorkPending()) {
+                std::this_thread::sleep_for(2ms);
+                continue;
+            }
+
+            int optimizeThroughFrame = -1;
+            {
+                std::lock_guard<std::mutex> lock(stateMutex_);
+                if (!poseUpdateCallback_) {
+                    std::lock_guard<std::mutex> refreshLock(poseRefreshMutex_);
+                    poseRefreshRequested_ = false;
+                    continue;
+                }
+                optimizeThroughFrame = lastStateFrameId_ - kLivePoseGuardFrames;
+            }
+            if (optimizeThroughFrame < 0) {
+                std::lock_guard<std::mutex> lock(poseRefreshMutex_);
+                poseRefreshRequested_ = false;
+                continue;
+            }
+
+            // Never wait behind the live consumer. If it owns the fusion snapshot mutex, simply
+            // defer this optimization refresh to the next idle gap.
+            std::unique_lock<std::mutex> resultsLock(fusionResultsMutex_, std::try_to_lock);
+            if (!resultsLock.owns_lock()) {
+                std::this_thread::sleep_for(2ms);
+                continue;
+            }
+
+            // A live request may have arrived between the first idle check and try_lock(). Give
+            // the mutex back immediately in that case.
+            if (liveResultWorkPending()) {
+                resultsLock.unlock();
+                std::this_thread::sleep_for(1ms);
+                continue;
+            }
+
+            // Consume the refresh token before entering the potentially long SDK snapshot. If a
+            // newer refresh request arrives while getResults() is running it sets the flag again
+            // and is therefore preserved for the next idle gap instead of being cleared here.
+            {
+                std::lock_guard<std::mutex> lock(poseRefreshMutex_);
+                poseRefreshRequested_ = false;
+            }
+
+            std::vector<FramePoseUpdate> poseCandidates;
+            poseCandidates.reserve(std::size_t(optimizeThroughFrame + 1));
+            const auto snapshotStart = std::chrono::steady_clock::now();
+            fusion_->getResults([this, &poseCandidates, optimizeThroughFrame]
+                                (const rgbdslam::IRGBDResult& result) {
+                if (result.getFlag() != 0 || result.getFrameID() > optimizeThroughFrame)
+                    return;
+
+                cv::Mat optimizedPose = result.getRT();
+                if (!baseRtInv_.empty())
+                    optimizedPose = baseRtInv_ * optimizedPose;
+                poseCandidates.push_back(
+                    {int(result.getFrameID()), poseFromCv(optimizedPose)});
+            });
+            resultsLock.unlock();
+
+            const double snapshotMs = std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - snapshotStart).count();
+
+            publishLiveOptimizedPoseCandidates(std::move(poseCandidates), snapshotMs);
+        }
     }
 
     void resultConvertLoop() {
@@ -1103,10 +1273,12 @@ class RulerMvsBackend final : public ISlam {
             }
         }
 
-        const int budgetPerFrame = std::max(
-            250, config_.previewPointLimit / std::max(1, config_.maxFrames));
-        const int limit = std::max(
-            1, std::min(config_.previewPointsPerFrame, budgetPerFrame));
+        // previewPointsPerFrame is the actual per-frame preview target. The Qt
+        // consumer enforces previewPointLimit on the accumulated history and
+        // compacts old samples when necessary, so dividing the total budget by
+        // maxFrames here would silently reduce 3000 points/frame to ~1000 for a
+        // 20k-frame scan. Keep the per-frame sampling independent from history.
+        const int limit = std::max(1, config_.previewPointsPerFrame);
         const std::size_t stride = std::max<std::size_t>(
             1, raw.points.size() / std::size_t(limit));
 
@@ -1206,7 +1378,7 @@ class RulerMvsBackend final : public ISlam {
     }
 
     void publishLiveOptimizedPoseCandidates(std::vector<FramePoseUpdate> candidates,
-                                               double sharedSnapshotMs) {
+                                               double backgroundSnapshotMs) {
         if (candidates.empty())
             return;
 
@@ -1236,7 +1408,7 @@ class RulerMvsBackend final : public ISlam {
         if (callback && !updates.empty())
             callback(std::move(updates));
 
-        std::cout << "[SLAM LIVE OPT] shared getResults snapshot=" << sharedSnapshotMs
+        std::cout << "[SLAM LIVE OPT] background getResults snapshot=" << backgroundSnapshotMs
                   << "ms updates=" << updateCount << std::endl;
     }
 
@@ -1298,6 +1470,7 @@ class RulerMvsBackend final : public ISlam {
     int lastStateFrameId_{-1};
 
     rulermvs::IOneShot::Ptr oneshot_{nullptr};
+    std::mutex oneShotDecodeMutex_;
     DBoW3::Vocabulary vocabulary_;
     std::unique_ptr<DBoW3::Database> database_;
     std::unique_ptr<rgbdslam::RGBDFusion> fusion_;
@@ -1306,8 +1479,11 @@ class RulerMvsBackend final : public ISlam {
     std::atomic<bool> resultWorkersRunning_{false};
     std::thread resultConsumerThread_;
     std::thread resultConvertThread_;
+    std::thread poseRefreshThread_;
     std::mutex poseRefreshMutex_;
+    std::condition_variable poseRefreshCv_;
     bool poseRefreshRequested_{false};
+    std::atomic<bool> liveResultSnapshotActive_{false};
     std::mutex resultSignalMutex_;
     std::condition_variable resultSignalCv_;
     std::map<int, ResultSignal> pendingResultSignals_;
@@ -1318,6 +1494,7 @@ class RulerMvsBackend final : public ISlam {
     std::mutex fusionResultsMutex_;
 
     std::mutex inputMutex_;
+    std::condition_variable inputSlotCondition_;
     std::deque<CameraFrame> pendingFrames_;
     std::optional<std::chrono::steady_clock::time_point> lastLostModeSubmitTime_;
     std::atomic<int> inflight_{0};
@@ -1325,6 +1502,9 @@ class RulerMvsBackend final : public ISlam {
     std::atomic<int> completed_{0};
     std::atomic<int> converted_{0};
     std::atomic<unsigned long long> pendingReplaced_{0};
+    std::atomic<int> inputSizeMismatchReports_{0};
+    std::atomic<int> decodeEmptyReports_{0};
+    std::atomic<bool> inputWaitInterrupted_{false};
     std::atomic<bool> accepting_{false};
     std::atomic<bool> trackingLost_{false};
 

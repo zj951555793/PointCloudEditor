@@ -28,6 +28,8 @@ public:
     bool            is_bad_ = false;//是否为外点
     //bool is_reliable_ = false;  //地图点是否稳定，默认不稳定
     bool is_unmerged_ = false;  //误差阈值过大导致未合并同名点
+    int father_id_ = -1;  //未合并同名点的父点id
+    std::vector<int> sons_id_;  //未合并同名点的子点id集合
     bool is_checked_ = false;//是否被检验过，默认未检验
     rulermvs::Vec3d point3d_world_;
     rulermvs::Vec3d normal_world_;

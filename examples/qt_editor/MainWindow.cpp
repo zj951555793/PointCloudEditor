@@ -249,7 +249,7 @@ MainWindow::MainWindow(const QString& initialFile, QWidget* parent) : QMainWindo
 }
 
 MainWindow::~MainWindow() {
-    if (scanner_ && scanner_->state() == JMEngine::ScanState::Scanning)
+    if (scanner_ && scanState_ == JMEngine::ScanState::Scanning)
         scanner_->stop();
     if (reconstructionThread_.joinable())
         reconstructionThread_.join();
@@ -698,8 +698,8 @@ void MainWindow::updateProjectUi() {
         projectLoadMergedButton_->setEnabled(hasProject);
     if (scanStartButton_) {
         const bool canStartForProject =
-            hasProject && (!scanner_ || scanner_->state() == JMEngine::ScanState::Idle ||
-                           scanner_->state() == JMEngine::ScanState::Error);
+            hasProject && (!scanner_ || scanState_ == JMEngine::ScanState::Idle ||
+                           scanState_ == JMEngine::ScanState::Error);
         scanStartButton_->setEnabled(canStartForProject);
     }
 }
@@ -965,9 +965,8 @@ void MainWindow::createScanControl() {
     connect(scanRenderTimer, &QTimer::timeout, panel, [this] {
         if (!view_ || !scanner_)
             return;
-        const auto state = scanner_->state();
-        if (state == JMEngine::ScanState::Scanning ||
-            state == JMEngine::ScanState::Stopping) {
+        if (scanState_ == JMEngine::ScanState::Scanning ||
+            scanState_ == JMEngine::ScanState::Stopping) {
             view_->requestScanRenderFrame();
         }
     });
@@ -1329,15 +1328,13 @@ void MainWindow::createScanControl() {
                                              .arg(stage));
             },
             [this](bool ok, const QString& message) {
-                const auto state = scanner_ ? scanner_->state() : JMEngine::ScanState::Idle;
                 if (scanTextureButton_)
-                    scanTextureButton_->setEnabled(state == JMEngine::ScanState::ReadyForReconstruction);
+                    scanTextureButton_->setEnabled(scanState_ == JMEngine::ScanState::ReadyForReconstruction);
                 statusBar()->showMessage(message, 12000);
                 if (!ok) QMessageBox::warning(this, QString::fromUtf8("一键处理"), message);
             });
         if (!started) {
-            const auto state = scanner_ ? scanner_->state() : JMEngine::ScanState::Idle;
-            scanTextureButton_->setEnabled(state == JMEngine::ScanState::ReadyForReconstruction);
+            scanTextureButton_->setEnabled(scanState_ == JMEngine::ScanState::ReadyForReconstruction);
         }
     });
 #endif
@@ -1361,12 +1358,19 @@ void MainWindow::createScanControl() {
         QMetaObject::invokeMethod(this, [this, state] { applyScanState(state); }, Qt::QueuedConnection);
     });
     scanner_->setMessageCallback([this](const std::string& message) {
-        QMetaObject::invokeMethod(this, [this, message] { statusBar()->showMessage(QString::fromStdString(message)); }, Qt::QueuedConnection);
+        if (this) {
+            QMetaObject::invokeMethod(
+                this, [this, message] { statusBar()->showMessage(QString::fromStdString(message)); },
+                Qt::QueuedConnection);
+        }
+        
     });
     scanner_->setProgressCallback([this](int progress) {
-        QMetaObject::invokeMethod(this, [this, progress] {
-            statusBar()->showMessage(QString::fromUtf8("离线优化 %1%").arg(progress));
-        }, Qt::QueuedConnection);
+        if (this) {        
+            QMetaObject::invokeMethod(this, [this, progress] {
+                statusBar()->showMessage(QString::fromUtf8("离线优化 %1%").arg(progress));
+            }, Qt::QueuedConnection);
+        }
     });
     scanner_->setFrameCallback([this](int frameId, const JMEngine::Pose& pose,
                                       std::shared_ptr<JMEngine::PointCloud> cloud,
@@ -1476,10 +1480,12 @@ void MainWindow::createScanControl() {
         const QImage owned = image.copy();
         QMetaObject::invokeMethod(this, [this, owned] {
         if (!cameraPreviewLabel_ || owned.isNull() || !scanner_) return;
-        const bool cameraScanning = scanner_->state() == JMEngine::ScanState::Scanning &&
-                                    scanSourceModeCombo_ &&
-                                    scanSourceModeCombo_->currentData().toInt() == int(ScanSourceMode::Camera);
-        if (!cameraScanning) {
+        // Physical and virtual sources both expose the same UI preview callback.
+        // DatasetCamera never applies model rotate/flip; this label therefore
+        // shows the virtual img/c frame exactly as stored on disk.
+        const bool scanPreviewActive = scanState_ == JMEngine::ScanState::Scanning &&
+                                       scanSourceModeCombo_;
+        if (!scanPreviewActive) {
             cameraPreviewLabel_->clear();
             cameraPreviewLabel_->hide();
             return;
@@ -1525,6 +1531,10 @@ MainWindow::ScanUiConfig MainWindow::scanConfigFromUi() const {
     cfg.engine.offlineIterations = 30;
     cfg.liveOptimizationEnabled = liveOptimizationCheck_ ? liveOptimizationCheck_->isChecked() : true;
     cfg.engine.liveOptimizationEnabled = cfg.liveOptimizationEnabled;
+    // Dataset replay must be lossless: if JMC1S OneShot decode is slower than
+    // real time, back-pressure the virtual source instead of breaking frame
+    // adjacency by dropping queued frames. Physical cameras remain bounded.
+    cfg.engine.losslessDatasetReplay = cfg.sourceMode == ScanSourceMode::Virtual;
     cfg.engine.saveScanProject = projectSaveScanCheck_ && projectSaveScanCheck_->isChecked() &&
                                  !currentProjectPath_.isEmpty();
     cfg.engine.scanProjectPath = cfg.engine.saveScanProject ? currentProjectPath_.toStdString() : std::string{};
@@ -1763,6 +1773,8 @@ void MainWindow::applyScanSourceUi() {
 }
 
 void MainWindow::applyScanState(JMEngine::ScanState state) {
+    scanState_ = state;
+
     if (state == JMEngine::ScanState::Scanning) {
         scanVisualFramesActive_ = true;
     } else {

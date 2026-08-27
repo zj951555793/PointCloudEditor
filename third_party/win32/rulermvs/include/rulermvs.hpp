@@ -22,6 +22,12 @@
 //* 是否包含RGBD_MarkerFusion模块 */
 #define RULERMVS_ENABLE_RGBD_MARKERFUSION
 
+//* 是否包含MULTILINES模块 */
+#define RULERMVS_ENABLE_MULTILINES
+
+//* 是否包含Lines_MarkerFusion模块 */
+#define RULERMVS_ENABLE_LINES_MARKERFUSION
+
 //* 是否包含多帧滤波模块 */
 #define RULERMVS_ENABLE_MULTIFRAMEFILTER
 
@@ -80,6 +86,14 @@ static_assert(false, "Error: Please Check The Setting Of Project.");
 #include "rulermvs/RGBD_MarkerFusion.hpp"
 #endif
 
+#ifdef RULERMVS_ENABLE_MULTILINES
+#include "rulermvs/multilines.hpp"
+#endif
+
+#ifdef RULERMVS_ENABLE_LINES_MARKERFUSION
+#include "rulermvs/Lines_MarkerFusion.hpp"
+#endif
+
 #ifdef RULERMVS_ENABLE_MULTIFRAMEFILTER
 #include "rulermvs/multiframefilter.hpp"
 #endif
@@ -98,6 +112,6 @@ static_assert(false, "Error: Please Check The Setting Of Project.");
 #endif
 
 //* 测试数据路径 */
-#define MVS_DATADIR "G:/rulermvs0907/rulermvs_cicle/data"
+#define MVS_DATADIR "E:/rulermvs/data"
 
 #endif  // _RULERMVS_RULERMVS_HPP_

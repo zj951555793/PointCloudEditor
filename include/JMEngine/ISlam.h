@@ -37,6 +37,13 @@ class ISlam {
     virtual void setUpdateCallback(UpdateCallback) {}
     virtual void setMarkerCallback(MarkerCallback) {}
     virtual void setPoseUpdateCallback(PoseUpdateCallback) {}
+    // Dataset replay may request lossless back-pressure instead of the bounded
+    // drop policy used by physical real-time cameras.
+    virtual void setLosslessInputReplay(bool) {}
+    // Wake a backend process() that is currently waiting for lossless input
+    // capacity. JMScanner uses this during stop/restart so the scanner worker
+    // can always exit without waiting for an SDK callback to free a slot.
+    virtual void interruptInputWait() {}
     virtual std::vector<TextureKeyframe> takeTextureKeyframes() {
         return {};
     }

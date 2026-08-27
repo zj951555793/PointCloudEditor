@@ -93,54 +93,6 @@ if(NOT COMMAND find_host_program)
 endif()
 
 
-# Version Compute Capability from which OpenCV has been compiled is remembered
-set(OpenCV_COMPUTE_CAPABILITIES "-gencode;arch=compute_35,code=sm_35;-gencode;arch=compute_37,code=sm_37;-gencode;arch=compute_50,code=sm_50;-gencode;arch=compute_52,code=sm_52;-gencode;arch=compute_60,code=sm_60;-gencode;arch=compute_61,code=sm_61;-gencode;arch=compute_70,code=sm_70;-gencode;arch=compute_75,code=sm_75;-gencode;arch=compute_80,code=sm_80;-gencode;arch=compute_86,code=sm_86;-gencode;arch=compute_89,code=sm_89;-gencode;arch=compute_90,code=sm_90;-D_FORCE_INLINES")
-
-set(OpenCV_CUDA_VERSION "11.8")
-set(OpenCV_USE_CUBLAS   "1")
-set(OpenCV_USE_CUFFT    "1")
-set(OpenCV_USE_NVCUVID  "")
-set(OpenCV_USE_NVCUVENC "")
-set(OpenCV_CUDNN_VERSION    "8.5.0")
-set(OpenCV_USE_CUDNN        "1")
-
-if(NOT CUDA_FOUND)
-  find_host_package(CUDA ${OpenCV_CUDA_VERSION} EXACT REQUIRED)
-else()
-  if(NOT CUDA_VERSION_STRING VERSION_EQUAL OpenCV_CUDA_VERSION)
-    message(FATAL_ERROR "OpenCV static library was compiled with CUDA ${OpenCV_CUDA_VERSION} support. Please, use the same version or rebuild OpenCV with CUDA ${CUDA_VERSION_STRING}")
-  endif()
-endif()
-
-set(OpenCV_CUDA_LIBS_ABSPATH ${CUDA_LIBRARIES})
-
-if(CUDA_VERSION VERSION_LESS "5.5")
-  list(APPEND OpenCV_CUDA_LIBS_ABSPATH ${CUDA_npp_LIBRARY})
-else()
-  find_cuda_helper_libs(nppc)
-  find_cuda_helper_libs(nppi)
-  find_cuda_helper_libs(npps)
-  list(APPEND OpenCV_CUDA_LIBS_ABSPATH ${CUDA_nppc_LIBRARY} ${CUDA_nppi_LIBRARY} ${CUDA_npps_LIBRARY})
-endif()
-
-if(OpenCV_USE_CUBLAS)
-  list(APPEND OpenCV_CUDA_LIBS_ABSPATH ${CUDA_CUBLAS_LIBRARIES})
-endif()
-
-if(OpenCV_USE_CUFFT)
-  list(APPEND OpenCV_CUDA_LIBS_ABSPATH ${CUDA_CUFFT_LIBRARIES})
-endif()
-
-set(OpenCV_CUDA_LIBS_RELPATH "")
-foreach(l ${OpenCV_CUDA_LIBS_ABSPATH})
-  get_filename_component(_tmp ${l} PATH)
-  if(NOT ${_tmp} MATCHES "-Wl.*")
-    list(APPEND OpenCV_CUDA_LIBS_RELPATH ${_tmp})
-  endif()
-endforeach()
-
-list(REMOVE_DUPLICATES OpenCV_CUDA_LIBS_RELPATH)
-link_directories(${OpenCV_CUDA_LIBS_RELPATH})
 
 
 
@@ -153,7 +105,7 @@ set(OpenCV_SHARED ON)
 # Enables mangled install paths, that help with side by side installs
 set(OpenCV_USE_MANGLED_PATHS FALSE)
 
-set(OpenCV_LIB_COMPONENTS opencv_calib3d;opencv_core;opencv_dnn;opencv_features2d;opencv_flann;opencv_gapi;opencv_highgui;opencv_imgcodecs;opencv_imgproc;opencv_ml;opencv_objdetect;opencv_photo;opencv_stitching;opencv_video;opencv_videoio;opencv_aruco;opencv_bgsegm;opencv_bioinspired;opencv_ccalib;opencv_cudaarithm;opencv_cudabgsegm;opencv_cudacodec;opencv_cudafeatures2d;opencv_cudafilters;opencv_cudaimgproc;opencv_cudalegacy;opencv_cudaobjdetect;opencv_cudaoptflow;opencv_cudastereo;opencv_cudawarping;opencv_cudev;opencv_datasets;opencv_dnn_objdetect;opencv_dnn_superres;opencv_dpm;opencv_face;opencv_fuzzy;opencv_hfs;opencv_img_hash;opencv_intensity_transform;opencv_line_descriptor;opencv_mcc;opencv_optflow;opencv_phase_unwrapping;opencv_plot;opencv_quality;opencv_rapid;opencv_reg;opencv_rgbd;opencv_saliency;opencv_shape;opencv_stereo;opencv_structured_light;opencv_superres;opencv_surface_matching;opencv_text;opencv_tracking;opencv_videostab;opencv_wechat_qrcode;opencv_xfeatures2d;opencv_ximgproc;opencv_xobjdetect;opencv_xphoto)
+set(OpenCV_LIB_COMPONENTS opencv_calib3d;opencv_core;opencv_features2d;opencv_flann;opencv_gapi;opencv_highgui;opencv_imgcodecs;opencv_imgproc;opencv_ml;opencv_objdetect;opencv_photo;opencv_stitching;opencv_video;opencv_videoio;opencv_alphamat;opencv_aruco;opencv_bgsegm;opencv_bioinspired;opencv_ccalib;opencv_dpm;opencv_face;opencv_fuzzy;opencv_hfs;opencv_img_hash;opencv_intensity_transform;opencv_line_descriptor;opencv_optflow;opencv_phase_unwrapping;opencv_plot;opencv_quality;opencv_rapid;opencv_reg;opencv_rgbd;opencv_saliency;opencv_shape;opencv_stereo;opencv_structured_light;opencv_superres;opencv_surface_matching;opencv_tracking;opencv_videostab;opencv_xfeatures2d;opencv_ximgproc;opencv_xobjdetect;opencv_xphoto)
 set(__OpenCV_INCLUDE_DIRS "${OpenCV_INSTALL_PATH}/include")
 
 set(OpenCV_INCLUDE_DIRS "")

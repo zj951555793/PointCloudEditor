@@ -322,6 +322,11 @@ class BackendBase : public IRenderBackend {
     }
 
     void createVaos(QOpenGLExtraFunctions& gl, Buffers& b) const {
+        // Legacy OpenGL 2.1 hardware may not expose GL_ARB_vertex_array_object.
+        // In that case Buffers keep vao=0 and every bind*Layout() replays the VBO attribute state.
+        if (!vaoSupported_)
+            return;
+
         gl.glGenVertexArrays(1, &b.vao);
         gl.glBindVertexArray(b.vao);
         setupRender(gl, b);
@@ -333,35 +338,56 @@ class BackendBase : public IRenderBackend {
         gl.glBindVertexArray(0);
     }
     void destroyVaos(QOpenGLExtraFunctions& gl, Buffers& b) const {
-        if (b.vao)
-            gl.glDeleteVertexArrays(1, &b.vao);
-        if (b.selectionVao)
-            gl.glDeleteVertexArrays(1, &b.selectionVao);
+        if (vaoSupported_) {
+            if (b.vao)
+                gl.glDeleteVertexArrays(1, &b.vao);
+            if (b.selectionVao)
+                gl.glDeleteVertexArrays(1, &b.selectionVao);
+        }
         b.vao = 0;
         b.selectionVao = 0;
     }
     void bindRender(QOpenGLExtraFunctions& gl, const Buffers& b) const {
-        gl.glBindVertexArray(b.vao);
+        if (vaoSupported_ && b.vao)
+            gl.glBindVertexArray(b.vao);
+        else
+            setupRender(gl, b);
     }
     void bindMeshSelection(QOpenGLExtraFunctions& gl, const Buffers& b) const {
-        gl.glBindVertexArray(b.selectionVao);
+        if (vaoSupported_ && b.selectionVao)
+            gl.glBindVertexArray(b.selectionVao);
+        else
+            setupMeshSelection(gl, b);
     }
     void bindPointPick(QOpenGLExtraFunctions& gl, const Buffers& b) const {
-        gl.glBindVertexArray(b.vao);
+        if (vaoSupported_ && b.vao)
+            gl.glBindVertexArray(b.vao);
         setupPointPick(gl, b);
     }
     void bindMeshPick(QOpenGLExtraFunctions& gl, const Buffers& b) const {
-        gl.glBindVertexArray(b.vao);
+        if (vaoSupported_ && b.vao)
+            gl.glBindVertexArray(b.vao);
+        else
+            setupMeshPick(gl, b);
     }
     void unbind(QOpenGLExtraFunctions& gl) const {
-        gl.glBindVertexArray(0);
+        if (vaoSupported_) {
+            gl.glBindVertexArray(0);
+            return;
+        }
+
+        // Pure-VBO fallback: no VAO owns these bindings, so leave a clean global state.
+        for (GLuint attr = 0; attr <= 5; ++attr)
+            gl.glDisableVertexAttribArray(attr);
+        gl.glBindBuffer(GL_ARRAY_BUFFER, 0);
+        gl.glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
     }
 };
 
 class DesktopGl21Backend final : public BackendBase {
   public:
     QString name() const override {
-        return QStringLiteral("Desktop OpenGL / VAO / Modern R32UI Picking");
+        return QStringLiteral("Desktop OpenGL 2.1+ / VBO / Optional VAO / Auto Picking");
     }
     bool isGles() const override {
         return false;
@@ -382,21 +408,20 @@ class DesktopGl21Backend final : public BackendBase {
                 *error = QStringLiteral("Desktop 后端需要 OpenGL 2.1+ Context");
             return false;
         }
-        const bool hasVao = f.majorVersion() >= 3 || c->hasExtension(QByteArrayLiteral("GL_ARB_vertex_array_object"));
-        if (!hasVao) {
-            if (error)
-                *error = QStringLiteral("Desktop OpenGL 2.1 驱动缺少 GL_ARB_vertex_array_object，当前版本只支持 VAO");
-            return false;
-        }
+        // VAO is optional on the legacy path. OpenGL 2.1 + VBO + GLSL 1.20 is enough
+        // for normal point/mesh rendering; selection falls back to CPU when modern picking
+        // capabilities are unavailable.
         return true;
     }
     void configureContextState(QOpenGLExtraFunctions& gl) override {
         auto* c = QOpenGLContext::currentContext();
-        // OpenGL 3.x+ 核心具有 VAO；2.1 则检测 ARB 扩展。ARB 扩展使用与核心相同的 glGenVertexArrays 名称。
+        // OpenGL 3.x+ has core VAO; 2.1 uses ARB_vertex_array_object when present.
+        // No VAO is not fatal: bind*Layout() switches to pure VBO state replay.
         vaoSupported_ =
             c && (c->format().majorVersion() >= 3 || c->hasExtension(QByteArrayLiteral("GL_ARB_vertex_array_object")));
-        // 网格 GPU Picking 需要核心 Geometry Shader，因此统一要求 OpenGL 3.2+。
-        // 更老 Context 仍正常渲染，只把选择自动回退到 CPU。
+
+        // R32UI + geometry-shader mesh picking stays on the modern 3.2+ path only.
+        // Legacy 2.1 keeps full rendering and automatically uses CPU selection.
         gpuPickingSupported_ =
             c && !c->isOpenGLES() &&
             (c->format().majorVersion() > 3 || (c->format().majorVersion() == 3 && c->format().minorVersion() >= 2));

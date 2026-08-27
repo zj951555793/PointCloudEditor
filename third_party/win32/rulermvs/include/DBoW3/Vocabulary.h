@@ -299,8 +299,9 @@ public:
    */
   int getDescritorType()const;
   //io to-from a stream
-  void toStream(  std::ostream &str, bool compressed=true) const throw(std::exception);
-  void fromStream(  std::istream &str )   throw(std::exception);
+  /* delete throw(std::exception) for C++17 */
+  void toStream(  std::ostream &str, bool compressed=true) const /* throw(std::exception) */;
+  void fromStream(  std::istream &str )   /* throw(std::exception) */;
 
  protected:
 

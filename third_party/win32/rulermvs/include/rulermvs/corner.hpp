@@ -6,6 +6,79 @@
 #include "rulermvs/cv.hpp"
 namespace rulermvs
 {
+// 椭圆拟合结果结构体
+struct EllipseResult {
+    cv::Point2f center;  // 中心点
+    cv::Size2f axes;     // 长短轴 (width >= height)
+    float angle;        // 旋转角度（度，范围[0, 180)）
+    double error;        // 拟合误差
+    bool valid;          // 是否有效
+
+    double a, b, c, d, e, f;  // 椭圆一般方程参数
+    Eigen::MatrixXd infos;
+
+    EllipseResult() : center(0, 0), axes(0, 0), angle(0), error(0), valid(false)
+    {}
+    EllipseResult(cv::Point2f center_, cv::Size2f axes_, float ang,
+        double err = 0,
+        const std::vector<cv::Point2f>& points = std::vector<cv::Point2f>())
+        : center(center_), axes(axes_), angle(ang), error(err), valid(true)
+    {
+        const float u0 = center_.x;
+        const float v0 = center_.y;
+        const float angle_deg = ang;
+        const float w2 = axes_.width * 0.5;
+        const float h2 = axes_.height * 0.5;
+
+        // 角度转换为弧度
+        const float theta = angle_deg * MVS_PI / 180.0;
+
+        // 三角函数值
+        const float sin_theta = std::sin(theta);
+        const float cos_theta = std::cos(theta);
+
+        // 计算二次项系数
+        a = cos_theta * cos_theta / (w2 * w2) +
+            sin_theta * sin_theta / (h2 * h2);
+        b = 2.0 * sin_theta * cos_theta * (1.0 / (w2 * w2) - 1.0 / (h2 * h2));
+        c = sin_theta * sin_theta / (w2 * w2) +
+            cos_theta * cos_theta / (h2 * h2);
+
+        // 计算一次项系数
+        d = -2.0 * a * u0 - b * v0;
+        e = -b * u0 - 2.0 * c * v0;
+
+        // 计算常数项
+        f = a * u0 * u0 + b * u0 * v0 + c * v0 * v0 - 1.0;
+
+        if (!points.empty()) {
+            double total_error = 0.0;
+            Eigen::MatrixXd A(points.size(), 6);
+            int count = 0;
+            for (const auto& p : points) {
+                const float x = p.x, y = p.y;
+                const double error =
+                    a * x * x + b * x * y + c * y * y + d * x + e * y + f;
+                total_error += error * error;
+                A(count, 0) = x * x;
+                A(count, 1) = x * y;
+                A(count, 2) = y * y;
+                A(count, 3) = x;
+                A(count, 4) = y;
+                A(count++, 5) = 1.0;
+            }
+            error = sqrt(total_error / points.size());
+            infos = A.transpose() * A;
+        }
+    }
+
+    // 计算椭圆面积
+    double getArea() const
+    {
+        return axes.width * axes.height;
+    }
+};
+
 struct Corner 
 {
     Corner() {}
@@ -33,8 +106,10 @@ struct Corner
 
     double x_;
     double y_;
+    EllipseResult ellipse_;
+    double radius_;
 
-    Vec3d normal_c_;
+    Vec3d normal_c_ = Vec3d(0.0, 0.0, 0.0);
 
     Vec3d point3d_c_ = Vec3d(0.0, 0.0, 0.0);
 

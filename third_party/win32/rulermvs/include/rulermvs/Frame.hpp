@@ -42,6 +42,39 @@ class MVS_EXPORT Frame
 public:
     Frame() {}
 
+    Frame(const Frame& other) 
+    {
+        pose_w2c_ = other.pose_w2c_.clone();
+        pose_c2w_ = other.pose_c2w_.clone();
+
+        input_id_ = other.input_id_;
+        id_ = other.id_;
+        corners_ = other.corners_;
+        cornerpairs_ = other.cornerpairs_;
+        camera_center_w_ = other.camera_center_w_;
+        plan_o = other.plan_o;
+        plan_n = other.plan_n;
+        is_detect_plan = other.is_detect_plan;
+        plan_distance = other.plan_distance;
+        observations_ = other.observations_;
+        camera_ = other.camera_;
+        camera_R = other.camera_R;
+        is_keyframe_ = other.is_keyframe_;
+        image_ = other.image_;
+        is_bad_ = other.is_bad_;
+        err_too_big_ = other.err_too_big_;
+        is_relocation = other.is_relocation;
+        convisible_frame_idx_count_map_ = other.convisible_frame_idx_count_map_;
+        optimize_error = other.optimize_error;
+        output_dir_ = other.output_dir_;
+        rgbd_data = other.rgbd_data;
+        rgbd_data_small = other.rgbd_data_small;
+        points3d_sharedPointer_ = other.points3d_sharedPointer_;
+        index_map_ = other.index_map_;
+        points3d_ = other.points3d_;
+        siteLenMap_ = other.siteLenMap_;
+    }
+
     //Frame(int idx, Camera* camera, rulermvs::RGBDData rgbd_data,
     //    cv::Mat& rgb, cv::Mat& depth,
     //    cv::Mat& vmap, cv::Mat& nmap, cv::Mat& mask,
@@ -77,6 +110,49 @@ public:
     void UpdateConvisibleGraph();//共视图未使用
 
     void UpdatePointerAndDistMap(double maxP3dDist = 500.0);//更新帧内的point3d的指针以及点对间的dist
+
+    //重载赋值运算符
+    Frame& operator=(const Frame& other)
+    {
+        //1.检查自赋值
+        if (this == &other)
+        {
+            return* this;
+        }
+        //2.深拷贝基础类型和cv::Mat成员
+        pose_w2c_ = other.pose_w2c_.clone();
+        pose_c2w_ = other.pose_c2w_.clone();
+
+        input_id_ = other.input_id_;
+        id_ = other.id_;
+        corners_ = other.corners_;
+        cornerpairs_ = other.cornerpairs_;
+        camera_center_w_ = other.camera_center_w_;
+        plan_o = other.plan_o;
+        plan_n = other.plan_n;
+        is_detect_plan = other.is_detect_plan;
+        plan_distance = other.plan_distance;
+        observations_ = other.observations_;
+        camera_ = other.camera_;
+        camera_R = other.camera_R;
+        is_keyframe_ = other.is_keyframe_;
+        image_ = other.image_;
+        is_bad_ = other.is_bad_;
+        err_too_big_ = other.err_too_big_;
+        is_relocation = other.is_relocation;
+        convisible_frame_idx_count_map_ = other.convisible_frame_idx_count_map_;
+        optimize_error = other.optimize_error;
+        output_dir_ = other.output_dir_;
+        rgbd_data = other.rgbd_data;
+        rgbd_data_small = other.rgbd_data_small;
+        points3d_sharedPointer_ = other.points3d_sharedPointer_;
+        index_map_ = other.index_map_;
+        points3d_ = other.points3d_;
+        siteLenMap_ = other.siteLenMap_;
+
+        //3.返回自身引用
+        return *this;
+    }
 public:
     int input_id_;
 

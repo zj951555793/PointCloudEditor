@@ -544,7 +544,8 @@ MVS_EXPORT bool matchICP(const Image3f* vmaps, const Image3f* nmaps,
     const Image8u* grays, const Imagef* dxs, const Imagef* dys, Pose* rts,
     size_t vmap_num, const CameraP& cam, int max_iter = 100,
     double max_dist = 1e1, double max_angle = MVS_PI_4,
-    double min_overlap = 1e-1, double theta = 1e-6, int optimizer = 0);
+    double min_overlap = 1e-1, double theta = 1e-6, int optimizer = 0,
+    ProgressBar progress = 0);
 
 /// @brief 多帧深度图配准
 /// @param depths 深度图数组
@@ -628,7 +629,7 @@ MVS_EXPORT bool matchICP(const CloudKDTree<float>** clouds,
     const uchar** pixels, const Point3f** gradients, Pose* rts,
     size_t cloud_num, int max_iter = 100, double max_dist = 1e1,
     double max_angle = MVS_PI_4, double min_overlap = 1e-1, double theta = 3e-1,
-    int optimizer = 0);
+    int optimizer = 0, ProgressBar progress = 0);
 
 /// @brief 多帧点云配准,会尝试自动转换纹理和梯度;
 /// @param clouds 接口类点云数组
@@ -643,20 +644,22 @@ MVS_EXPORT bool matchICP(const CloudKDTree<float>** clouds,
 MVS_EXPORT bool matchICP(const IPointCloud** clouds, Pose* rts,
     size_t cloud_num, ICPMethod method = ICPMethod::Normal, int max_iter = 100,
     double max_dist = 1e1, double max_angle = MVS_PI_4,
-    double min_overlap = 1e-1, double theta = 3e-1, int optimizer = 0);
+    double min_overlap = 1e-1, double theta = 3e-1, int optimizer = 0,
+    ProgressBar progress = 0);
 
 template <typename CloudFrame, class = typename std::enable_if<std::is_base_of<IPointCloud, CloudFrame>::value>::type>
 static inline bool matchICP(const CloudFrame* clouds, Pose* rts,
     size_t cloud_num, ICPMethod method = ICPMethod::Normal, int max_iter = 100,
     double max_dist = 1e1, double max_angle = MVS_PI_4,
-    double min_overlap = 1e-1, double theta = 3e-1, int optimizer = 0)
+    double min_overlap = 1e-1, double theta = 3e-1, int optimizer = 0,
+    ProgressBar progress = 0)
 {
     if (!clouds || !rts || !cloud_num) return false;
     std::vector<const IPointCloud*> cloud_ptrs(cloud_num);
     for (size_t i = 0; i < cloud_num; ++i)
         cloud_ptrs[i] = reinterpret_cast<const IPointCloud*>(&clouds[i]);
     return matchICP(cloud_ptrs.data(), rts, cloud_num, method, max_iter,
-        max_dist, max_angle, min_overlap, theta, optimizer);
+        max_dist, max_angle, min_overlap, theta, optimizer, progress);
 }
 
 /// @brief 计算帧间匹配的信息矩阵,PoseGraph的配套函数;

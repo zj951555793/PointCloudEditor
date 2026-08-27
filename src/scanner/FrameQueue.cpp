@@ -13,6 +13,7 @@ void FrameQueue::setCapacity(std::size_t capacity) {
     capacity_ = std::max<std::size_t>(1, capacity);
     while (queue_.size() > capacity_)
         queue_.pop_front();
+    condition_.notify_all();
 }
 
 
@@ -26,6 +27,20 @@ bool FrameQueue::pushSequential(CameraFrame frame) {
 
     queue_.push_back(std::move(frame));
     condition_.notify_one();
+    return true;
+}
+
+
+bool FrameQueue::pushBlocking(CameraFrame frame) {
+    std::unique_lock<std::mutex> lock(mutex_);
+    condition_.wait(lock, [this] {
+        return closed_ || queue_.size() < capacity_;
+    });
+    if (closed_)
+        return false;
+
+    queue_.push_back(std::move(frame));
+    condition_.notify_all();
     return true;
 }
 
@@ -52,6 +67,8 @@ bool FrameQueue::pop(CameraFrame& frame) {
 
     frame = std::move(queue_.front());
     queue_.pop_front();
+    // Wake a lossless dataset producer waiting for queue capacity.
+    condition_.notify_all();
     return true;
 }
 
@@ -69,6 +86,7 @@ void FrameQueue::reopen() {
 void FrameQueue::clear() {
     std::lock_guard<std::mutex> lock(mutex_);
     queue_.clear();
+    condition_.notify_all();
 }
 
 std::size_t FrameQueue::size() const {

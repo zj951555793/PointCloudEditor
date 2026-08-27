@@ -11,10 +11,10 @@
 /* #undef CV_DISABLE_OPTIMIZATION */
 
 /* Compile for 'real' NVIDIA GPU architectures */
-#define CUDA_ARCH_BIN " 35 37 50 52 60 61 70 75 80 86 89 90"
+#define CUDA_ARCH_BIN ""
 
 /* NVIDIA GPU features are used */
-#define CUDA_ARCH_FEATURES " 35 37 50 52 60 61 70 75 80 86 89 90"
+#define CUDA_ARCH_FEATURES ""
 
 /* Compile for 'virtual' NVIDIA PTX architectures */
 #define CUDA_ARCH_PTX ""
@@ -29,16 +29,16 @@
 /* #undef HAVE_CLP */
 
 /* NVIDIA CUDA Runtime API*/
-#define HAVE_CUDA
+/* #undef HAVE_CUDA */
 
 /* NVIDIA CUDA Basic Linear Algebra Subprograms (BLAS) API*/
-#define HAVE_CUBLAS
+/* #undef HAVE_CUBLAS */
 
 /* NVIDIA CUDA Deep Neural Network (cuDNN) API*/
-#define HAVE_CUDNN
+/* #undef HAVE_CUDNN */
 
 /* NVIDIA CUDA Fast Fourier Transform (FFT) API*/
-#define HAVE_CUFFT
+/* #undef HAVE_CUFFT */
 
 /* DirectX */
 #define HAVE_DIRECTX
@@ -48,7 +48,7 @@
 #define HAVE_D3D9
 
 /* Eigen Matrix & Linear Algebra Library */
-/* #undef HAVE_EIGEN */
+#define HAVE_EIGEN
 
 /* Geospatial Data Abstraction Library */
 /* #undef HAVE_GDAL */
@@ -65,8 +65,8 @@
 /* Intel Integrated Performance Primitives */
 #define HAVE_IPP
 #define HAVE_IPP_ICV
-#define HAVE_IPP_IW
-#define HAVE_IPP_IW_LL
+/* #undef HAVE_IPP_IW */
+/* #undef HAVE_IPP_IW_LL */
 
 /* JPEG-2000 codec */
 #define HAVE_OPENJPEG

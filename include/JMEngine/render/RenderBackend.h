@@ -6,8 +6,10 @@
 
 #include <memory>
 
-// 渲染后端统一只使用 VAO。
-// Desktop OpenGL 2.1 必须提供 GL_ARB_vertex_array_object 扩展；GLES 3.1 原生支持 VAO。
+// Desktop OpenGL 2.1+ 支持两种顶点布局路径：
+// - 有 VAO：继续使用 VAO + VBO；
+// - 无 GL_ARB_vertex_array_object：回退为纯 VBO，每次 draw 重新绑定 attribute。
+// GLES 3.1 仍原生使用 VAO。
 // Qt 编辑器唯一维护的一套渲染后端接口。
 // 上层 MainWindow / PointCloudWidget / ModelManager 完全不区分 Windows 与 RK3588。
 // 差异只保留在这里：
@@ -38,12 +40,12 @@ class IRenderBackend {
     virtual bool validateContext(QString* error) const = 0;
     virtual void configureContextState(QOpenGLExtraFunctions& gl) = 0;
 
-    // 统一要求 VAO。Desktop GL2.1 若缺少 ARB VAO 扩展，后端初始化失败。
+    // VAO 是可选加速能力。Desktop GL2.1 缺少 ARB VAO 时仍可使用纯 VBO。
     virtual bool vaoSupported() const = 0;
     // GPU Picking 仅在当前后端/驱动真正支持所需扩展时启用；否则上层自动回退 CPU。
     virtual bool gpuPickingSupported() const = 0;
     bool usesVao() const {
-        return true;
+        return vaoSupported();
     }
 
     // Shader 文本由后端提供。算法完全一致，仅 GLSL 方言不同。
@@ -60,7 +62,7 @@ class IRenderBackend {
     virtual void bindPointPickAttributeLocations(QOpenGLShaderProgram& program) const = 0;
     virtual void bindMeshPickAttributeLocations(QOpenGLShaderProgram& program) const = 0;
 
-    // 创建/销毁 VAO。所有平台都固定使用 VAO。
+    // 创建/销毁 VAO。Desktop legacy 无 VAO 时为 no-op。
     virtual void createVertexArrays(QOpenGLExtraFunctions& gl, Buffers& b) const = 0;
     virtual void destroyVertexArrays(QOpenGLExtraFunctions& gl, Buffers& b) const = 0;
 

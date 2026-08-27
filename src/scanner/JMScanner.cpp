@@ -11,7 +11,38 @@
 #include <iostream>
 #include <utility>
 
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
+
 namespace JMEngine {
+
+#if defined(_WIN32)
+namespace {
+class ScannerMutex {
+  public:
+    ScannerMutex() { InitializeCriticalSection(&section_); }
+    ~ScannerMutex() { DeleteCriticalSection(&section_); }
+
+    ScannerMutex(const ScannerMutex&) = delete;
+    ScannerMutex& operator=(const ScannerMutex&) = delete;
+
+    void lock() { EnterCriticalSection(&section_); }
+    void unlock() { LeaveCriticalSection(&section_); }
+
+  private:
+    CRITICAL_SECTION section_;
+};
+} // namespace
+#else
+using ScannerMutex = std::mutex;
+#endif
 
 class JMScanner::Impl {
   public:
@@ -25,7 +56,7 @@ class JMScanner::Impl {
     void setState(ScanState newState) {
         StateCallback callback;
         {
-            std::lock_guard<std::mutex> lock(mutex);
+            std::lock_guard<ScannerMutex> lock(mutex);
             state = newState;
             statistics.state = newState;
             callback = stateCallback;
@@ -35,10 +66,15 @@ class JMScanner::Impl {
     }
 
     void stopWorker() {
-        if (source)
-            source->stop();
+        // Close the scanner queue before joining a lossless DatasetCamera.  Its
+        // producer may be blocked in pushBlocking() waiting for capacity; closing
+        // the queue wakes it immediately and prevents stop() deadlock.
         running.store(false);
         queue.close();
+        if (backend)
+            backend->interruptInputWait();
+        if (source)
+            source->stop();
         if (worker.joinable())
             worker.join();
         queue.clear();
@@ -50,7 +86,7 @@ class JMScanner::Impl {
         const auto aggregate = backend ? backend->cloud() : frameCloud;
         FrameCallback callback;
         {
-            std::lock_guard<std::mutex> lock(mutex);
+            std::lock_guard<ScannerMutex> lock(mutex);
             liveCloud = aggregate;
             pose = framePose;
             statistics.livePoints = aggregate ? aggregate->size() : 0;
@@ -64,7 +100,7 @@ class JMScanner::Impl {
     void publishMarkers(const ScanMarkerFrame& frame) {
         MarkerCallback callback;
         {
-            std::lock_guard<std::mutex> lock(mutex);
+            std::lock_guard<ScannerMutex> lock(mutex);
             callback = markerCallback;
         }
         if (callback)
@@ -76,7 +112,7 @@ class JMScanner::Impl {
             return;
         PoseUpdateCallback callback;
         {
-            std::lock_guard<std::mutex> lock(mutex);
+            std::lock_guard<ScannerMutex> lock(mutex);
             callback = poseUpdateCallback;
         }
         if (callback)
@@ -101,19 +137,46 @@ class JMScanner::Impl {
                           << " popGap=" << popGapMs << "ms process=" << processMs
                           << "ms accepted=" << (accepted ? 1 : 0) << std::endl;
             }
-            std::lock_guard<std::mutex> lock(mutex);
-            if (accepted)
-                ++statistics.processedFrames;
-            else
-                ++statistics.rejectedFrames;
+            MessageCallback rejectCallback;
+            bool reportDatasetReject = false;
+            {
+                std::lock_guard<ScannerMutex> lock(mutex);
+                if (accepted) {
+                    ++statistics.processedFrames;
+                } else {
+                    ++statistics.rejectedFrames;
+                    if (config.losslessDatasetReplay &&
+                        !datasetRejectReported.exchange(true)) {
+                        reportDatasetReject = true;
+                        rejectCallback = messageCallback;
+                    }
+                }
+            }
+            if (reportDatasetReject && rejectCallback) {
+                rejectCallback(
+                    "Virtual frame rejected by SLAM. Check calib.txt RGB size and "
+                    "[SLAM INPUT]/[ONESHOT DECODE] diagnostics.");
+            }
         }
     }
 
-    mutable std::mutex mutex;
+    bool ensureBackend(std::string* backendError) {
+        if (backend)
+            return true;
+        backend = createRulerMvsSlam();
+        if (backend)
+            return true;
+        if (backendError)
+            *backendError = "RulerMVS backend creation failed";
+        return false;
+    }
+
+    mutable ScannerMutex mutex;
     std::unique_ptr<ISlam> backend;
     FrameQueue queue;
     std::thread worker;
     std::atomic<bool> running{false};
+    std::atomic<bool> datasetRejectReported{false};
     ScanConfig config;
     ScanState state{ScanState::Idle};
     ScanStatistics statistics;
@@ -133,11 +196,10 @@ class JMScanner::Impl {
 };
 
 JMScanner::JMScanner()
-    : JMScanner(createRulerMvsSlam()) {}
+    : impl_(std::make_unique<Impl>(nullptr)) {}
 
 JMScanner::JMScanner(std::unique_ptr<ISlam> backend)
-    : impl_(std::make_unique<Impl>(
-          backend ? std::move(backend) : createRulerMvsSlam())) {}
+    : impl_(std::make_unique<Impl>(std::move(backend))) {}
 
 JMScanner::~JMScanner() = default;
 
@@ -146,6 +208,16 @@ bool JMScanner::initialize(const ScanConfig& config) {
         return false;
 
     impl_->setState(ScanState::Initializing);
+    std::string error;
+    if (!impl_->ensureBackend(&error)) {
+        {
+            std::lock_guard<ScannerMutex> lock(impl_->mutex);
+            impl_->error = error.empty() ? "RulerMVS backend creation failed" : error;
+        }
+        impl_->setState(ScanState::Error);
+        return false;
+    }
+
     impl_->backend->setUpdateCallback(
         [implementation = impl_.get()](int frameId, const Pose& pose,
                                        std::shared_ptr<PointCloud> cloud,
@@ -163,10 +235,9 @@ bool JMScanner::initialize(const ScanConfig& config) {
             implementation->publishPoseUpdates(std::move(updates));
         });
 
-    std::string error;
     if (!impl_->backend || !impl_->backend->initialize(config, &error)) {
         {
-            std::lock_guard<std::mutex> lock(impl_->mutex);
+            std::lock_guard<ScannerMutex> lock(impl_->mutex);
             impl_->error = error.empty() ? "RulerMVS initialization failed" : error;
         }
         impl_->setState(ScanState::Error);
@@ -174,9 +245,10 @@ bool JMScanner::initialize(const ScanConfig& config) {
     }
 
     {
-        std::lock_guard<std::mutex> lock(impl_->mutex);
+        std::lock_guard<ScannerMutex> lock(impl_->mutex);
         impl_->config = config;
         impl_->statistics = {};
+        impl_->datasetRejectReported.store(false);
         impl_->error.clear();
         impl_->liveCloud.reset();
         impl_->resultCloud.reset();
@@ -199,6 +271,16 @@ bool JMScanner::start() {
         return false;
     }
 
+    std::string error;
+    if (!impl_->ensureBackend(&error)) {
+        {
+            std::lock_guard<ScannerMutex> lock(impl_->mutex);
+            impl_->error = error.empty() ? "RulerMVS backend creation failed" : error;
+        }
+        impl_->setState(ScanState::Error);
+        return false;
+    }
+
     impl_->stopWorker();
     impl_->queue.reopen();
     impl_->running.store(true);
@@ -213,6 +295,9 @@ bool JMScanner::startCameras(const DualCameraConfig& config) {
     if (state() != ScanState::Scanning && !start())
         return false;
 
+    impl_->config.losslessDatasetReplay = false;
+    if (impl_->backend)
+        impl_->backend->setLosslessInputReplay(false);
     impl_->source = createPlatformCameraSource();
     impl_->source->setPreviewCallback(impl_->previewCallback);
     std::string error;
@@ -222,7 +307,7 @@ bool JMScanner::startCameras(const DualCameraConfig& config) {
         [this](const std::string& message) {
             MessageCallback callback;
             {
-                std::lock_guard<std::mutex> lock(impl_->mutex);
+                std::lock_guard<ScannerMutex> lock(impl_->mutex);
                 impl_->error = message;
                 callback = impl_->messageCallback;
             }
@@ -234,7 +319,7 @@ bool JMScanner::startCameras(const DualCameraConfig& config) {
     if (!started) {
         impl_->stopWorker();
         {
-            std::lock_guard<std::mutex> lock(impl_->mutex);
+            std::lock_guard<ScannerMutex> lock(impl_->mutex);
             impl_->error = error;
         }
         impl_->setState(ScanState::Error);
@@ -246,6 +331,12 @@ bool JMScanner::startDataset(const std::string& directory) {
     if (state() != ScanState::Scanning && !start())
         return false;
 
+    // Enforce lossless replay at the scanner API boundary as well as in the Qt
+    // config so non-Qt callers cannot accidentally use the live-camera drop
+    // policy for a dataset.
+    impl_->config.losslessDatasetReplay = true;
+    if (impl_->backend)
+        impl_->backend->setLosslessInputReplay(true);
     impl_->source = createDatasetCameraSource(directory);
     impl_->source->setPreviewCallback(impl_->previewCallback);
     std::string error;
@@ -255,7 +346,7 @@ bool JMScanner::startDataset(const std::string& directory) {
         [this](const std::string& message) {
             MessageCallback callback;
             {
-                std::lock_guard<std::mutex> lock(impl_->mutex);
+                std::lock_guard<ScannerMutex> lock(impl_->mutex);
                 impl_->error = message;
                 callback = impl_->messageCallback;
             }
@@ -267,7 +358,7 @@ bool JMScanner::startDataset(const std::string& directory) {
     if (!started) {
         impl_->stopWorker();
         {
-            std::lock_guard<std::mutex> lock(impl_->mutex);
+            std::lock_guard<ScannerMutex> lock(impl_->mutex);
             impl_->error = error;
         }
         impl_->setState(ScanState::Error);
@@ -289,7 +380,7 @@ void JMScanner::setCameraPreviewCallback(
     std::function<void(std::shared_ptr<std::vector<std::uint8_t>>, int, int)>
         callback) {
     {
-        std::lock_guard<std::mutex> lock(impl_->mutex);
+        std::lock_guard<ScannerMutex> lock(impl_->mutex);
         impl_->previewCallback = callback;
     }
     if (impl_->source)
@@ -298,13 +389,13 @@ void JMScanner::setCameraPreviewCallback(
 
 bool JMScanner::submit(CameraFrame frame) {
     if (state() != ScanState::Scanning || !frame.valid()) {
-        std::lock_guard<std::mutex> lock(impl_->mutex);
+        std::lock_guard<ScannerMutex> lock(impl_->mutex);
         ++impl_->statistics.rejectedFrames;
         return false;
     }
 
     {
-        std::lock_guard<std::mutex> lock(impl_->mutex);
+        std::lock_guard<ScannerMutex> lock(impl_->mutex);
         if (impl_->statistics.submittedFrames >=
             std::uint64_t(std::max(1, impl_->config.maxFrames))) {
             ++impl_->statistics.rejectedFrames;
@@ -318,16 +409,22 @@ bool JMScanner::submit(CameraFrame frame) {
     const double submitGapMs = std::chrono::duration<double, std::milli>(now - lastSubmit).count();
     lastSubmit = now;
     const int submitFrameId = frame.frameId;
-    // Do not evict an older queued frame: preserving adjacency is more important
-    // for fast rigid turntable motion than always displaying the newest frame.
-    const bool queued = impl_->queue.pushSequential(std::move(frame));
+    // Physical cameras keep bounded real-time latency. Virtual datasets are
+    // different: every recorded frame is valuable and must remain consecutive,
+    // so apply producer back-pressure instead of dropping the newest frame.
+    const bool losslessReplay = impl_->config.losslessDatasetReplay;
+    const bool queued = losslessReplay
+        ? impl_->queue.pushBlocking(std::move(frame))
+        : impl_->queue.pushSequential(std::move(frame));
     if (submitGapMs > 180.0 || !queued) {
         std::cout << "[SCAN STALL][SOURCE] frame=" << submitFrameId
-                  << " gap=" << submitGapMs << "ms queueDropNewest=" << (!queued ? 1 : 0)
+                  << " gap=" << submitGapMs
+                  << "ms queueDropNewest=" << (!queued ? 1 : 0)
+                  << " losslessReplay=" << (losslessReplay ? 1 : 0)
                   << std::endl;
     }
     if (!queued) {
-        std::lock_guard<std::mutex> lock(impl_->mutex);
+        std::lock_guard<ScannerMutex> lock(impl_->mutex);
         ++impl_->statistics.replacedFrames;
     }
     return true;
@@ -351,7 +448,7 @@ bool JMScanner::reconstruct() {
         [this](int value) {
             ProgressCallback callback;
             {
-                std::lock_guard<std::mutex> lock(impl_->mutex);
+                std::lock_guard<ScannerMutex> lock(impl_->mutex);
                 callback = impl_->progressCallback;
             }
             if (callback)
@@ -361,7 +458,7 @@ bool JMScanner::reconstruct() {
 
     if (!cloud) {
         {
-            std::lock_guard<std::mutex> lock(impl_->mutex);
+            std::lock_guard<ScannerMutex> lock(impl_->mutex);
             impl_->error = error.empty() ? "offline reconstruction failed" : error;
         }
         impl_->setState(ScanState::Error);
@@ -369,7 +466,7 @@ bool JMScanner::reconstruct() {
     }
 
     {
-        std::lock_guard<std::mutex> lock(impl_->mutex);
+        std::lock_guard<ScannerMutex> lock(impl_->mutex);
         impl_->resultCloud = cloud;
         impl_->liveCloud = cloud;
         impl_->statistics.livePoints = cloud->size();
@@ -383,7 +480,7 @@ void JMScanner::reset() {
     if (impl_->backend)
         impl_->backend->reset();
     {
-        std::lock_guard<std::mutex> lock(impl_->mutex);
+        std::lock_guard<ScannerMutex> lock(impl_->mutex);
         impl_->statistics = {};
         impl_->liveCloud.reset();
         impl_->resultCloud.reset();
@@ -393,32 +490,32 @@ void JMScanner::reset() {
 }
 
 ScanState JMScanner::state() const noexcept {
-    std::lock_guard<std::mutex> lock(impl_->mutex);
+    std::lock_guard<ScannerMutex> lock(impl_->mutex);
     return impl_->state;
 }
 
 Pose JMScanner::pose() const {
-    std::lock_guard<std::mutex> lock(impl_->mutex);
+    std::lock_guard<ScannerMutex> lock(impl_->mutex);
     return impl_->pose;
 }
 
 std::shared_ptr<PointCloud> JMScanner::liveCloud() const {
-    std::lock_guard<std::mutex> lock(impl_->mutex);
+    std::lock_guard<ScannerMutex> lock(impl_->mutex);
     return impl_->liveCloud;
 }
 
 std::shared_ptr<PointCloud> JMScanner::resultCloud() const {
-    std::lock_guard<std::mutex> lock(impl_->mutex);
+    std::lock_guard<ScannerMutex> lock(impl_->mutex);
     return impl_->resultCloud;
 }
 
 ScanStatistics JMScanner::statistics() const {
-    std::lock_guard<std::mutex> lock(impl_->mutex);
+    std::lock_guard<ScannerMutex> lock(impl_->mutex);
     return impl_->statistics;
 }
 
 std::string JMScanner::lastError() const {
-    std::lock_guard<std::mutex> lock(impl_->mutex);
+    std::lock_guard<ScannerMutex> lock(impl_->mutex);
     return impl_->error;
 }
 
@@ -428,32 +525,32 @@ std::vector<TextureKeyframe> JMScanner::takeTextureKeyframes() {
 }
 
 void JMScanner::setStateCallback(StateCallback callback) {
-    std::lock_guard<std::mutex> lock(impl_->mutex);
+    std::lock_guard<ScannerMutex> lock(impl_->mutex);
     impl_->stateCallback = std::move(callback);
 }
 
 void JMScanner::setFrameCallback(FrameCallback callback) {
-    std::lock_guard<std::mutex> lock(impl_->mutex);
+    std::lock_guard<ScannerMutex> lock(impl_->mutex);
     impl_->frameCallback = std::move(callback);
 }
 
 void JMScanner::setMessageCallback(MessageCallback callback) {
-    std::lock_guard<std::mutex> lock(impl_->mutex);
+    std::lock_guard<ScannerMutex> lock(impl_->mutex);
     impl_->messageCallback = std::move(callback);
 }
 
 void JMScanner::setProgressCallback(ProgressCallback callback) {
-    std::lock_guard<std::mutex> lock(impl_->mutex);
+    std::lock_guard<ScannerMutex> lock(impl_->mutex);
     impl_->progressCallback = std::move(callback);
 }
 
 void JMScanner::setMarkerCallback(MarkerCallback callback) {
-    std::lock_guard<std::mutex> lock(impl_->mutex);
+    std::lock_guard<ScannerMutex> lock(impl_->mutex);
     impl_->markerCallback = std::move(callback);
 }
 
 void JMScanner::setPoseUpdateCallback(PoseUpdateCallback callback) {
-    std::lock_guard<std::mutex> lock(impl_->mutex);
+    std::lock_guard<ScannerMutex> lock(impl_->mutex);
     impl_->poseUpdateCallback = std::move(callback);
 }
 

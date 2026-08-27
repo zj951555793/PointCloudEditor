@@ -19,7 +19,7 @@ set(CMAKE_IMPORT_FILE_VERSION 1)
 set(_cmake_targets_defined "")
 set(_cmake_targets_not_defined "")
 set(_cmake_expected_targets "")
-foreach(_cmake_expected_target IN ITEMS rulermvs_core rulermvs_match rulermvs_phaseshift rulermvs_rgbdfusion rulermvs_FaceScan rulermvs_MarkerExtractor rulermvs_OralScan rulermvs_RGBD_MarkerFusion rulermvs_Tracker rulermvs_multiframefilter rulermvs_oneshot rulermvs_rgbslam)
+foreach(_cmake_expected_target IN ITEMS rulermvs_core rulermvs_match rulermvs_phaseshift rulermvs_rgbdfusion rulermvs_FaceScan rulermvs_Lines_MarkerFusion rulermvs_MarkerExtractor rulermvs_OralScan rulermvs_RGBD_MarkerFusion rulermvs_Tracker rulermvs_multiframefilter rulermvs_multilines rulermvs_oneshot rulermvs_rgbslam)
   list(APPEND _cmake_expected_targets "${_cmake_expected_target}")
   if(TARGET "${_cmake_expected_target}")
     list(APPEND _cmake_targets_defined "${_cmake_expected_target}")
@@ -59,84 +59,98 @@ endif()
 add_library(rulermvs_core SHARED IMPORTED)
 
 set_target_properties(rulermvs_core PROPERTIES
-  INTERFACE_INCLUDE_DIRECTORIES "G:/rulermvs0907/rulermvs_cicle/install/include/"
+  INTERFACE_INCLUDE_DIRECTORIES "E:/rulermvs/install/include/"
 )
 
 # Create imported target rulermvs_match
 add_library(rulermvs_match SHARED IMPORTED)
 
 set_target_properties(rulermvs_match PROPERTIES
-  INTERFACE_INCLUDE_DIRECTORIES "G:/rulermvs0907/rulermvs_cicle/install/include/"
+  INTERFACE_INCLUDE_DIRECTORIES "E:/rulermvs/install/include/"
 )
 
 # Create imported target rulermvs_phaseshift
 add_library(rulermvs_phaseshift SHARED IMPORTED)
 
 set_target_properties(rulermvs_phaseshift PROPERTIES
-  INTERFACE_INCLUDE_DIRECTORIES "G:/rulermvs0907/rulermvs_cicle/install/include/"
+  INTERFACE_INCLUDE_DIRECTORIES "E:/rulermvs/install/include/"
 )
 
 # Create imported target rulermvs_rgbdfusion
 add_library(rulermvs_rgbdfusion SHARED IMPORTED)
 
 set_target_properties(rulermvs_rgbdfusion PROPERTIES
-  INTERFACE_INCLUDE_DIRECTORIES "G:/rulermvs0907/rulermvs_cicle/install/include/"
+  INTERFACE_INCLUDE_DIRECTORIES "E:/rulermvs/install/include/"
 )
 
 # Create imported target rulermvs_FaceScan
 add_library(rulermvs_FaceScan SHARED IMPORTED)
 
 set_target_properties(rulermvs_FaceScan PROPERTIES
-  INTERFACE_INCLUDE_DIRECTORIES "G:/rulermvs0907/rulermvs_cicle/install/include/"
+  INTERFACE_INCLUDE_DIRECTORIES "E:/rulermvs/install/include/"
+)
+
+# Create imported target rulermvs_Lines_MarkerFusion
+add_library(rulermvs_Lines_MarkerFusion SHARED IMPORTED)
+
+set_target_properties(rulermvs_Lines_MarkerFusion PROPERTIES
+  INTERFACE_INCLUDE_DIRECTORIES "E:/rulermvs/install/include/"
 )
 
 # Create imported target rulermvs_MarkerExtractor
 add_library(rulermvs_MarkerExtractor SHARED IMPORTED)
 
 set_target_properties(rulermvs_MarkerExtractor PROPERTIES
-  INTERFACE_INCLUDE_DIRECTORIES "G:/rulermvs0907/rulermvs_cicle/install/include/"
+  INTERFACE_INCLUDE_DIRECTORIES "E:/rulermvs/install/include/"
 )
 
 # Create imported target rulermvs_OralScan
 add_library(rulermvs_OralScan SHARED IMPORTED)
 
 set_target_properties(rulermvs_OralScan PROPERTIES
-  INTERFACE_INCLUDE_DIRECTORIES "G:/rulermvs0907/rulermvs_cicle/install/include/"
+  INTERFACE_INCLUDE_DIRECTORIES "E:/rulermvs/install/include/"
 )
 
 # Create imported target rulermvs_RGBD_MarkerFusion
 add_library(rulermvs_RGBD_MarkerFusion SHARED IMPORTED)
 
 set_target_properties(rulermvs_RGBD_MarkerFusion PROPERTIES
-  INTERFACE_INCLUDE_DIRECTORIES "G:/rulermvs0907/rulermvs_cicle/install/include/"
+  INTERFACE_INCLUDE_DIRECTORIES "E:/rulermvs/install/include/"
 )
 
 # Create imported target rulermvs_Tracker
 add_library(rulermvs_Tracker SHARED IMPORTED)
 
 set_target_properties(rulermvs_Tracker PROPERTIES
-  INTERFACE_INCLUDE_DIRECTORIES "G:/rulermvs0907/rulermvs_cicle/install/include/"
+  INTERFACE_INCLUDE_DIRECTORIES "E:/rulermvs/install/include/"
 )
 
 # Create imported target rulermvs_multiframefilter
 add_library(rulermvs_multiframefilter SHARED IMPORTED)
 
 set_target_properties(rulermvs_multiframefilter PROPERTIES
-  INTERFACE_INCLUDE_DIRECTORIES "G:/rulermvs0907/rulermvs_cicle/install/include/"
+  INTERFACE_INCLUDE_DIRECTORIES "E:/rulermvs/install/include/"
+)
+
+# Create imported target rulermvs_multilines
+add_library(rulermvs_multilines SHARED IMPORTED)
+
+set_target_properties(rulermvs_multilines PROPERTIES
+  INTERFACE_INCLUDE_DIRECTORIES "E:/rulermvs/install/include/"
 )
 
 # Create imported target rulermvs_oneshot
 add_library(rulermvs_oneshot SHARED IMPORTED)
 
 set_target_properties(rulermvs_oneshot PROPERTIES
-  INTERFACE_INCLUDE_DIRECTORIES "G:/rulermvs0907/rulermvs_cicle/install/include/"
+  INTERFACE_INCLUDE_DIRECTORIES "E:/rulermvs/install/include/"
 )
 
 # Create imported target rulermvs_rgbslam
 add_library(rulermvs_rgbslam SHARED IMPORTED)
 
 set_target_properties(rulermvs_rgbslam PROPERTIES
-  INTERFACE_INCLUDE_DIRECTORIES "G:/rulermvs0907/rulermvs_cicle/install/include/"
+  INTERFACE_INCLUDE_DIRECTORIES "E:/rulermvs/install/include/"
 )
 
 # Load information for each installed configuration.

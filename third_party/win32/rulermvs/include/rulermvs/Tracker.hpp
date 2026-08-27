@@ -52,6 +52,8 @@ namespace slam
 
         int max_triMatched_counter_ = 6; //参考帧与当前帧计算RT时，会根据路标point构造三角形，当三角形匹配成功次数计数器超过该值时停止三角形匹配
 
+        bool mintree_ = false;
+
         //设置参数
 		void Setparameter(double site_diff_thres, double p3d_match_thres, double p3d_match_thres_online, double p3d_match_thres_relocation);
 
@@ -241,8 +243,10 @@ namespace slam
         }
         if (depth_num < min_match_num) 
         {
+#ifndef NDEBUG
             std::cout << "ref failed. " << "\t";
             std::cout << "There are not enough Marker Points in this frame. " << "\t";
+#endif
             return slam::TrackState::TRACKING_FAILED;
         }
 
@@ -282,7 +286,9 @@ namespace slam
         if (matched)
         {
             tracker.global_map_ptr_->UpdatePointerAndDistMap(tracker.global_map_ptr_->new_mappoint_id_, 500.0, false);
+#ifndef NDEBUG
             std::cout << "ref success. " << "\t";
+#endif
             tracker.track_state_ = slam::TrackState::TRACKING_BY_REF_FRAME_SUCCESS;
             cv::Mat mat_temp = cv::Mat::eye(4, 4, CV_64F);
             //cv::eigen2cv(relate_rt, mat_temp);
@@ -302,7 +308,9 @@ namespace slam
         } 
         else 
         {
+#ifndef NDEBUG
             std::cout << "ref failed. " << "\t";
+#endif
             tracker.track_state_ = slam::TrackState::TRACKING_FAILED;
         }
         return tracker.track_state_;
@@ -495,8 +503,28 @@ namespace slam
     /// @param iter_Num BA优化迭代次数
     /// @param match_adjacentFrame 当前帧是否先尝试与相邻帧(global_map的最后一帧)对齐，false表示直接与global_map对齐(仅对当前帧是单帧起作用)(已废弃)
     /// @param insert_newframe 对齐成功或初始化成功是否将当前帧添加到global_map中，false表示否定
-    MVS_EXPORT bool matchMarkerPointAndOptimizeMultiGroupFrames(GlobalMap& global_map_, rulermvs::Pose& rt, std::vector<Frame>& reference_frames, std::vector<Frame>& current_frames,
-        int min_match_num = 3, double site_diff_thres = 1.0, double p3d_match_thres = 1.5, double p3d_nearest_thres = 3.0, int iter_Num = 10, bool insert_newframe = true);
+    MVS_EXPORT bool matchMarkerPointAndOptimizeMultiGroupFrames(
+        GlobalMap& global_map_, rulermvs::Pose& rt,
+        std::vector<Frame>& reference_frames,
+        std::vector<Frame>& current_frames, int min_match_num = 3,
+        double site_diff_thres = 1.0, double p3d_match_thres = 1.5,
+        double p3d_nearest_thres = 3.0, int iter_Num = 10,
+        bool insert_newframe = true, int max_triMatched_counter = 6,
+        bool mintree = false);
+
+    /// @brief 新加入的当前帧，与所有关键帧匹配，检验是否由于累计误差导致回环拼接错误，适用于在线检验，速度较慢且不完善
+    MVS_EXPORT void InsertFrameByRecalculateObservationsAndMatchKeyFrames(
+        GlobalMap& global_map_, Frame& frame, const cv::Mat& rt,
+        std::vector<int>& key_inds, int min_match_points_num = 4,
+        int min_match_frames_num = 3, double site_diff_thres = 1.0,
+        double p3d_match_thres = 1.5);
+
+    /// @brief 离线回环校验及校正
+    MVS_EXPORT void RectifyLoopClosure(Tracker& tracker,
+        const std::vector<int>& key_inds, int min_match_points_num = 4,
+        /*int min_match_frames_num = 3,*/ double site_diff_thres = 1.0,
+        double p3d_match_thres = 1.5, int iter_Num = 1,
+        rulermvs::ProgressBar progress = 0);
 
     /// @brief 跟踪新加入的当前帧(多帧)，输出RT，同时对加入新帧的global_map进行BA优化，缩小同名点偏差
     /// @param global_map_ 全局地图，包含MapPoint和Frame，若传入为空，函数内部根据参考帧reference和对应的rts1重新构建global_map并BA优化，若不为空，默认为是经过BA优化的global_map，不再构造直接沿用

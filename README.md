@@ -199,3 +199,140 @@ The transform is applied immediately after capture, before preview, camera
 pairing, SLAM input, and raw scan recording. Camera-mode scanning refuses to
 start when A/B has no matched model profile, when A/B selects the same device,
 or when the two selected cameras resolve to different models. A/B `rotate` values may differ.
+
+Virtual/dataset scanning never applies these camera-model `rotate` values. Dataset
+`img/c` and `img/p` are passed to SLAM in their stored orientation. The Qt editor
+shows an `img/c` preview during virtual scanning so dataset orientation can be
+checked without modifying the virtual scan input.
+
+### V20 virtual-scan reliability (JMC1S/JMC1L)
+
+Virtual/dataset replay still **never applies camera-model rotate/flip**.  It now uses
+lossless back-pressure instead of the physical-camera bounded drop policy, so a
+slower JMC1S OneShot decode cannot silently remove consecutive frames.  `img/c`
+and `img/p` are paired by their numeric frame id (or matching stem) before replay;
+a missing file on one side is skipped rather than shifting every later pair.
+
+Useful runtime diagnostics:
+
+- `[VIRTUAL DATASET] ... paired=...` reports color/code counts and pairing.
+- `[VIRTUAL DATASET] firstFrame color=... code=... rotate=disabled` confirms the
+  exact unmodified input dimensions.
+- `[SLAM CALIB] color=...` reports the RGB dimensions required by `calib.txt`.
+- `[SLAM INPUT] RGB size mismatch ...` identifies a dataset/calibration mismatch.
+- `[ONESHOT DECODE] ... points=...` shows whether the structured-light code frame
+  actually decodes into geometry.
+
+### V22 virtual replay stall fix
+
+Virtual replay remains unrotated and lossless. The JMC1S path now limits the
+lossless vendor-SDK frontier to two frames, serializes calls to the shared
+`IOneShot::decode()` instance, and makes lossless waits interruptible during
+stop/restart. Dataset filename pairing also falls back to sorted-index pairing
+when a numeric/stem heuristic covers less than 80% of the recording, preventing
+a weak match from silently truncating replay. Runtime diagnostics include
+`[VIRTUAL BACKPRESSURE]`, replay progress, pairing mode, and source EOF.
+
+## Windows self-contained runtime package
+
+Windows Qt-editor builds now create a self-contained runtime package automatically.
+After the normal `POST_BUILD` deployment finishes, CMake copies the complete editor
+runtime directory and creates:
+
+```text
+build/package/windows/<CONFIG>/
+  JMEngine_qt_editor/
+  JMEngine_qt_editor-<CONFIG>.zip
+```
+
+The package captures the Windows runtime files already deployed by the build: Qt
+plugins/DLLs and MSVC runtime from `windeployqt`, RulerMVS DLLs, bundled OpenCV
+DLLs, the minimal CUDA `cudart64_*.dll` when CUDA deployment is enabled, the camera
+model configuration, and the Poisson SurfaceTrimmer helper when that target exists.
+It intentionally does not copy `nvcuda.dll`, because that DLL is supplied by the
+installed NVIDIA display driver. Set `-DJMENGINE_PACKAGE_WINDOWS_RUNTIME=OFF` to
+disable ZIP generation, or set `JMENGINE_WINDOWS_PACKAGE_ROOT` to change the output
+directory.
+
+
+### V23 atomic live-optimization rendering
+
+Realtime SLAM pose refreshes no longer use the model-loading style incremental apply path.
+One `getResults()` pose snapshot is treated as one optimization batch: all affected historical
+frame points are transformed off-thread first, the complete batch is then committed to the CPU
+history in one GUI pass, all pose dirty ranges are uploaded to the position/normal VBOs in the
+same `paintGL()`, and the scene is drawn once. There is no `250000 points/paint` optimization
+budget and no per-frame worker completion repaint, so an optimized history is never exposed
+partially across several render frames. If a newer pose callback arrives while one batch is
+running, its newest per-frame RTs are coalesced for the next complete batch.
+
+### V24 fast atomic live-optimization rendering
+
+V23's atomic display semantics are preserved: one SDK optimization snapshot still becomes visible
+only after every affected historical pose has finished, and the scene is still drawn exactly once
+for that completed batch. The old `livePosePointBudget` is **not** restored as a per-paint loading
+budget.
+
+The expensive work is now moved out of `paintGL()` instead:
+
+- one optimization batch is transformed in parallel across the dedicated live-pose worker pool;
+- workers write directly into final contiguous position/normal staging ranges;
+- adjacent historical frame ranges are packed before the GUI refresh;
+- `paintGL()` no longer allocates temporary position/normal arrays or rescans the full CPU cloud
+  just to prepare VBO data;
+- the GUI commits the completed CPU batch once, uploads the already-packed GPU ranges once, and
+  draws once;
+- runtime diagnostics `[LIVE POSE BATCH]` and `[LIVE POSE GPU]` report transform, GUI-commit, and
+  GPU-upload costs when a batch is large or slow.
+
+This keeps the required all-or-nothing optimization refresh while avoiding the v23 regression where
+millions of optimized points were transformed serially by one worker and then repacked again on the
+render thread.
+
+
+### V25 OpenMP live-optimization transform
+
+Realtime pose refresh keeps the V24 atomic rendering contract but replaces the multiple
+QThreadPool transform workers with exactly one background batch task. When OpenMP is available,
+that task parallelizes independent historical frames with `schedule(static)`. Live scanning uses
+at most half of the logical CPUs (capped at 8 and also respecting the project CPU-1 policy), so
+RGBDFusion/OneShot/capture/Qt keep CPU headroom. Small batches (fewer than 4 frames or fewer than 30000 transformed points)
+remain serial to avoid OpenMP startup overhead. The complete batch still produces exactly one GUI
+refresh, one CPU commit, one set of GPU range uploads and one scene draw; live optimization never
+uses file-loading-style point budgets or partial renders. Runtime diagnostics print
+`[LIVE POSE OMP] frames=... points=... ompThreads=... enabled=... transform=...ms`.
+The Qt editor also no longer forces `/Od`/`-O0` in `RelWithDebInfo`; the standard optimized
+RelWithDebInfo flags are retained together with debug symbols, which is important because the
+render loop and live-pose staging code are compiled in `PointCloudWidget.cpp`.
+
+
+### V26 automatic Desktop OpenGL 3.2 -> 2.1 fallback
+
+The Windows/x86 Qt editor no longer hard-requires an OpenGL 3.2 context at process startup.
+Before the main window is created it probes a 3.2 compatibility context on an offscreen surface.
+If that succeeds, the existing modern path remains active (VAO + R32UI/geometry-shader GPU picking).
+If it fails, the editor requests a Desktop OpenGL 2.1 context instead.
+
+The legacy Desktop path only requires VBO + GLSL 1.20 for normal point/mesh rendering.
+`GL_ARB_vertex_array_object` is now optional: when VAO is absent the backend rebinds the VBO
+attribute layout for each draw instead of aborting initialization. Modern integer/geometry-shader
+picking is disabled on the 2.1 path and selection automatically uses the existing CPU fallback.
+Scanning, SLAM, live-pose OpenMP optimization, model processing, and export are unchanged.
+
+For diagnostics, startup prints:
+
+```text
+[JMEngine GL] selected= OpenGL 3.2 compatibility ...
+[JMEngine GL CAP] vao= true gpuPicking= true legacyVboFallback= false
+```
+
+or on an older adapter:
+
+```text
+[JMEngine GL] selected= OpenGL 2.1 legacy ...
+[JMEngine GL CAP] vao= false gpuPicking= false legacyVboFallback= true
+```
+
+Set environment variable `JMENGINE_FORCE_GL21=1` to force the legacy path on a newer PC for
+compatibility testing. The guaranteed Desktop minimum remains OpenGL 2.1; OpenGL 1.x / Microsoft
+`GDI Generic` is treated as a missing/incorrect vendor GPU driver rather than a supported renderer.

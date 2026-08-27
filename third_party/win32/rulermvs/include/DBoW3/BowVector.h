@@ -15,8 +15,8 @@
 #include "exports.h"
 #if _WIN32
 #include <cstdint>
-#include <iostream> 
 #endif
+#include <iostream> 
 namespace DBoW3 {
 
 /// Id of words
