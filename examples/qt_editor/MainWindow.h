@@ -74,6 +74,8 @@ class MainWindow final : public QMainWindow {
     void updateCameraSelectionUi();
     void removeScanModelListEntry();
     void updateCameraPreviewGeometry();
+    void commitPendingScanHistoryFrame();
+    void resetPendingScanHistoryFrame();
     ScanUiConfig scanConfigFromUi() const;
     void openModels();
     void exportModel();
@@ -146,6 +148,13 @@ class MainWindow final : public QMainWindow {
     std::thread reconstructionThread_;
     ScanUiConfig activeScanConfig_;
     int lastScanVisualFrameId_{-1};
+    struct PendingScanHistoryFrame {
+        int frameId{-1};
+        JMEngine::Pose pose{};
+        std::shared_ptr<std::vector<JMEngine::Point>> localPoints;
+        bool trackingOk{false};
+    } pendingScanHistoryFrame_;
+    bool scanVisualFramesActive_{false};
 
     QAction* openAction_{nullptr};
     QAction* saveAction_{nullptr};

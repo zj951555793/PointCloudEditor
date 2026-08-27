@@ -83,7 +83,7 @@ class PointCloudWidget final : public QOpenGLWidget, protected QOpenGLExtraFunct
     void updateScanFramePoses(const std::shared_ptr<std::vector<LiveFramePoseUpdate>>& updates);
     // Normal: current frame = green. Lost: last valid frame = yellow reference, current lost frame = green.
     void setCurrentScanFrame(const std::shared_ptr<std::vector<JMEngine::Point>>& points, bool trackingOk);
-    // Commit the last valid/recovery reference to RGB history, then remove temporary status layers.
+    // Remove transient current/recovery status layers. MainWindow commits the final current frame to history first.
     void finalizeCurrentScanFrame();
     void clearCurrentScanFrame();
     void centerScanOrbitPivot();

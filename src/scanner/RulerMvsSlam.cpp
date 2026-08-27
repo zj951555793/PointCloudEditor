@@ -857,20 +857,16 @@ class RulerMvsBackend final : public ISlam {
         resultWorkersRunning_.store(true, std::memory_order_release);
         resultConsumerThread_ = std::thread([this] { resultConsumerLoop(); });
         resultConvertThread_ = std::thread([this] { resultConvertLoop(); });
-        livePoseRefreshThread_ = std::thread([this] { livePoseRefreshLoop(); });
     }
 
     void stopResultWorkers() {
         resultWorkersRunning_.store(false, std::memory_order_release);
         resultSignalCv_.notify_all();
         resultConvertCv_.notify_all();
-        poseRefreshCv_.notify_all();
         if (resultConsumerThread_.joinable())
             resultConsumerThread_.join();
         if (resultConvertThread_.joinable())
             resultConvertThread_.join();
-        if (livePoseRefreshThread_.joinable())
-            livePoseRefreshThread_.join();
         {
             std::lock_guard<std::mutex> lock(resultSignalMutex_);
             pendingResultSignals_.clear();
@@ -959,15 +955,49 @@ class RulerMvsBackend final : public ISlam {
             if (!fusion_ || wanted.empty())
                 continue;
 
+            bool collectPoseRefresh = false;
+            int optimizeThroughFrame = -1;
+            {
+                std::lock_guard<std::mutex> lock(poseRefreshMutex_);
+                if (poseRefreshRequested_) {
+                    poseRefreshRequested_ = false;
+                    collectPoseRefresh = true;
+                }
+            }
+            if (collectPoseRefresh) {
+                std::lock_guard<std::mutex> lock(stateMutex_);
+                optimizeThroughFrame = lastStateFrameId_ - kLivePoseGuardFrames;
+                if (optimizeThroughFrame < 0 || !poseUpdateCallback_)
+                    collectPoseRefresh = false;
+            }
+
             std::vector<RawFusionResult> ready;
             ready.reserve(wanted.size());
+            std::vector<FramePoseUpdate> poseCandidates;
+            if (collectPoseRefresh)
+                poseCandidates.reserve(std::size_t(optimizeThroughFrame + 1));
+
+            const auto sharedSnapshotStart = std::chrono::steady_clock::now();
             {
-                // LIVE DISPLAY SOURCE: IRGBDResult::toCloud(). Keep this work off RGBDFusion's
-                // trace callback thread. IRGBDResult itself cannot safely cross the callback
-                // boundary, so this worker snapshots owning point/normal/color vectors.
-                // OneShot data is intentionally NOT used here; it is reserved for project save.
+                // One and only one live getResults() pass:
+                //   1) current-frame IRGBDResult::toCloud()
+                //   2) optional historical optimized poses
+                // Keeping both consumers on the same snapshot prevents an optimization thread
+                // from monopolizing fusionResultsMutex_ and prevents current/history from being
+                // assembled from two different optimization epochs.
                 std::lock_guard<std::mutex> resultsLock(fusionResultsMutex_);
-                fusion_->getResults([&wanted, &ready](const rgbdslam::IRGBDResult& result) {
+                fusion_->getResults([this, &wanted, &ready, &poseCandidates,
+                                     collectPoseRefresh, optimizeThroughFrame]
+                                    (const rgbdslam::IRGBDResult& result) {
+                    if (collectPoseRefresh && result.getFlag() == 0 &&
+                        result.getFrameID() <= optimizeThroughFrame) {
+                        cv::Mat optimizedPose = result.getRT();
+                        if (!baseRtInv_.empty())
+                            optimizedPose = baseRtInv_ * optimizedPose;
+                        poseCandidates.push_back(
+                            {int(result.getFrameID()), poseFromCv(optimizedPose)});
+                    }
+
                     auto it = wanted.find(result.getFrameID());
                     if (it == wanted.end())
                         return;
@@ -988,6 +1018,10 @@ class RulerMvsBackend final : public ISlam {
                     wanted.erase(it);
                 });
             }
+            const double sharedSnapshotMs = std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - sharedSnapshotStart).count();
+            if (collectPoseRefresh)
+                publishLiveOptimizedPoseCandidates(std::move(poseCandidates), sharedSnapshotMs);
 
             // Some SDK builds invoke trace slightly before the frame becomes visible from
             // getResults(). Requeue the tiny metadata rather than spinning or dropping it.
@@ -1021,30 +1055,11 @@ class RulerMvsBackend final : public ISlam {
         if (!config_.liveOptimizationEnabled ||
             config_.registrationMode != ScanRegistrationMode::Texture)
             return;
-        {
-            std::lock_guard<std::mutex> lock(poseRefreshMutex_);
-            poseRefreshRequested_ = true; // coalesce repeated requests while one refresh runs
-        }
-        poseRefreshCv_.notify_one();
-    }
-
-    void livePoseRefreshLoop() {
-        while (true) {
-            {
-                std::unique_lock<std::mutex> lock(poseRefreshMutex_);
-                poseRefreshCv_.wait(lock, [this] {
-                    return !resultWorkersRunning_.load(std::memory_order_acquire) ||
-                           poseRefreshRequested_;
-                });
-                if (!resultWorkersRunning_.load(std::memory_order_acquire))
-                    break;
-                poseRefreshRequested_ = false;
-            }
-            // getResults() may become progressively more expensive as history grows. Keep it
-            // completely off the live result-conversion thread; at most one refresh runs and
-            // requests arriving meanwhile are coalesced into one subsequent pass.
-            refreshLiveOptimizedPreview();
-        }
+        // Do NOT start a second getResults() pass here. The next live-result snapshot will
+        // collect optimized historical poses from the very same RGBDFusion snapshot used for
+        // IRGBDResult::toCloud(). This removes lock contention and cross-snapshot frame skew.
+        std::lock_guard<std::mutex> lock(poseRefreshMutex_);
+        poseRefreshRequested_ = true;
     }
 
     void resultConvertLoop() {
@@ -1190,61 +1205,22 @@ class RulerMvsBackend final : public ISlam {
         }
     }
 
-    void refreshLiveOptimizedPreview() {
-        const auto refreshStart = std::chrono::steady_clock::now();
-        if (!fusion_)
+    void publishLiveOptimizedPoseCandidates(std::vector<FramePoseUpdate> candidates,
+                                               double sharedSnapshotMs) {
+        if (candidates.empty())
             return;
 
         PoseUpdateCallback callback;
-        int newestPublishedFrame = -1;
-        {
-            std::lock_guard<std::mutex> lock(stateMutex_);
-            callback = poseUpdateCallback_;
-            newestPublishedFrame = lastStateFrameId_;
-        }
-        if (!callback)
-            return;
-
-        // Keep the current live frame and a tiny asynchronous frontier on the tracking
-        // pose. RGBDFusion may optimize those RTs before getResults() is read; feeding
-        // them straight back into the live VBO makes the current green frame visibly
-        // jump. Older frames remain fully eligible for online optimization.
-        const int optimizeThroughFrame = newestPublishedFrame - kLivePoseGuardFrames;
-        if (optimizeThroughFrame < 0)
-            return;
-
-        struct PoseCandidate {
-            int frameId{-1};
-            Pose pose;
-        };
-        std::vector<PoseCandidate> candidates;
-        candidates.reserve(std::size_t(std::max(0, optimizeThroughFrame + 1)));
-
-        const auto getResultsStart = std::chrono::steady_clock::now();
-        {
-            std::lock_guard<std::mutex> resultsLock(fusionResultsMutex_);
-            fusion_->getResults([this, &candidates, optimizeThroughFrame](const rgbdslam::IRGBDResult& result) {
-                if (result.getFlag() != 0 || result.getFrameID() > optimizeThroughFrame)
-                    return;
-                cv::Mat pose = result.getRT();
-                if (!baseRtInv_.empty())
-                    pose = baseRtInv_ * pose;
-                candidates.push_back({(int)result.getFrameID(), poseFromCv(pose)});
-            });
-        }
-        const auto getResultsEnd = std::chrono::steady_clock::now();
-
-        // Compare/update the published-pose table under ONE mutex acquisition. The previous
-        // implementation locked stateMutex_ once per historical frame, which becomes visible
-        // overhead at 10k-20k frames even when almost no poses actually changed.
         constexpr float kPi = 3.14159265358979323846f;
         const float translationEpsilon = std::max(
             1.0e-6f, float(std::fabs(config_.offlineVoxel)) * 0.01f);
         constexpr float rotationEpsilon = 0.03f * kPi / 180.0f;
+
         std::vector<FramePoseUpdate> updates;
         updates.reserve(candidates.size() / 8u + 8u);
         {
             std::lock_guard<std::mutex> lock(stateMutex_);
+            callback = poseUpdateCallback_;
             for (const auto& candidate : candidates) {
                 auto it = lastPublishedPoseByFrame_.find(candidate.frameId);
                 if (it == lastPublishedPoseByFrame_.end() ||
@@ -1252,29 +1228,16 @@ class RulerMvsBackend final : public ISlam {
                                               translationEpsilon, rotationEpsilon))
                     continue;
                 it->second = candidate.pose;
-                updates.push_back({candidate.frameId, candidate.pose});
+                updates.push_back(candidate);
             }
         }
 
         const std::size_t updateCount = updates.size();
-        const auto callbackStart = std::chrono::steady_clock::now();
-        if (!updates.empty()) {
+        if (callback && !updates.empty())
             callback(std::move(updates));
-        }
-        const auto callbackEnd = std::chrono::steady_clock::now();
 
-        const auto refreshEnd = std::chrono::steady_clock::now();
-        const double getResultsMs = std::chrono::duration<double, std::milli>(
-            getResultsEnd - getResultsStart).count();
-        const double callbackMs = std::chrono::duration<double, std::milli>(
-            callbackEnd - callbackStart).count();
-        const double totalMs = std::chrono::duration<double, std::milli>(
-            refreshEnd - refreshStart).count();
-        std::cout << "[SLAM LIVE OPT] refreshLiveOptimizedPreview"
-                  << " getResults=" << getResultsMs << "ms"
-                  << " callback=" << callbackMs << "ms"
-                  << " total=" << totalMs << "ms"
-                  << " updates=" << updateCount << std::endl;
+        std::cout << "[SLAM LIVE OPT] shared getResults snapshot=" << sharedSnapshotMs
+                  << "ms updates=" << updateCount << std::endl;
     }
 
     void saveOptimizedProjectPoses() {
@@ -1343,9 +1306,7 @@ class RulerMvsBackend final : public ISlam {
     std::atomic<bool> resultWorkersRunning_{false};
     std::thread resultConsumerThread_;
     std::thread resultConvertThread_;
-    std::thread livePoseRefreshThread_;
     std::mutex poseRefreshMutex_;
-    std::condition_variable poseRefreshCv_;
     bool poseRefreshRequested_{false};
     std::mutex resultSignalMutex_;
     std::condition_variable resultSignalCv_;

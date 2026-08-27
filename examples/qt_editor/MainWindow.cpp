@@ -1228,6 +1228,8 @@ void MainWindow::createScanControl() {
         removeScanModelListEntry();
         latestMarkerFrame_ = JMEngine::ScanMarkerFrame{};
         lastScanVisualFrameId_ = -1;
+        resetPendingScanHistoryFrame();
+        scanVisualFramesActive_ = true;
         view_->clearScanPreview();
 #ifdef JMENGINE_HAS_TEXTURE_MAPPING
         view_->setTextureFrames(nullptr);
@@ -1238,13 +1240,19 @@ void MainWindow::createScanControl() {
         view_->beginScanPreview(static_cast<std::size_t>(cfg.previewPointLimit));
         activeScanConfig_ = cfg;
         if (!scanner_->initialize(cfg.engine)) {
+            scanVisualFramesActive_ = false;
+            resetPendingScanHistoryFrame();
             statusBar()->showMessage(QString::fromStdString(scanner_->lastError()), 12000);
             return;
         }
         const bool started = cfg.sourceMode == ScanSourceMode::Camera
             ? scanner_->startCameras(cfg.cameras)
             : scanner_->startDataset(cfg.dataDir.toStdString());
-        if (!started) statusBar()->showMessage(QString::fromStdString(scanner_->lastError()), 12000);
+        if (!started) {
+            scanVisualFramesActive_ = false;
+            resetPendingScanHistoryFrame();
+            statusBar()->showMessage(QString::fromStdString(scanner_->lastError()), 12000);
+        }
     });
     connect(scanStopButton_, &QPushButton::clicked, this, [this] { if (scanner_) scanner_->stop(); });
     connect(scanOfflineButton_, &QPushButton::clicked, this, [this] {
@@ -1338,6 +1346,8 @@ void MainWindow::createScanControl() {
         removeScanModelListEntry();
         latestMarkerFrame_ = JMEngine::ScanMarkerFrame{};
         lastScanVisualFrameId_ = -1;
+        scanVisualFramesActive_ = false;
+        resetPendingScanHistoryFrame();
         view_->clearScanPreview();
 #ifdef JMENGINE_HAS_TEXTURE_MAPPING
         view_->setTextureFrames(nullptr);
@@ -1371,19 +1381,37 @@ void MainWindow::createScanControl() {
             QElapsedTimer dispatchPerf;
             dispatchPerf.start();
 
-            if (view_ && trackingOk && cloud && !cloud->empty()) {
-                auto points = std::make_shared<std::vector<JMEngine::Point>>(
+            // The green current frame is a transient one-frame layer. Do NOT append that
+            // same frame to the white history yet; otherwise one frame exists twice with two
+            // independent pose update paths (current tracking pose + historical optimized pose).
+            // A frame becomes history exactly once, when a newer frame becomes current.
+            std::shared_ptr<std::vector<JMEngine::Point>> localPoints;
+            if (trackingOk && cloud && !cloud->empty()) {
+                localPoints = std::make_shared<std::vector<JMEngine::Point>>(
                     std::move(cloud->points()));
-                view_->appendScanLocalFrame(frameId, points, pose.matrix);
             }
 
-            // Accumulated live cloud may accept a late/out-of-order frame, but the current
-            // frame and observer must never move backwards to an older SLAM result. RGBDFusion
-            // can invoke trace callbacks from several worker threads, so callback arrival order
-            // is not guaranteed to match frameId order.
+            if (!scanVisualFramesActive_)
+                return;
+
+            // RGBDFusion callbacks can arrive out of order. A frame older than the current
+            // visual frame is already historical, so it can be committed immediately. The
+            // newest frame, however, is kept ONLY in pendingScanHistoryFrame_ until the next
+            // newer frame arrives.
             const bool newestVisualFrame = frameId > lastScanVisualFrameId_;
-            if (newestVisualFrame) {
+            if (!newestVisualFrame) {
+                if (frameId < lastScanVisualFrameId_ && trackingOk && localPoints && view_)
+                    view_->appendScanLocalFrame(frameId, localPoints, pose.matrix);
+            } else {
+                // Freeze the previous green frame into white history before replacing it.
+                commitPendingScanHistoryFrame();
+
+                pendingScanHistoryFrame_.frameId = frameId;
+                pendingScanHistoryFrame_.pose = pose;
+                pendingScanHistoryFrame_.localPoints = std::move(localPoints);
+                pendingScanHistoryFrame_.trackingOk = trackingOk;
                 lastScanVisualFrameId_ = frameId;
+
                 if (view_ && statusCloud && !statusCloud->empty()) {
                     auto points = std::make_shared<std::vector<JMEngine::Point>>(
                         std::move(statusCloud->points()));
@@ -1490,7 +1518,7 @@ MainWindow::ScanUiConfig MainWindow::scanConfigFromUi() const {
     cfg.engine.maxInflightFrames = 6;
     // Live preview is bounded but must represent the whole scan. PointCloudWidget compacts
     // old preview samples when this budget is reached instead of dropping all later frames.
-    cfg.engine.previewPointsPerFrame = 300;
+    cfg.engine.previewPointsPerFrame = 3000;
     cfg.previewPointLimit = 20000000;
     cfg.engine.previewPointLimit = cfg.previewPointLimit;
     cfg.engine.offlineVoxel = 3.0;
@@ -1735,6 +1763,15 @@ void MainWindow::applyScanSourceUi() {
 }
 
 void MainWindow::applyScanState(JMEngine::ScanState state) {
+    if (state == JMEngine::ScanState::Scanning) {
+        scanVisualFramesActive_ = true;
+    } else {
+        // Stop accepting queued/late frame callbacks before finalizing the transient current
+        // frame. This keeps the invariant: exactly one current frame, and each valid frame is
+        // committed to history at most once.
+        scanVisualFramesActive_ = false;
+    }
+
     if (cameraPreviewLabel_ && state != JMEngine::ScanState::Scanning) {
         cameraPreviewLabel_->clear();
         cameraPreviewLabel_->hide();
@@ -1746,10 +1783,14 @@ void MainWindow::applyScanState(JMEngine::ScanState state) {
         if (state == JMEngine::ScanState::Stopping ||
             state == JMEngine::ScanState::ReadyForReconstruction ||
             state == JMEngine::ScanState::Reconstructing) {
+            // The last green frame has no successor to trigger current->history, so commit it
+            // once here before removing the transient status layer.
+            commitPendingScanHistoryFrame();
             view_->finalizeCurrentScanFrame();
             if (state == JMEngine::ScanState::ReadyForReconstruction)
                 view_->centerScanOrbitPivot();
         } else {
+            resetPendingScanHistoryFrame();
             view_->clearCurrentScanFrame();
         }
     }
@@ -1805,6 +1846,23 @@ void MainWindow::applyScanState(JMEngine::ScanState state) {
         if (cameraBBacklightSlider_) cameraBBacklightSlider_->setEnabled(cameraScanning);
         if (cameraBBacklightSpin_) cameraBBacklightSpin_->setEnabled(cameraScanning);
     }
+}
+
+void MainWindow::commitPendingScanHistoryFrame() {
+    if (pendingScanHistoryFrame_.frameId >= 0 && pendingScanHistoryFrame_.trackingOk &&
+        pendingScanHistoryFrame_.localPoints && !pendingScanHistoryFrame_.localPoints->empty() && view_) {
+        view_->appendScanLocalFrame(pendingScanHistoryFrame_.frameId,
+                                    pendingScanHistoryFrame_.localPoints,
+                                    pendingScanHistoryFrame_.pose.matrix);
+    }
+    resetPendingScanHistoryFrame();
+}
+
+void MainWindow::resetPendingScanHistoryFrame() {
+    pendingScanHistoryFrame_.frameId = -1;
+    pendingScanHistoryFrame_.pose = JMEngine::Pose{};
+    pendingScanHistoryFrame_.localPoints.reset();
+    pendingScanHistoryFrame_.trackingOk = false;
 }
 
 void MainWindow::removeScanModelListEntry() {
