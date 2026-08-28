@@ -331,6 +331,11 @@ endif()
 # CPU / CUDA texture mapping library (no Qt/OpenCV/VTK dependency)
 # -----------------------------
 if(JMENGINE_ENABLE_TEXTURE_MAPPING)
+    option(JMENGINE_OPENMVS_WITH_OPENCV_ABI
+        "Compile the OpenMVS texture adapter against an OpenMVS SDK whose public ABI uses OpenCV"
+        OFF)
+    set(JMENGINE_OPENMVS_VCPKG_ROOT "" CACHE PATH
+        "Optional vcpkg installed root used by the static OpenMVS SDK")
     add_library(JMEngine_texture STATIC
         include/JMEngine/texture/TextureMapper.h
         src/texture/TextureMapper.cpp
@@ -348,25 +353,43 @@ if(JMENGINE_ENABLE_TEXTURE_MAPPING)
     target_link_libraries(JMEngine_texture PUBLIC JMEngine)
     if(WIN32)
         set(_JMENGINE_OPENMVS_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/third_party/win32/OpenMVS")
-        set(_JMENGINE_OPENCV_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/third_party/win32/opencv")
         set(_JMENGINE_EIGEN_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/third_party/win32/eigen3")
-        if(EXISTS "${_JMENGINE_OPENMVS_ROOT}/include/OpenMVS/MVS.h")
+        target_compile_definitions(JMEngine_texture PRIVATE
+            JMENGINE_TEXTURE_OPENMVS_USE_OPENCV_HEADERS=$<BOOL:${JMENGINE_OPENMVS_WITH_OPENCV_ABI}>)
+        if(JMENGINE_OPENMVS_WITH_OPENCV_ABI AND EXISTS "${_JMENGINE_OPENMVS_ROOT}/include/OpenMVS/MVS.h")
+            set(_JMENGINE_OPENMVS_DEP_ROOT "")
+            foreach(_openmvs_dep_candidate
+                    "${JMENGINE_OPENMVS_VCPKG_ROOT}"
+                    "${_JMENGINE_OPENMVS_ROOT}/vcpkg_installed/x64-windows-static"
+                    "D:/code/openMVS/build/vcpkg_installed/x64-windows-static")
+                if(_openmvs_dep_candidate
+                   AND EXISTS "${_openmvs_dep_candidate}/include/boost"
+                   AND EXISTS "${_openmvs_dep_candidate}/include/nanoflann.hpp")
+                    set(_JMENGINE_OPENMVS_DEP_ROOT "${_openmvs_dep_candidate}")
+                    break()
+                endif()
+            endforeach()
+            if(NOT _JMENGINE_OPENMVS_DEP_ROOT)
+                message(FATAL_ERROR
+                    "Static OpenMVS dependencies were not found. Set JMENGINE_OPENMVS_VCPKG_ROOT "
+                    "to the x64-windows-static vcpkg installed root used to build OpenMVS.")
+            endif()
             target_include_directories(JMEngine_texture PRIVATE
                 "${_JMENGINE_OPENMVS_ROOT}/include"
-                "${_JMENGINE_OPENCV_ROOT}/include"
-                "${_JMENGINE_EIGEN_ROOT}")
+                "${_JMENGINE_EIGEN_ROOT}"
+                "${_JMENGINE_OPENMVS_DEP_ROOT}/include")
             target_link_libraries(JMEngine_texture PRIVATE
                 "${_JMENGINE_OPENMVS_ROOT}/lib/OpenMVS/MVS.lib"
                 "${_JMENGINE_OPENMVS_ROOT}/lib/OpenMVS/SFM.lib"
                 "${_JMENGINE_OPENMVS_ROOT}/lib/OpenMVS/IO.lib"
                 "${_JMENGINE_OPENMVS_ROOT}/lib/OpenMVS/Math.lib"
-                "${_JMENGINE_OPENMVS_ROOT}/lib/OpenMVS/Common.lib"
-                "${_JMENGINE_OPENCV_ROOT}/lib/opencv_core480.lib"
-                "${_JMENGINE_OPENCV_ROOT}/lib/opencv_imgcodecs480.lib"
-                "${_JMENGINE_OPENCV_ROOT}/lib/opencv_imgproc480.lib")
-        else()
+                "${_JMENGINE_OPENMVS_ROOT}/lib/OpenMVS/Common.lib")
+        elseif(JMENGINE_OPENMVS_WITH_OPENCV_ABI)
             message(FATAL_ERROR "JMEngine texture mapping requires vendored OpenMVS at ${_JMENGINE_OPENMVS_ROOT}")
         endif()
+    else()
+        target_compile_definitions(JMEngine_texture PRIVATE
+            JMENGINE_TEXTURE_OPENMVS_USE_OPENCV_HEADERS=0)
     endif()
     target_compile_features(JMEngine_texture PUBLIC cxx_std_17)
     set_target_properties(JMEngine_texture PROPERTIES
@@ -871,14 +894,14 @@ if(JMENGINE_BUILD_QT_EDITOR)
                     "No rulermvs .lib files were found in ${JMENGINE_RULERMVS_LIB_DIR}")
             endif()
 
-            target_include_directories(JMEngine PUBLIC
+            target_include_directories(JMEngine PRIVATE
                 "${JMENGINE_RULERMVS_INCLUDE_DIR}"
                 "${JMENGINE_DBOW3_INCLUDE_DIR}"
                 "${JMENGINE_EIGEN3_INCLUDE_DIR}"
                 ${OpenCV_INCLUDE_DIRS}
             )
 
-            target_link_libraries(JMEngine PUBLIC
+            target_link_libraries(JMEngine PRIVATE
                 ${_JMENGINE_RULERMVS_LIBS}
                 ${OpenCV_LIBS}
                 strmiids ole32 oleaut32

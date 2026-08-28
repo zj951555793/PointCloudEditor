@@ -1,9 +1,6 @@
 #include "TextureMapperOpenMVS.h"
 
-#include <opencv2/imgcodecs.hpp>
-namespace cv {
-static constexpr int IMWRITE_JPEGXL_QUALITY = 0x3000;
-}
+#if JMENGINE_TEXTURE_OPENMVS_USE_OPENCV_HEADERS
 #include <OpenMVS/MVS.h>
 
 #include <algorithm>
@@ -308,3 +305,24 @@ bool mapWithOpenMVS(const TriangleMesh& mesh, const std::vector<CameraFrame>& in
 }
 
 } // namespace JMEngine::texture::detail
+#else
+
+#include <string>
+#include <vector>
+
+namespace JMEngine::texture::detail {
+
+bool mapWithOpenMVS(const TriangleMesh&, const std::vector<CameraFrame>&, const Config&,
+                    Result& out, std::string& error) {
+    out = Result{};
+    error =
+        "OpenMVS texture mapping is not available: the bundled static OpenMVS SDK still exposes "
+        "OpenCV types in its public MVS headers and libraries. Rebuild/vendor OpenMVS with a "
+        "no-OpenCV public ABI, or enable JMENGINE_OPENMVS_WITH_OPENCV_ABI to compile against that "
+        "SDK.";
+    out.message = error;
+    return false;
+}
+
+} // namespace JMEngine::texture::detail
+#endif
