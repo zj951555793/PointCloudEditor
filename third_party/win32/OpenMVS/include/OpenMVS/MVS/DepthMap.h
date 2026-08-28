@@ -1,0 +1,649 @@
+/*
+* DepthMap.h
+*
+* Copyright (c) 2014-2022 SEACAVE
+*
+* Author(s):
+*
+*      cDc <cdc.seacave@gmail.com>
+*
+*
+* This program is free software: you can redistribute it and/or modify
+* it under the terms of the GNU Affero General Public License as published by
+* the Free Software Foundation, either version 3 of the License, or
+* (at your option) any later version.
+*
+* This program is distributed in the hope that it will be useful,
+* but WITHOUT ANY WARRANTY; without even the implied warranty of
+* MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+* GNU Affero General Public License for more details.
+*
+* You should have received a copy of the GNU Affero General Public License
+* along with this program.  If not, see <http://www.gnu.org/licenses/>.
+*
+*
+* Additional Terms:
+*
+*      You are required to preserve legal notices and author attributions in
+*      that material or in the Appropriate Legal Notices displayed by works
+*      containing it.
+*/
+
+#ifndef _MVS_DEPTHMAP_H_
+#define _MVS_DEPTHMAP_H_
+
+
+// I N C L U D E S /////////////////////////////////////////////////
+
+#include "PointCloud.h"
+
+
+// D E F I N E S ///////////////////////////////////////////////////
+
+// NCC type used for patch-similarity computation during depth-map estimation
+#define DENSE_NCC_DEFAULT 0
+#define DENSE_NCC_FAST 1
+#define DENSE_NCC_WEIGHTED 2
+#define DENSE_NCC DENSE_NCC_WEIGHTED
+
+// NCC score aggregation type used during depth-map estimation
+#define DENSE_AGGNCC_NTH 0
+#define DENSE_AGGNCC_MEAN 1
+#define DENSE_AGGNCC_MIN 2
+#define DENSE_AGGNCC_MINMEAN 3
+#define DENSE_AGGNCC DENSE_AGGNCC_MINMEAN
+
+// type of smoothness used during depth-map estimation
+#define DENSE_SMOOTHNESS_NA 0
+#define DENSE_SMOOTHNESS_FAST 1
+#define DENSE_SMOOTHNESS_PLANE 2
+#define DENSE_SMOOTHNESS DENSE_SMOOTHNESS_PLANE
+
+// type of refinement used during depth-map estimation
+#define DENSE_REFINE_ITER 0
+#define DENSE_REFINE_EXACT 1
+#define DENSE_REFINE DENSE_REFINE_ITER
+
+// exp function type used during depth estimation
+#define DENSE_EXP_DEFUALT EXP
+#define DENSE_EXP_FAST FEXP<true> // ~10% faster, but slightly less precise
+#define DENSE_EXP DENSE_EXP_DEFUALT
+
+#define ComposeDepthFilePath(i, e) MAKE_PATH(String::FormatString(("depth%04u." + String(e)).c_str(), i))
+
+
+// S T R U C T S ///////////////////////////////////////////////////
+namespace MVS {
+	typedef TMatrix<uint8_t, 4, 1> ViewsID;
+}
+DEFINE_CVDATATYPE(MVS::ViewsID)
+
+namespace MVS {
+
+DECOPT_SPACE(OPTDENSE)
+
+namespace OPTDENSE {
+// configuration variables
+enum DepthFlags {
+	REMOVE_SPECKLES        = (1 << 0),
+	FILL_GAPS              = (1 << 1),
+	// default: enable ADJUST_CONFIDENCE only when the recalibration is nearly free, i.e. when CUDA
+	// estimates the depth-maps and the confidence runs fused into the last geometric-consistency
+	// iteration off the already-resident buffers. On the CPU the recalibration is a separate
+	// full-resolution sweep costing roughly as much as a fusion pass, so it stays off unless the
+	// user asks for it explicitly (--postprocess-dmaps 8). Scene::ComputeDepthMaps resolves this to
+	// either ADJUST_CONFIDENCE or 0 once the estimation backend is known; it never survives past that.
+	// Bit values are chosen for config back-compat: AUTO recycles the retired ADJUST_CONFIDENCE_FAST
+	// bit (whose "cheap adjust" meaning it inherits), and ADJUST_CONFIDENCE keeps its historical
+	// value, so existing configs and scripts keep their behavior.
+	ADJUST_CONFIDENCE_AUTO = (1 << 2),
+	ADJUST_CONFIDENCE      = (1 << 3), // recalibrate confidence to predict fusion survival (see DepthMapsData::AdjustConfidence)
+	OPTIMIZE               = (REMOVE_SPECKLES|FILL_GAPS)
+};
+enum FuseMode {
+	FUSE_NOFILTER = 0,
+	FUSE_FILTER,
+	FUSE_DENSEFILTER,
+};
+extern MVS_API unsigned nResolutionLevel;
+extern MVS_API unsigned nMaxResolution;
+extern MVS_API unsigned nMinResolution;
+extern MVS_API unsigned nSubResolutionLevels;
+extern MVS_API unsigned nMinViews;
+extern MVS_API unsigned nMaxViews;
+extern MVS_API unsigned nMinViewsFuse;
+extern MVS_API unsigned nMaxViewsFuse;
+extern MVS_API unsigned nMinViewsTrustPoint;
+extern MVS_API unsigned nNumViews;
+extern MVS_API unsigned nMinPixelsFuse;
+extern MVS_API unsigned nMaxPointsFuse;
+extern MVS_API unsigned nMaxFuseDepth;
+extern MVS_API bool bAddCorners;
+extern MVS_API bool bInitSparse;
+extern MVS_API bool bRemoveDmaps;
+extern MVS_API float fViewMinScore;
+extern MVS_API float fViewMinScoreRatio;
+extern MVS_API float fMinArea;
+extern MVS_API float fMinAngle;
+extern MVS_API float fOptimAngle;
+extern MVS_API float fMaxAngle;
+extern MVS_API float fWeightPointInsideROI;
+extern MVS_API float fDescriptorMinMagnitudeThreshold;
+extern MVS_API float fDepthReprojectionErrorThreshold;
+extern MVS_API float fDepthDiffThreshold;
+extern MVS_API float fNormalDiffThreshold;
+extern MVS_API float fPairwiseMul;
+extern MVS_API float fOptimizerEps;
+extern MVS_API int nOptimizerMaxIters;
+extern MVS_API unsigned nSpeckleSize;
+extern MVS_API unsigned nIpolGapSize;
+extern MVS_API int nIgnoreMaskLabel;
+extern MVS_API unsigned nOptimize;
+extern MVS_API unsigned nFuseFilter;
+extern MVS_API unsigned nEstimateColors;
+extern MVS_API unsigned nEstimateNormals;
+extern MVS_API float fNCCThresholdKeep;
+// confidence recalibration (DepthMapsData::AdjustConfidence) - see DepthFlags::ADJUST_CONFIDENCE.
+// The posterior's shape constants are NOT exposed: they are a single jointly ground-truth-calibrated
+// operating point living in ConfidenceRefine.h (see the note there).
+// DenseFuseDepthMaps: weight of the intra-map prior as virtual view/pixel support to keep few-view
+// inliers (0 disables). Default 3 favors completeness (GT bench: +6.5pp mean completeness for
+// +0.17pp gross outliers vs 0) -- right for the usual pipeline where mesh reconstruction follows and
+// cleans the extra outliers; prefer 2 when the dense point-cloud IS the final output (+2.6pp for
+// +0.07pp, within the per-scene outlier budget on 26/28 GT scene-levels vs 17/28 at 3).
+extern MVS_API float fFusePriorWeight;
+// free-space-violation (FSV) guard on fusion-RESCUED points only (points kept solely thanks to
+// fFusePriorWeight's virtual support -- see DenseFuseDepthMaps), counted during fusion's own join
+// gate. -1 disables the guard: fully inert, byte-identical to fusion without it. Default 0 (strict)
+// rejects any rescued point contradicted by >=1 free-space ray; N allows <=N such violations.
+// Non-rescued points are never affected.
+extern MVS_API int nFuseViolationMax;
+extern MVS_API bool bEstimateConfidenceCUDA; // when CUDA estimation is used, run ADJUST_CONFIDENCE on the GPU integrated into the last geometric-consistency iteration (default); 0 forces the CPU version
+extern MVS_API unsigned nEstimationIters;
+extern MVS_API unsigned nEstimationGeometricIters;
+extern MVS_API unsigned nPatchMatchCUDAInstances;
+extern MVS_API float fEstimationGeometricWeight;
+extern MVS_API unsigned nRandomIters;
+extern MVS_API unsigned nRandomMaxScale;
+extern MVS_API float fRandomDepthRatio;
+extern MVS_API float fRandomAngle1Range;
+extern MVS_API float fRandomAngle2Range;
+extern MVS_API float fRandomSmoothDepth;
+extern MVS_API float fRandomSmoothNormal;
+extern MVS_API float fRandomSmoothBonus;
+} // namespace OPTDENSE
+/*----------------------------------------------------------------*/
+
+
+typedef TImage<ViewsID> ViewsMap;
+
+template <int nTexels>
+struct WeightedPatchFix {
+	struct Pixel {
+		float weight;
+		float tempWeight;
+	};
+	Pixel weights[nTexels];
+	float sumWeights;
+	float normSq0;
+	WeightedPatchFix() : normSq0(0) {}
+};
+
+struct MVS_API DepthData {
+	struct ViewData {
+		float scale; // image scale relative to the reference image
+		Camera camera; // camera matrix corresponding to this image
+		Image32F image; // image float intensities
+		Image* pImageData; // image data
+
+		Matrix3x3 Hl; //
+		Vec3 Hm;      // constants during per-pixel loops
+		Matrix3x3 Hr; //
+
+		DepthMap depthMap; // known depth-map (optional)
+		Camera cameraDepthMap; // camera matrix corresponding to the depth-map
+		Matrix3x3f Tl; //
+		Point3f Tm;    // constants during per-pixel geometric-consistent loops
+		Matrix3x3f Tr; //
+		Point3f Tn;    //
+
+		// this neighbor's own normal/confidence maps, loaded ALONGSIDE depthMap (same
+		// disk file, same InitViews() call -- no extra file open) ONLY during the LAST
+		// geometric-consistency iteration when the integrated confidence runs (see
+		// InitViews' loadDepthMaps==2 path); empty otherwise. Lets the integrated
+		// DepthMapsData::AdjustConfidence(DepthData&) overload reuse this reference's own
+		// already-loaded, disk-snapshotted neighbor copies instead of the standalone
+		// postprocess phase's shared arrDepthData[] lookup.
+		NormalMap normalMap;
+		ConfidenceMap confMap;
+
+		inline void Init(const Camera& cameraRef) {
+			Hl = camera.K * camera.R * cameraRef.R.t();
+			Hm = camera.K * camera.R * (cameraRef.C - camera.C);
+			Hr = cameraRef.K.inv();
+			if (!depthMap.empty()) {
+				Tl = cameraDepthMap.K * cameraDepthMap.R * cameraRef.R.t();
+				Tm = cameraDepthMap.K * cameraDepthMap.R * (cameraRef.C - cameraDepthMap.C);
+				Tr = cameraRef.K * cameraRef.R * cameraDepthMap.R.t() * cameraDepthMap.GetInvK();
+				Tn = cameraRef.K * cameraRef.R * (cameraDepthMap.C - cameraRef.C);
+			}
+		}
+
+		inline IIndex GetID() const {
+			return pImageData->ID;
+		}
+		inline IIndex GetLocalID(const ImageArr& images) const {
+			return (IIndex)(pImageData - images.begin());
+		}
+
+		static bool NeedScaleImage(float scale) {
+			ASSERT(scale > 0);
+			return ABS(scale-1.f) >= 0.15f;
+		}
+		template <typename IMAGE>
+		static bool ScaleImage(const IMAGE& image, IMAGE& imageScaled, float scale) {
+			if (!NeedScaleImage(scale))
+				return false;
+			cv::resize(image, imageScaled, cv::Size(), scale, scale, scale>1?cv::INTER_CUBIC:cv::INTER_AREA);
+			return true;
+		}
+	};
+	typedef CLISTDEF2IDX(ViewData,IIndex) ViewDataArr;
+
+	ViewDataArr images; // array of images used to compute this depth-map (reference image is the first)
+	ViewScoreArr neighbors; // array of all images seeing this depth-map (ordered by decreasing importance)
+	IndexArr points; // indices of the sparse 3D points seen by the this image
+	BitMatrix mask; // mark pixels to be ignored
+	DepthMap depthMap; // depth-map
+	NormalMap normalMap; // normal-map in camera space
+	ConfidenceMap confMap; // confidence-map
+	ConfidenceMap confMapAdjusted; // recalibrated confidence-map computed by AdjustConfidence(), held
+		// in memory until the deferred EVT_ADJUSTDEPTHMAP swap (confMap = move(confMapAdjusted));
+		// intentionally NOT cleared by Release() so it survives a cache eviction/reload of this
+		// DepthData between the filter and adjust events
+	ConfidenceMap priorMap; // intra-map geometric prior (DepthMapsData::ComputeIntraMapPrior), lazily
+		// computed and cached by DepthMapsData::GetIntraMapPrior() so AdjustConfidence and
+		// DenseFuseDepthMaps can share one computation instead of each recomputing its own; unlike
+		// confMapAdjusted this IS cleared by Release() -- it is a cheap, recomputable derived cache
+		// with no cross-event delivery obligation, so it simply follows the DepthData's own lifetime
+	ViewsMap viewsMap; // view-IDs map (indexing images vector starting after first view)
+	float dMin, dMax; // global depth range for this image
+	cv::Size size; // image size used to estimate this depth-map
+	bool bConfAdjusted; // the confidence recalibration already ran for this view -- either fused
+		// into the last geometric-consistency estimation itself (resident-buffer reuse, see
+		// DepthMapsData::EstimateDepthMap) or restored by Load() from the dmap header's
+		// CONF_ADJUSTED flag (Save() persists it there; it is NOT part of the MVS scene
+		// serialization) -- so no adjust pass (epilogue or standalone) may recalibrate it again
+	unsigned references; // how many times this depth-map is referenced (on 0 can be safely unloaded)
+	CriticalSection cs; // used to count references
+
+	inline DepthData() : bConfAdjusted(false), references(0) {}
+	DepthData(const DepthData&);
+
+	inline void ReleaseImages() {
+		for (ViewData& image: images) {
+			image.image.release();
+			image.depthMap.release();
+			image.normalMap.release(); // neighbor normal/conf loaded only for the last
+			image.confMap.release();   // geometric-consistency iteration (see ViewData comment above)
+		}
+	}
+	inline void Release() {
+		depthMap.release();
+		normalMap.release();
+		confMap.release();
+		priorMap.release();
+		viewsMap.release();
+	}
+
+	inline bool IsValid() const {
+		return !images.IsEmpty();
+	}
+	inline bool IsEmpty() const {
+		return depthMap.empty();
+	}
+
+	const ViewData& GetView() const { return images.front(); }
+	const Camera& GetCamera() const { return GetView().camera; }
+
+	void GetNormal(const ImageRef& ir, Point3f& N, const TImage<Point3f>* pPointMap=NULL) const;
+	void GetNormal(const Point2f& x, Point3f& N, const TImage<Point3f>* pPointMap=NULL) const;
+
+	void ApplyIgnoreMask(const BitMatrix&);
+
+	bool Save(const String& fileName) const;
+	bool Load(const String& fileName, unsigned flags=HeaderDepthDataRaw::CONTENT_MASK);
+
+	unsigned GetRef();
+	unsigned IncRef(const String& fileName);
+	unsigned DecRef();
+
+	size_t GetMemorySize() const;
+
+	#ifdef _USE_BOOST
+	// implement BOOST serialization
+	template<class Archive>
+	void serialize(Archive& ar, const unsigned int /*version*/) {
+		ASSERT(IsValid());
+		ar & depthMap;
+		ar & normalMap;
+		ar & confMap;
+		ar & viewsMap;
+		ar & dMin;
+		ar & dMax;
+	}
+	#endif
+};
+typedef CLISTDEFIDX(DepthData,IIndex) DepthDataArr;
+/*----------------------------------------------------------------*/
+
+
+struct MVS_API DepthEstimator {
+	enum { nSizeHalfWindow = 4 };
+	enum { nSizeWindow = nSizeHalfWindow*2+1 };
+	enum { nSizeStep = 2 };
+	enum { TexelChannels = 1 };
+	enum { nTexels = SQUARE((nSizeHalfWindow*2+nSizeStep)/nSizeStep)*TexelChannels };
+
+	enum ENDIRECTION {
+		LT2RB = 0,
+		RB2LT,
+		DIRS
+	};
+
+	typedef TPoint2<uint16_t> MapRef;
+	typedef CLISTDEF0(MapRef) MapRefArr;
+
+	typedef Eigen::Matrix<float,nTexels,1> TexelVec;
+	struct NeighborData {
+		ImageRef x;
+		Depth depth;
+		Normal normal;
+	};
+	#if DENSE_SMOOTHNESS != DENSE_SMOOTHNESS_NA
+	struct NeighborEstimate {
+		Depth depth;
+		Normal normal;
+		#if DENSE_SMOOTHNESS == DENSE_SMOOTHNESS_PLANE
+		Planef::POINT X;
+		#endif
+	};
+	#endif
+	#if DENSE_REFINE == DENSE_REFINE_EXACT
+	struct PixelEstimate {
+		Depth depth;
+		Normal normal;
+	};
+	#endif
+
+	#if DENSE_NCC == DENSE_NCC_WEIGHTED
+	typedef WeightedPatchFix<nTexels> Weight;
+	typedef CLISTDEFIDX(Weight,int) WeightMap;
+	#endif
+
+	SEACAVE::Random rnd;
+
+	volatile Thread::safe_t& idxPixel; // current image index to be processed
+	#if DENSE_SMOOTHNESS == DENSE_SMOOTHNESS_NA
+	CLISTDEF0IDX(NeighborData,IIndex) neighbors; // neighbor pixels coordinates to be processed
+	#else
+	CLISTDEF0IDX(ImageRef,IIndex) neighbors; // neighbor pixels coordinates to be processed
+	#endif
+	#if DENSE_SMOOTHNESS != DENSE_SMOOTHNESS_NA
+	CLISTDEF0IDX(NeighborEstimate,IIndex) neighborsClose; // close neighbor pixel depths to be used for smoothing
+	#endif
+	Point3 X0;	      //
+	ImageRef x0;	  // constants during one pixel loop
+	float normSq0;	  //
+	#if DENSE_NCC != DENSE_NCC_WEIGHTED
+	TexelVec texels0; //
+	#endif
+	#if DENSE_NCC == DENSE_NCC_DEFAULT
+	TexelVec texels1;
+	#endif
+	#if DENSE_AGGNCC == DENSE_AGGNCC_NTH || DENSE_AGGNCC == DENSE_AGGNCC_MINMEAN
+	FloatArr scores;
+	#else
+	Eigen::VectorXf scores;
+	#endif
+	#if DENSE_SMOOTHNESS == DENSE_SMOOTHNESS_PLANE
+	Planef plane; // plane defined by current depth and normal estimate
+	#endif
+	DepthMap& depthMap0;
+	NormalMap& normalMap0;
+	ConfidenceMap& confMap0;
+	#if DENSE_NCC == DENSE_NCC_WEIGHTED
+	WeightMap& weightMap0;
+	#endif
+	DepthMap lowResDepthMap;
+
+	const unsigned nIteration; // current PatchMatch iteration
+	const DepthData::ViewDataArr images; // neighbor images used
+	const DepthData::ViewData& image0;
+	#if DENSE_NCC != DENSE_NCC_WEIGHTED
+	const Image64F& image0Sum; // integral image used to fast compute patch mean intensity
+	#endif
+	const MapRefArr& coords;
+	const Image8U::Size size;
+	const Depth dMin, dMax;
+	const Depth dMinSqr, dMaxSqr;
+	const ENDIRECTION dir;
+	#if DENSE_AGGNCC == DENSE_AGGNCC_NTH || DENSE_AGGNCC == DENSE_AGGNCC_MINMEAN
+	const IDX idxScore;
+	#endif
+
+	DepthEstimator(
+		unsigned nIter, DepthData& _depthData0, volatile Thread::safe_t& _idx,
+		#if DENSE_NCC == DENSE_NCC_WEIGHTED
+		WeightMap& _weightMap0,
+		#else
+		const Image64F& _image0Sum,
+		#endif
+		const MapRefArr& _coords);
+
+	bool PreparePixelPatch(const ImageRef&);
+	bool FillPixelPatch();
+	float ScorePixelImage(const DepthData::ViewData& image1, Depth, const Normal&);
+	float ScorePixel(Depth, const Normal&);
+	void ProcessPixel(IDX idx);
+	Depth InterpolatePixel(const ImageRef&, Depth, const Normal&) const;
+	#if DENSE_SMOOTHNESS == DENSE_SMOOTHNESS_PLANE
+	void InitPlane(Depth, const Normal&);
+	#endif
+	#if DENSE_REFINE == DENSE_REFINE_EXACT
+	PixelEstimate PerturbEstimate(const PixelEstimate&, float perturbation);
+	#endif
+
+	#if DENSE_NCC != DENSE_NCC_WEIGHTED
+	inline float GetImage0Sum(const ImageRef& p) const {
+		const ImageRef p0(p.x-nSizeHalfWindow, p.y-nSizeHalfWindow);
+		const ImageRef p1(p0.x+nSizeWindow, p0.y);
+		const ImageRef p2(p0.x, p0.y+nSizeWindow);
+		const ImageRef p3(p1.x, p2.y);
+		return (float)(image0Sum(p3) - image0Sum(p2) - image0Sum(p1) + image0Sum(p0));
+	}
+	#endif
+
+	#if DENSE_NCC == DENSE_NCC_WEIGHTED
+	float GetWeight(const ImageRef& x, float center) const {
+		// color weight [0..1]
+		const float sigmaColor(-1.f/(2.f*SQUARE(0.1f)));
+		const float wColor(SQUARE(image0.image(x0+x)-center) * sigmaColor);
+		// spatial weight [0..1]
+		const float sigmaSpatial(-1.f/(2.f*SQUARE((int)nSizeHalfWindow-1)));
+		const float wSpatial(float(SQUARE(x.x) + SQUARE(x.y)) * sigmaSpatial);
+		return DENSE_EXP(wColor+wSpatial);
+	}
+	#endif
+
+	inline Matrix3x3f ComputeHomographyMatrix(const DepthData::ViewData& img, Depth depth, const Normal& normal) const {
+		#if 0
+		// compute homography matrix
+		const Matrix3x3f H(img.camera.K*HomographyMatrixComposition(image0.camera, img.camera, Vec3(normal), Vec3(X0*depth))*image0.camera.K.inv());
+		#else
+		// compute homography matrix as above, caching some constants
+		const Vec3 n(normal);
+		return (img.Hl + img.Hm * (n.t()*INVERT(n.dot(X0)*depth))) * img.Hr;
+		#endif
+	}
+
+	static inline Point3 ComputeRelativeC(const DepthData& depthData) {
+		return depthData.images[1].camera.R*(depthData.images[0].camera.C-depthData.images[1].camera.C);
+	}
+	static inline Matrix3x3 ComputeRelativeR(const DepthData& depthData) {
+		RMatrix R;
+		ComputeRelativeRotation(depthData.images[0].camera.R, depthData.images[1].camera.R, R);
+		return R;
+	}
+
+	// generate random depth and normal
+	inline Depth RandomDepth(Depth dMinSqr, Depth dMaxSqr) {
+		ASSERT(dMinSqr > 0 && dMinSqr < dMaxSqr);
+		return SQUARE(rnd.randomRange(dMinSqr, dMaxSqr));
+	}
+	inline Normal RandomNormal(const Point3f& viewRay) {
+		Normal normal;
+		Dir2Normal(Point2f(rnd.randomRange(D2R(0.f),D2R(180.f)), rnd.randomRange(D2R(90.f),D2R(180.f))), normal);
+		ASSERT(ISEQUAL(norm(normal), 1.f), "Norm = ", norm(normal));
+		return normal.dot(viewRay) > 0 ? -normal : normal;
+	}
+
+	// adjust normal such that it makes at most 90 degrees with the viewing angle
+	inline void CorrectNormal(Normal& normal) const {
+		const Normal viewDir(Cast<float>(X0));
+		const float cosAngLen(normal.dot(viewDir));
+		if (cosAngLen > 0) {
+			// rotation axis = unit(normal x viewDir); RMatrixBaseF requires |axis|==1;
+			// if normal is parallel to viewDir, the cross product is zero and no
+			// rotation axis exists, so flip the (camera-facing, invalid) normal instead
+			const Normal axisRaw(normal.cross(viewDir));
+			const float axisN(norm(axisRaw));
+			if (!ISZERO(axisN))
+				normal = RMatrixBaseF(axisRaw / axisN, MINF((ACOS(cosAngLen/norm(viewDir))-D2R(90.f))*1.01f, -0.001f)) * normal;
+			else
+				normal = -normal;
+		}
+		ASSERT(ISEQUAL(norm(normal), 1.f), "Norm = ", norm(normal));
+	}
+
+	static bool ImportIgnoreMask(const Image&, const cv::Size&, uint8_t nIgnoreMaskLabel, BitMatrix&, Image8U* =NULL);
+	static void MapMatrix2ZigzagIdx(const cv::Size& size, DepthEstimator::MapRefArr& coords, const BitMatrix& mask, int rawStride=16);
+
+	const float smoothBonusDepth, smoothBonusNormal;
+	const float smoothSigmaDepth, smoothSigmaNormal;
+	const float thMagnitudeSq;
+	const float angle1Range, angle2Range;
+	const float thConfSmall, thConfBig, thConfRand;
+	const float thRobust;
+	#if DENSE_REFINE == DENSE_REFINE_EXACT
+	const float thPerturbation;
+	#endif
+	static const float scaleRanges[12];
+};
+/*----------------------------------------------------------------*/
+
+
+// Tools
+bool TriangulatePoints2DepthMap(
+	const Camera& camera, const cv::Size& size, const PointCloud& pointcloud, const IndexArr& points,
+	DepthMap& depthMap, NormalMap& normalMap, Depth& dMin, Depth& dMax, float avgDepth=0, bool bSparseOnly=false);
+bool TriangulatePoints2DepthMap(
+	const Camera& camera, const cv::Size& size, const PointCloud& pointcloud, const IndexArr& points,
+	DepthMap& depthMap, Depth& dMin, Depth& dMax, float avgDepth=0, bool bSparseOnly=false);
+
+// Robustly estimate the plane that fits best the given points
+MVS_API unsigned EstimatePlane(const Point3Arr&, Plane&, double& maxThreshold, bool arrInliers[]=NULL, size_t maxIters=0);
+MVS_API unsigned EstimatePlaneLockFirstPoint(const Point3Arr&, Plane&, double& maxThreshold, bool arrInliers[]=NULL, size_t maxIters=0);
+MVS_API unsigned EstimatePlaneTh(const Point3Arr&, Plane&, double maxThreshold, bool arrInliers[]=NULL, size_t maxIters=0);
+MVS_API unsigned EstimatePlaneThLockFirstPoint(const Point3Arr&, Plane&, double maxThreshold, bool arrInliers[]=NULL, size_t maxIters=0);
+// same for float points
+MVS_API unsigned EstimatePlane(const Point3fArr&, Planef&, double& maxThreshold, bool arrInliers[]=NULL, size_t maxIters=0);
+MVS_API unsigned EstimatePlaneLockFirstPoint(const Point3fArr&, Planef&, double& maxThreshold, bool arrInliers[]=NULL, size_t maxIters=0);
+MVS_API unsigned EstimatePlaneTh(const Point3fArr&, Planef&, double maxThreshold, bool arrInliers[]=NULL, size_t maxIters=0);
+MVS_API unsigned EstimatePlaneThLockFirstPoint(const Point3fArr&, Planef&, double maxThreshold, bool arrInliers[]=NULL, size_t maxIters=0);
+
+// the physical memory every densify stage leaves untouched: room for the OS file
+// cache absorbing the depth-map traffic and for the steps that follow
+inline size_t ComputeSafetyMemory(const Util::MemoryInfo& memInfo) {
+	return MAXF(ROUND2INT<size_t>(memInfo.totalPhysical * 0.08), size_t(1*1024*1024*1024ull)/*1GB*/);
+}
+
+// the images are decoded as they are sampled and released right after, so they do
+// not have to be loaded by the caller
+MVS_API void EstimatePointColors(ImageArr& images, PointCloud& pointcloud);
+MVS_API void EstimatePointSegmentation(const ImageArr& images, PointCloud& pointcloud, unsigned minViews=2);
+MVS_API unsigned ColorPointSegmentation(PointCloud& pointcloud);
+MVS_API void EstimatePointNormals(const ImageArr& images, PointCloud& pointcloud, int numNeighbors=16/*K-nearest neighbors*/);
+
+MVS_API bool EstimateNormalMap(const Matrix3x3f& K, const DepthMap&, NormalMap&);
+
+// Local first-order depth-plane estimator: fits depth(x,y) ~ w + wx*x + wy*y over the 3x3
+// neighborhood using only depth-similar neighbors, and derives the implied surface normal.
+// Shared by EstimateNormalMap and DepthMapsData::ComputeIntraMapPrior.
+class MVS_API DepthGradientEstimator {
+public:
+	DepthGradientEstimator(const Matrix3x3f& K, const DepthMap& depthMap) : K(K), depthMap(depthMap) {}
+	static bool IsDepthValid(Depth d, Depth nd) { return nd > 0 && IsDepthSimilar(d, nd, Depth(0.03f)); }
+	// fit the local depth gradient at ir; fills ws=(w, dd/dx, dd/dy); false if <3 similar neighbors / singular
+	bool DepthGradient(const ImageRef& ir, Point3f& ws) const;
+	// surface normal implied by a depth gradient (camera-facing, normalized)
+	Normal NormalFromGradient(int x, int y, Depth d, Depth dx, Depth dy) const;
+private:
+	const Matrix3x3f& K;
+	const DepthMap& depthMap;
+};
+
+// Standalone confidence estimators, deriving a confidence-map from the geometry of one
+// depth-map alone -- no images, no neighboring views, no matching cost. The dense
+// pipeline does not use them: its own estimates come with a photometric score, which
+// DensifyPointCloud can recalibrate against the neighboring views (see
+// OPTDENSE::ADJUST_CONFIDENCE). They are meant for the depth-maps that reach the library
+// with no confidence at all -- imported from an external estimator (the Interface* apps,
+// scripts/python/ImportDMAPs.py) or produced by a method that does not score its
+// estimates -- so that fusion, point ordering and the mesh visibility weights have
+// something better than a constant to work with. Both fill confMap with values in [0,1]
+// at the depth-map resolution, and both are heuristics with no calibrated meaning: they
+// rank the pixels of a map against each other, they do not predict an error.
+// Confidence from the local depth coherence: a piecewise-smooth surface scores high,
+// the isolated depths a mismatch leaves behind score low. n is how many of the nearest
+// neighbor depth differences enter the score.
+MVS_API void EstimateConfidenceFromDepth(const DepthData& depthData, ConfidenceMap& confMap, int winHalfSize=1, int n=3);
+// Confidence from the local normal coherence; needs depthData.normalMap, which
+// EstimateNormalMap() can supply from the depth-map itself.
+MVS_API void EstimateConfidenceFromNormal(const DepthData& depthData, ConfidenceMap& confMap, int winHalfSize=1);
+
+MVS_API bool SaveDepthMap(const String& fileName, const DepthMap& depthMap);
+MVS_API bool LoadDepthMap(const String& fileName, DepthMap& depthMap);
+MVS_API bool SaveNormalMap(const String& fileName, const NormalMap& normalMap);
+MVS_API bool LoadNormalMap(const String& fileName, NormalMap& normalMap);
+MVS_API bool SaveConfidenceMap(const String& fileName, const ConfidenceMap& confMap);
+MVS_API bool LoadConfidenceMap(const String& fileName, ConfidenceMap& confMap);
+
+MVS_API unsigned FilterDepthMap(DepthMap& depthMap, NormalMap& normalMap, const ConfidenceMap& confMap, float thConfidence=0.5f);
+MVS_API Image8U3 DepthMap2Image(const DepthMap& depthMap, Depth minDepth=FLT_MAX, Depth maxDepth=0);
+MVS_API bool ExportDepthMap(const String& fileName, const DepthMap& depthMap, Depth minDepth=FLT_MAX, Depth maxDepth=0);
+MVS_API bool ExportNormalMap(const String& fileName, const NormalMap& normalMap);
+MVS_API bool ExportConfidenceMap(const String& fileName, const ConfidenceMap& confMap);
+MVS_API bool ExportPointCloud(const String& fileName, const Image&, const DepthMap&, const NormalMap&);
+
+MVS_API bool ExportDepthDataRaw(const String&, const String& imageFileName,
+	const IIndexArr&, const cv::Size& imageSize,
+	const KMatrix&, const RMatrix&, const CMatrix&,
+	Depth dMin, Depth dMax,
+	const DepthMap&, const NormalMap&, const ConfidenceMap&, const ViewsMap&,
+	bool bConfAdjusted=false/*mark the stored confMap as already recalibrated (CONF_ADJUSTED)*/);
+MVS_API bool ImportDepthDataRaw(const String&, String& imageFileName,
+	IIndexArr&, cv::Size& imageSize,
+	KMatrix&, RMatrix&, CMatrix&,
+	Depth& dMin, Depth& dMax,
+	DepthMap&, NormalMap&, ConfidenceMap&, ViewsMap&,
+	unsigned flags=HeaderDepthDataRaw::CONTENT_MASK/*maps to read, all of them by default*/,
+	bool* pbConfAdjusted=NULL/*receives the stored CONF_ADJUSTED flag*/);
+
+MVS_API void CompareDepthMaps(const DepthMap& depthMap, const DepthMap& depthMapGT, uint32_t idxImage, float threshold=0.01f);
+MVS_API void CompareNormalMaps(const NormalMap& normalMap, const NormalMap& normalMapGT, uint32_t idxImage);
+/*----------------------------------------------------------------*/
+
+} // namespace MVS
+
+#endif // _MVS_DEPTHMAP_H_

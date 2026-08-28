@@ -334,6 +334,8 @@ if(JMENGINE_ENABLE_TEXTURE_MAPPING)
     add_library(JMEngine_texture STATIC
         include/JMEngine/texture/TextureMapper.h
         src/texture/TextureMapper.cpp
+        src/texture/TextureMapperOpenMVS.cpp
+        src/texture/TextureMapperOpenMVS.h
         src/texture/TextureMapperCuda.cpp
         src/texture/TextureMapperCuda.h
         src/texture/TextureMapperCudaApi.h
@@ -344,6 +346,28 @@ if(JMENGINE_ENABLE_TEXTURE_MAPPING)
             $<INSTALL_INTERFACE:include>
     )
     target_link_libraries(JMEngine_texture PUBLIC JMEngine)
+    if(WIN32)
+        set(_JMENGINE_OPENMVS_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/third_party/win32/OpenMVS")
+        set(_JMENGINE_OPENCV_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/third_party/win32/opencv")
+        set(_JMENGINE_EIGEN_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/third_party/win32/eigen3")
+        if(EXISTS "${_JMENGINE_OPENMVS_ROOT}/include/OpenMVS/MVS.h")
+            target_include_directories(JMEngine_texture PRIVATE
+                "${_JMENGINE_OPENMVS_ROOT}/include"
+                "${_JMENGINE_OPENCV_ROOT}/include"
+                "${_JMENGINE_EIGEN_ROOT}")
+            target_link_libraries(JMEngine_texture PRIVATE
+                "${_JMENGINE_OPENMVS_ROOT}/lib/OpenMVS/MVS.lib"
+                "${_JMENGINE_OPENMVS_ROOT}/lib/OpenMVS/SFM.lib"
+                "${_JMENGINE_OPENMVS_ROOT}/lib/OpenMVS/IO.lib"
+                "${_JMENGINE_OPENMVS_ROOT}/lib/OpenMVS/Math.lib"
+                "${_JMENGINE_OPENMVS_ROOT}/lib/OpenMVS/Common.lib"
+                "${_JMENGINE_OPENCV_ROOT}/lib/opencv_core480.lib"
+                "${_JMENGINE_OPENCV_ROOT}/lib/opencv_imgcodecs480.lib"
+                "${_JMENGINE_OPENCV_ROOT}/lib/opencv_imgproc480.lib")
+        else()
+            message(FATAL_ERROR "JMEngine texture mapping requires vendored OpenMVS at ${_JMENGINE_OPENMVS_ROOT}")
+        endif()
+    endif()
     target_compile_features(JMEngine_texture PUBLIC cxx_std_17)
     set_target_properties(JMEngine_texture PROPERTIES
         CXX_STANDARD 17
